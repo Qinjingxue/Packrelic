@@ -362,7 +362,11 @@ New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 
 if (-not $SkipTests) {
     Write-Step "Running acceptance tests"
-    Invoke-Native -FilePath (Join-Path $repoRoot "run_acceptance_tests.ps1") -Arguments @("-NoWait")
+    Invoke-Native -FilePath "powershell" -Arguments @(
+        "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $repoRoot "run_acceptance_tests.ps1"),
+        "-NoWait"
+    )
 } else {
     Write-Host "Skipping acceptance tests by request." -ForegroundColor Yellow
 }
