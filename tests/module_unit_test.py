@@ -44,6 +44,48 @@ class ModuleUnitTest(unittest.TestCase):
             self.assertEqual(context.scene_type, "rpg_maker_game")
             self.assertIn("www_dir", context.markers)
 
+    def test_scene_context_detects_renpy(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "game").mkdir(parents=True)
+            (root / "renpy").mkdir(parents=True)
+            (root / "game" / "script.rpy").write_text("label start:\n    return\n", encoding="utf-8")
+            engine = self.make_engine(root)
+            context = engine._detect_scene_context(str(root))
+            self.assertEqual(context.scene_type, "renpy_game")
+            self.assertIn("game_dir", context.markers)
+
+    def test_scene_context_detects_godot(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "godot_game.exe").write_bytes(b"MZ")
+            (root / "data.pck").write_bytes(b"x")
+            engine = self.make_engine(root)
+            context = engine._detect_scene_context(str(root))
+            self.assertEqual(context.scene_type, "godot_game")
+            self.assertIn("data_pck", context.markers)
+
+    def test_scene_context_detects_nwjs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "nw.exe").write_bytes(b"MZ")
+            (root / "package.nw").write_bytes(b"x")
+            engine = self.make_engine(root)
+            context = engine._detect_scene_context(str(root))
+            self.assertEqual(context.scene_type, "nwjs_game")
+            self.assertIn("package_nw", context.markers)
+
+    def test_scene_context_detects_electron(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "resources").mkdir(parents=True)
+            (root / "app.exe").write_bytes(b"MZ")
+            (root / "resources" / "app.asar").write_bytes(b"x")
+            engine = self.make_engine(root)
+            context = engine._detect_scene_context(str(root))
+            self.assertEqual(context.scene_type, "electron_app_game")
+            self.assertIn("app_asar", context.markers)
+
     def test_classify_extract_error(self):
         with tempfile.TemporaryDirectory() as td:
             engine = self.make_engine(Path(td))

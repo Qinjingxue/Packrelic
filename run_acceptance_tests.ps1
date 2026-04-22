@@ -105,10 +105,10 @@ $python = Get-PythonCommand
 
 Invoke-TestStep -Label "CLI unit tests" -Command @($python, "-m", "unittest", "tests.cli_unit_test")
 Invoke-TestStep -Label "Module unit tests" -Command @($python, "-m", "unittest", "tests.module_unit_test")
+Invoke-TestStep -Label "Game runtime semantic tests" -Command @($python, "-m", "unittest", "tests.game_runtime_semantic_test")
 Invoke-TestStep -Label "Edge case acceptance tests" -Command @($python, "tests/edge_cases_test.py")
 Invoke-TestStep -Label "Relationship grouping acceptance tests" -Command @($python, "tests/relationship_grouping_test.py")
-Invoke-TestStep -Label "RPG Maker semantic acceptance test" -Command @($python, "tests/rpgmaker_semantic_test.py")
-Invoke-TestStep -Label "Disguised detection profiling test" -Command @($python, "tests/disguised_detection_profile_test.py", "fixtures")
+Invoke-TestStep -Label "Disguised detection profiling test" -Command @($python, "tests/disguised_detection_profile_test.py")
 
 Write-Host ""
 Write-Host "Summary" -ForegroundColor Cyan

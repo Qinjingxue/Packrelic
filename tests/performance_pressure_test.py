@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 import edge_cases_test as helpers
+from test_config import get_temp_root
 
 
 ROOT = Path(__file__).resolve().parent
@@ -16,6 +17,7 @@ REPO_ROOT = ROOT.parent
 LARGE_FILE_SIZE = 1 * 1024 * 1024 + 256 * 1024
 ARCHIVE_FILE_SIZE = 2 * 1024 * 1024 + 128 * 1024
 TEST_MIN_INSPECTION_SIZE_BYTES = 0
+TEMP_ROOT = get_temp_root()
 
 
 def build_parser():
@@ -137,6 +139,7 @@ def generate_pressure_corpus(
         "encrypted_disguised_archives": [],
         "containers": [],
     }
+    true_formats = ["7z", "zip", "rar"] if helpers.has_rar_support() else ["7z", "zip"]
 
     regular_exts = [".jpg", ".png", ".mp4", ".dll", ".pak", ".bin", ".dat", ".log"]
     for index in range(normal_count):
@@ -145,7 +148,6 @@ def generate_pressure_corpus(
         write_large_file(file_path, f"normal_{index}")
         categories["normal"].append(file_path.name)
 
-    true_formats = ["7z", "zip", "rar"]
     for index in range(true_archive_count):
         archive_format = true_formats[index % len(true_formats)]
         metadata = create_true_archive(root_dir, f"real_archive_{index:02d}", archive_format)
@@ -420,7 +422,11 @@ def compute_ratios(dataset_summary, metrics):
 
 
 def run_single_pressure_case(config, InstrumentedEngine):
-    with tempfile.TemporaryDirectory(prefix="performance-pressure-", dir=str(ROOT)) as temp_dir:
+    temp_dir_kwargs = {"prefix": "performance-pressure-"}
+    if TEMP_ROOT is not None:
+        TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        temp_dir_kwargs["dir"] = str(TEMP_ROOT)
+    with tempfile.TemporaryDirectory(**temp_dir_kwargs) as temp_dir:
         work_dir = Path(temp_dir)
         dataset = generate_pressure_corpus(
             root_dir=work_dir,

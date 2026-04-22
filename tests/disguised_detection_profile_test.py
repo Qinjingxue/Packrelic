@@ -15,6 +15,11 @@ if str(REPO_ROOT) not in sys.path:
 from smart_unpacker import DecompressionEngine
 from smart_unpacker.detection.inspector import ArchiveInspector
 from smart_unpacker.support.types import InspectionResult
+from synthetic_samples import create_profile_dataset, temporary_generated_dir
+
+
+DEFAULT_PROFILE_TARGET = "generated"
+DEFAULT_PROFILE_FOCUS = ["fakepicture.jpg"]
 
 
 def round_float(value: float) -> float:
@@ -192,8 +197,8 @@ def build_parser():
     parser.add_argument(
         "path",
         nargs="?",
-        default=str(REPO_ROOT / "fixtures"),
-        help="Target file or directory to profile. Defaults to fixtures/.",
+        default=DEFAULT_PROFILE_TARGET,
+        help="Target file or directory to profile. Defaults to a generated synthetic dataset.",
     )
     parser.add_argument(
         "--limit",
@@ -204,7 +209,7 @@ def build_parser():
     parser.add_argument(
         "--focus",
         nargs="*",
-        default=["fakepicture.jpg"],
+        default=DEFAULT_PROFILE_FOCUS,
         help="Basename filters used to highlight specific heavy disguised samples.",
     )
     return parser
@@ -296,57 +301,69 @@ def summarize_scan_tasks(tasks, target_root: Path, limit: int) -> list[dict]:
 
 def main():
     args = build_parser().parse_args()
-    target_path = Path(args.path).resolve()
-    if not target_path.exists():
-        raise SystemExit(f"Target does not exist: {target_path}")
+    temp_ctx = None
+    if args.path == DEFAULT_PROFILE_TARGET:
+        temp_ctx = temporary_generated_dir("generated-profile-")
+        generated_dir = Path(temp_ctx.name)
+        create_profile_dataset(generated_dir)
+        target_path = generated_dir.resolve()
+    else:
+        target_path = Path(args.path).resolve()
+        if not target_path.exists():
+            raise SystemExit(f"Target does not exist: {target_path}")
 
-    root_dir = str(target_path if target_path.is_dir() else target_path.parent)
-    inspect_engine = ProfilingEngine(root_dir, [], None, lambda: None, selected_paths=[str(target_path)])
-    inspect_engine.max_workers_limit = 1
-    inspect_engine.current_concurrency_limit = 1
+    try:
+        root_dir = str(target_path if target_path.is_dir() else target_path.parent)
+        inspect_engine = ProfilingEngine(root_dir, [], None, lambda: None, selected_paths=[str(target_path)])
+        inspect_engine.max_workers_limit = 1
+        inspect_engine.current_concurrency_limit = 1
 
-    inspect_start = time.perf_counter()
-    inspection_records = inspect_files(inspect_engine, target_path)
-    inspect_elapsed = time.perf_counter() - inspect_start
+        inspect_start = time.perf_counter()
+        inspection_records = inspect_files(inspect_engine, target_path)
+        inspect_elapsed = time.perf_counter() - inspect_start
 
-    scan_engine = ProfilingEngine(root_dir, [], None, lambda: None, selected_paths=[str(target_path)])
-    scan_engine.max_workers_limit = 1
-    scan_engine.current_concurrency_limit = 1
-    scan_start = time.perf_counter()
-    tasks = scan_engine.scan_archives_readonly()
-    scan_elapsed = time.perf_counter() - scan_start
+        scan_engine = ProfilingEngine(root_dir, [], None, lambda: None, selected_paths=[str(target_path)])
+        scan_engine.max_workers_limit = 1
+        scan_engine.current_concurrency_limit = 1
+        scan_start = time.perf_counter()
+        tasks = scan_engine.scan_archives_readonly()
+        scan_elapsed = time.perf_counter() - scan_start
 
-    focus_names = {name for name in args.focus}
-    total_inspect_seconds = sum(record["total_seconds"] for record in inspection_records)
+        focus_names = {name for name in args.focus}
+        total_inspect_seconds = sum(record["total_seconds"] for record in inspection_records)
 
-    output = {
-        "target": str(target_path),
-        "file_count": len(inspection_records),
-        "task_count": len(tasks),
-        "timing": {
-            "inspect_elapsed_seconds": round_float(inspect_elapsed),
-            "scan_elapsed_seconds": round_float(scan_elapsed),
-            "sum_file_inspect_seconds": round_float(total_inspect_seconds),
-        },
-        "engine_metrics": {
-            "inspect_calls": inspect_engine.call_metrics["inspect_calls"],
-            "inspect_seconds_total": round_float(inspect_engine.call_metrics["inspect_seconds_total"]),
-            "inspect_probe_calls": inspect_engine.call_metrics["probe_calls"],
-            "inspect_probe_seconds_total": round_float(inspect_engine.call_metrics["probe_seconds_total"]),
-            "inspect_validate_calls": inspect_engine.call_metrics["validate_calls"],
-            "inspect_validate_seconds_total": round_float(inspect_engine.call_metrics["validate_seconds_total"]),
-            "scan_readonly_calls": scan_engine.call_metrics["scan_readonly_calls"],
-            "scan_readonly_seconds_total": round_float(scan_engine.call_metrics["scan_readonly_seconds_total"]),
-            "scan_probe_calls": scan_engine.call_metrics["probe_calls"],
-            "scan_probe_seconds_total": round_float(scan_engine.call_metrics["probe_seconds_total"]),
-            "scan_validate_calls": scan_engine.call_metrics["validate_calls"],
-            "scan_validate_seconds_total": round_float(scan_engine.call_metrics["validate_seconds_total"]),
-        },
-        "hot_steps": summarize_hot_steps(inspection_records, args.limit),
-        "hot_files": summarize_hottest_files(inspection_records, args.limit, focus_names),
-        "scan_task_samples": summarize_scan_tasks(tasks, target_path if target_path.is_dir() else target_path.parent, args.limit),
-    }
-    print(json.dumps(output, ensure_ascii=False, indent=2))
+        output = {
+            "target": str(target_path),
+            "generated_target": temp_ctx is not None,
+            "file_count": len(inspection_records),
+            "task_count": len(tasks),
+            "timing": {
+                "inspect_elapsed_seconds": round_float(inspect_elapsed),
+                "scan_elapsed_seconds": round_float(scan_elapsed),
+                "sum_file_inspect_seconds": round_float(total_inspect_seconds),
+            },
+            "engine_metrics": {
+                "inspect_calls": inspect_engine.call_metrics["inspect_calls"],
+                "inspect_seconds_total": round_float(inspect_engine.call_metrics["inspect_seconds_total"]),
+                "inspect_probe_calls": inspect_engine.call_metrics["probe_calls"],
+                "inspect_probe_seconds_total": round_float(inspect_engine.call_metrics["probe_seconds_total"]),
+                "inspect_validate_calls": inspect_engine.call_metrics["validate_calls"],
+                "inspect_validate_seconds_total": round_float(inspect_engine.call_metrics["validate_seconds_total"]),
+                "scan_readonly_calls": scan_engine.call_metrics["scan_readonly_calls"],
+                "scan_readonly_seconds_total": round_float(scan_engine.call_metrics["scan_readonly_seconds_total"]),
+                "scan_probe_calls": scan_engine.call_metrics["probe_calls"],
+                "scan_probe_seconds_total": round_float(scan_engine.call_metrics["probe_seconds_total"]),
+                "scan_validate_calls": scan_engine.call_metrics["validate_calls"],
+                "scan_validate_seconds_total": round_float(scan_engine.call_metrics["validate_seconds_total"]),
+            },
+            "hot_steps": summarize_hot_steps(inspection_records, args.limit),
+            "hot_files": summarize_hottest_files(inspection_records, args.limit, focus_names),
+            "scan_task_samples": summarize_scan_tasks(tasks, target_path if target_path.is_dir() else target_path.parent, args.limit),
+        }
+        print(json.dumps(output, ensure_ascii=False, indent=2))
+    finally:
+        if temp_ctx is not None:
+            temp_ctx.cleanup()
 
 
 if __name__ == "__main__":

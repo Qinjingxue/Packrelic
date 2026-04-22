@@ -5,11 +5,13 @@ import tempfile
 from pathlib import Path
 
 import edge_cases_test as helpers
+from test_config import get_temp_root
 
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parent
 MIN_NOISE_BYTES = 2 * 1024 * 1024 + 12345
+TEMP_ROOT = get_temp_root()
 
 
 def write_noise_file(path: Path, seed: str, exe_stub=False):
@@ -127,21 +129,25 @@ def scenario_interleaved_multi_groups(base_dir: Path):
     source_c = scenario_dir / "src_mix_c"
     helpers.write_payload(source_a, "relation_mix_a")
     helpers.write_payload(source_b, "relation_mix_b")
-    helpers.write_payload(source_c, "relation_mix_c")
     helpers.create_7z_archive(source_a, scenario_dir / "mix_a.7z", split=True)
     helpers.create_zip_archive(source_b, scenario_dir / "mix_b.zip", split=True)
-    helpers.create_rar_archive(source_c, scenario_dir / "mix_c.rar", split=True)
+    include_rar = helpers.has_rar_support()
+    if include_rar:
+        helpers.write_payload(source_c, "relation_mix_c")
+        helpers.create_rar_archive(source_c, scenario_dir / "mix_c.rar", split=True)
 
     tasks, logs = run_scan(scenario_dir)
     expected = {
         "mix_a": ["mix_a.7z.001", "mix_a.7z.002", "mix_a.7z.003"],
         "mix_b": ["mix_b.zip.001", "mix_b.zip.002", "mix_b.zip.003"],
-        "mix_c": ["mix_c.part1.rar", "mix_c.part2.rar", "mix_c.part3.rar"],
     }
+    if include_rar:
+        expected["mix_c"] = ["mix_c.part1.rar", "mix_c.part2.rar", "mix_c.part3.rar"]
     issue = assert_exact_groups(tasks, expected)
     return {
         "scenario": "同目录多组分卷交错存在",
         "ok": issue is None,
+        "rar_enabled": include_rar,
         "issue": issue,
         "tasks": tasks,
         "logs_tail": logs[-60:],
@@ -228,7 +234,11 @@ def scenario_fake_disguised_part_files(base_dir: Path):
 def main():
     helpers.ensure_prerequisites()
 
-    with tempfile.TemporaryDirectory(prefix="relationship-grouping-", dir=str(ROOT)) as temp_dir:
+    temp_dir_kwargs = {"prefix": "relationship-grouping-"}
+    if TEMP_ROOT is not None:
+        TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        temp_dir_kwargs["dir"] = str(TEMP_ROOT)
+    with tempfile.TemporaryDirectory(**temp_dir_kwargs) as temp_dir:
         base_dir = Path(temp_dir)
         results = [
             scenario_similar_unrelated_not_grouped(base_dir),

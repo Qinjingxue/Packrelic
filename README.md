@@ -75,6 +75,16 @@ GitHub Actions 使用的 CI 测试入口：
 .\scripts\run_ci_tests.ps1
 ```
 
+测试相关的本地路径和工具查找规则统一放在：
+
+```text
+tests/test_config.json
+```
+
+伪装图片样本和游戏运行目录语义样本默认优先使用测试代码动态生成的合成样本，不再依赖仓库外的真实商业文件。
+当前合成样本覆盖的目录语义家族包括：RPG Maker、Ren'Py、Godot、NW.js、Electron。
+完整测试里的 RAR 相关样本仍需要 `Rar.exe`；如果缺失，会自动跳过依赖 RAR 样本生成的部分，rar.exe目录配置在tests\test_config.json
+RPG Maker 的外层解压成功、内层资源归档不继续递归解压，也已经并入统一的 `tests.game_runtime_semantic_test`，不再单独维护独立脚本。
 
 ### 依赖
 

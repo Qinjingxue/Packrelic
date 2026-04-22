@@ -61,11 +61,9 @@ $python = Get-PythonCommand
 Invoke-TestStep -Label "CLI and module unit tests" -Command @(
     $python, "-m", "unittest",
     "tests.cli_unit_test",
-    "tests.module_unit_test"
-)
-
-Invoke-TestStep -Label "CLI inspect smoke test" -Command @(
-    $python, "smart-unpacker.py", "inspect", ".\fixtures", "--json"
+    "tests.module_unit_test",
+    "tests.generated_samples_smoke_test",
+    "tests.game_runtime_semantic_test"
 )
 
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @(
@@ -73,7 +71,7 @@ Invoke-TestStep -Label "CLI passwords smoke test" -Command @(
 )
 
 Invoke-TestStep -Label "Disguised detection profile test" -Command @(
-    $python, "tests\disguised_detection_profile_test.py", "fixtures", "--limit", "5"
+    $python, "tests\disguised_detection_profile_test.py", "--limit", "5"
 )
 
 Write-Host ""

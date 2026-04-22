@@ -14,16 +14,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from smart_unpacker import DecompressionEngine
+from test_config import get_temp_root, get_test_tools
 
-SEVEN_Z = next(
-    (path for path in (REPO_ROOT / "tools" / "7z.exe", REPO_ROOT / "tools" / "7zip" / "7z.exe") if path.is_file()),
-    REPO_ROOT / "tools" / "7z.exe",
-)
-SEVEN_Z_SFX = next(
-    (path for path in (REPO_ROOT / "tools" / "7zCon.sfx", REPO_ROOT / "tools" / "7zip" / "7zCon.sfx") if path.is_file()),
-    REPO_ROOT / "tools" / "7zCon.sfx",
-)
-RAR_EXE = Path(r"C:\portable\winrar\Rar.exe")
+TEST_TOOLS = get_test_tools()
+SEVEN_Z = TEST_TOOLS["seven_zip"] or (REPO_ROOT / "tools" / "7z.exe")
+SEVEN_Z_SFX = TEST_TOOLS["seven_zip_sfx"] or (REPO_ROOT / "tools" / "7zCon.sfx")
+RAR_EXE = TEST_TOOLS["rar_exe"]
+TEMP_ROOT = get_temp_root()
 
 VOLUME_SIZE = "1m"
 PAYLOAD_BYTES = 2 * 1024 * 1024 + 333 * 1024
@@ -89,9 +86,22 @@ def run_cmd(cmd, cwd):
 
 
 def ensure_prerequisites():
-    missing = [str(path) for path in (SEVEN_Z, SEVEN_Z_SFX, RAR_EXE) if not path.is_file()]
+    missing = [str(path) for path in (SEVEN_Z, SEVEN_Z_SFX) if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"Missing required files: {missing}")
+
+
+def has_rar_support():
+    return RAR_EXE is not None and RAR_EXE.is_file()
+
+
+def get_tool_summary():
+    return {
+        "seven_zip": str(SEVEN_Z),
+        "seven_zip_sfx": str(SEVEN_Z_SFX),
+        "rar_exe": str(RAR_EXE) if RAR_EXE else None,
+        "rar_available": has_rar_support(),
+    }
 
 
 def write_payload(source_dir: Path, case_id: str):
@@ -151,6 +161,11 @@ def create_zip_archive(source_dir: Path, output_path: Path, password=None, split
 
 
 def create_rar_archive(source_dir: Path, output_path: Path, password=None, split=False, sfx=False):
+    if not has_rar_support():
+        raise RuntimeError(
+            "RAR support is unavailable. Set SMART_UNPACKER_RAR_EXE to a valid Rar.exe path "
+            "or install WinRAR so the acceptance tests can generate RAR fixtures."
+        )
     cmd = [str(RAR_EXE), "a", "-ep1", "-r", "-idq", "-m0", "-ma5", "-y"]
     if password:
         cmd.append(f"-hp{password}")
@@ -296,8 +311,8 @@ def choose_split_entry(output_dir: Path, archive_name: str, archive_format: str)
     raise RuntimeError(f"Unable to determine split entry for {archive_name}: {[p.name for p in files]}")
 
 
-def build_case_specs():
-    return [
+def build_case_specs(include_rar: bool = True):
+    specs = [
         {"id": "plain_single_7z", "base_name": "plain_single_7z", "format": "7z", "family": "single", "password": None, "fault": "none"},
         {"id": "plain_single_rar", "base_name": "plain_single_rar", "format": "rar", "family": "single", "password": None, "fault": "none"},
         {"id": "plain_single_zip", "base_name": "plain_single_zip", "format": "zip", "family": "single", "password": None, "fault": "none"},
@@ -347,12 +362,15 @@ def build_case_specs():
         {"id": "pwd789_corrupted_sfx_7z", "base_name": "pwd789_corrupted_sfx_7z", "format": "7z", "family": "sfx", "password": PASSWORD_789, "fault": "corrupted"},
         {"id": "pwd789_corrupted_sfx_rar", "base_name": "pwd789_corrupted_sfx_rar", "format": "rar", "family": "sfx", "password": PASSWORD_789, "fault": "corrupted"},
     ]
+    if include_rar:
+        return specs
+    return [spec for spec in specs if spec["format"] != "rar"]
 
 
 def create_dataset(dataset_dir: Path):
     dataset_dir.mkdir(parents=True, exist_ok=True)
     cases = []
-    for spec in build_case_specs():
+    for spec in build_case_specs(include_rar=has_rar_support()):
         cases.append(make_case(dataset_dir, spec))
     return cases
 
@@ -563,7 +581,11 @@ def evaluate_run(workspace_dir: Path, passwords, staged_cases, disguised: bool):
 
 def run_scenario(dataset_dir: Path, scenario, disguised: bool):
     mode_label = "disguised" if disguised else "original"
-    with tempfile.TemporaryDirectory(prefix=f"acceptance-{scenario['id']}-{mode_label}-", dir=str(ROOT)) as temp_dir:
+    temp_dir_kwargs = {"prefix": f"acceptance-{scenario['id']}-{mode_label}-"}
+    if TEMP_ROOT is not None:
+        TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        temp_dir_kwargs["dir"] = str(TEMP_ROOT)
+    with tempfile.TemporaryDirectory(**temp_dir_kwargs) as temp_dir:
         workspace_dir = Path(temp_dir)
         staged_cases = stage_corpus(dataset_dir, workspace_dir, disguised=disguised)
         result = evaluate_run(
@@ -590,8 +612,13 @@ def run_scenario(dataset_dir: Path, scenario, disguised: bool):
 def main():
     ensure_prerequisites()
     random.seed(20260421)
+    tool_summary = get_tool_summary()
 
-    with tempfile.TemporaryDirectory(prefix="acceptance-dataset-", dir=str(ROOT)) as dataset_temp_dir:
+    temp_dir_kwargs = {"prefix": "acceptance-dataset-"}
+    if TEMP_ROOT is not None:
+        TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        temp_dir_kwargs["dir"] = str(TEMP_ROOT)
+    with tempfile.TemporaryDirectory(**temp_dir_kwargs) as dataset_temp_dir:
         dataset_dir = Path(dataset_temp_dir)
         cases = create_dataset(dataset_dir)
 
@@ -604,6 +631,7 @@ def main():
         output = {
             "overall_ok": overall_ok,
             "case_count": len(cases),
+            "tool_summary": tool_summary,
             "scenario_count": len(scenario_results),
             "passed_scenarios": sum(1 for item in scenario_results if item["ok"]),
             "failed_scenarios": sum(1 for item in scenario_results if not item["ok"]),

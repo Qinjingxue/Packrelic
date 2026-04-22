@@ -1,0 +1,25 @@
+{
+  "paths": {
+    "reports_dir": "reports",
+    "temp_root": null
+  },
+  "tools": {
+    "seven_zip_candidates": [
+      "tools/7z.exe",
+      "tools/7zip/7z.exe"
+    ],
+    "seven_zip_sfx_candidates": [
+      "tools/7zCon.sfx",
+      "tools/7zip/7zCon.sfx"
+    ],
+    "rar_candidates": [
+      "env:SMART_UNPACKER_RAR_EXE",
+      "env:RAR_EXE",
+      "cmd:rar",
+      "cmd:Rar",
+      "C:/Program Files/WinRAR/Rar.exe",
+      "C:/Program Files (x86)/WinRAR/Rar.exe",
+      "C:/portable/winrar/Rar.exe"
+    ]
+  }
+}
