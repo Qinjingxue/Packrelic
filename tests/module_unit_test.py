@@ -86,6 +86,37 @@ class ModuleUnitTest(unittest.TestCase):
             self.assertEqual(context.scene_type, "electron_app_game")
             self.assertIn("app_asar", context.markers)
 
+    def test_strong_scene_directory_scan_short_circuits_before_file_inspection(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "www" / "js").mkdir(parents=True)
+            (root / "www" / "data").mkdir(parents=True)
+            (root / "Game.exe").write_bytes(b"MZ")
+            (root / "www" / "js" / "rpg_core.js").write_text("// core", encoding="utf-8")
+            (root / "www" / "fonts").mkdir(parents=True)
+            (root / "www" / "fonts" / "payload.7z").write_bytes(b"7z\xbc\xaf'\x1c" + b"x" * 1024)
+            engine = self.make_engine(root)
+
+            with patch.object(engine, "_collect_archive_groups") as collect_groups:
+                tasks = engine.scan_archives_readonly()
+
+            self.assertEqual(tasks, [])
+            collect_groups.assert_not_called()
+
+    def test_should_scan_output_dir_skips_strong_scene_directory_before_candidate_walk(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "resources").mkdir(parents=True)
+            (root / "app.exe").write_bytes(b"MZ")
+            (root / "resources" / "app.asar").write_bytes(b"x")
+            engine = self.make_engine(root)
+
+            with patch.object(engine, "_iter_scan_candidate_files") as iter_candidates:
+                should_scan = engine.should_scan_output_dir(str(root))
+
+            self.assertFalse(should_scan)
+            iter_candidates.assert_not_called()
+
     def test_classify_extract_error(self):
         with tempfile.TemporaryDirectory() as td:
             engine = self.make_engine(Path(td))

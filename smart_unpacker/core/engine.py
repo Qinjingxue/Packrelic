@@ -197,6 +197,12 @@ class Engine:
         return False
 
     def should_scan_output_dir(self, target_dir):
+        scene_context = self._detect_scene_context(target_dir)
+        if scene_context.scene_type != "generic":
+            self.log(
+                f"[SCAN] 跳过强场景目录: {scene_context.scene_type} @ {os.path.basename(target_dir) or '根目录'}"
+            )
+            return False
         for root, filename in self._iter_scan_candidate_files(target_dir):
             if self._should_consider_file_for_nested_scan(root, filename):
                 return True
@@ -281,6 +287,9 @@ class Engine:
 
     def _scan_directory_target_readonly(self, target_dir, scene_context=None):
         scene_context = scene_context or self._detect_scene_context(target_dir)
+        if scene_context.scene_type != "generic":
+            self.log(f"[SCAN] 强场景目录已整目录跳过: {scene_context.scene_type} @ {os.path.basename(target_dir) or '根目录'}")
+            return []
 
         groups = self._collect_archive_groups(target_dir, scene_context)
         archives = []
