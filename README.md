@@ -75,7 +75,6 @@ GitHub Actions 使用的 CI 测试入口：
 .\scripts\run_ci_tests.ps1
 ```
 
-这套 CI 只跑 GitHub Runner 上稳定可复现的单元测试和 smoke test，不依赖本地专有样本或 `C:\portable\winrar\Rar.exe`。
 
 ### 依赖
 
