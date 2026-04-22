@@ -97,3 +97,7 @@ python smart-unpacker.py passwords
 ### 说明
 
 本软件虽然经过复杂场景测试，但不保证一定不会误删文件，使用者请自负责任，开发者不承担文件损失责任
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](./LICENSE).

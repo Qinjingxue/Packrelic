@@ -101,3 +101,7 @@ python smart-unpacker.py passwords
 ### 注意事項
 
 このソフトウェアは複雑なケースでテストされていますが、ファイルの誤削除が絶対に起きないことを保証するものではありません。利用は自己責任でお願いします。開発者はファイル損失について責任を負いません。
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](./LICENSE).

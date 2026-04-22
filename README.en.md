@@ -101,3 +101,7 @@ After the build finishes, it generates:
 ### Disclaimer
 
 Although this software has been tested under complex scenarios, it does not guarantee that files will never be deleted by mistake. Use it at your own risk. The developer is not responsible for file loss.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](./LICENSE).
