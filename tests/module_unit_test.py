@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 import json
+from collections import deque
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -325,11 +326,567 @@ class ModuleUnitTest(unittest.TestCase):
     def test_resource_locator_reads_min_inspection_size_config(self):
         with tempfile.TemporaryDirectory() as td:
             config_path = Path(td) / "smart_unpacker_config.json"
-            config_path.write_text(json.dumps({"min_inspection_size_bytes": 2048}), encoding="utf-8")
+            config_path.write_text(json.dumps({"extraction_rules": {"min_inspection_size_bytes": 2048}}), encoding="utf-8")
             locator = ResourceLocator()
             with patch.object(locator, "get_resource_base_path", return_value=td):
                 config = locator.get_app_config()
             self.assertEqual(config.min_inspection_size_bytes, 2048)
+
+    def test_resource_locator_reads_detection_config_overrides(self):
+        with tempfile.TemporaryDirectory() as td:
+            config_path = Path(td) / "smart_unpacker_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "extensions": {
+                                "standard_archive_exts": [".foo"],
+                                "strict_semantic_skip_exts": [".blocked"],
+                                "carrier_exts": [".asset"],
+                            },
+                            "thresholds": {
+                                "archive_score_threshold": 9,
+                                "maybe_archive_threshold": 2,
+                            },
+                            "scene_rules": [{"scene_type": "custom_scene"}],
+                        },
+                        "post_extract": {
+                            "archive_cleanup_mode": "delete",
+                            "flatten_single_directory": False,
+                        },
+                        "recursive_extract": 3,
+                        "performance": {
+                            "embedded_archive_scan": {
+                                "stream_chunk_size": 4096,
+                                "min_prefix": 8,
+                                "min_tail_bytes": 64,
+                                "max_hits": 2,
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            locator = ResourceLocator()
+            with patch.object(locator, "get_resource_base_path", return_value=td):
+                config = locator.get_app_config()
+
+            self.assertEqual(config.detection.standard_archive_exts, {".foo"})
+            self.assertEqual(config.detection.strict_semantic_skip_exts, {".blocked"})
+            self.assertEqual(config.detection.archive_score_threshold, 9)
+            self.assertIn(b"PK\x03\x04", config.detection.magic_signatures)
+            self.assertTrue(config.detection.split_first_patterns)
+            self.assertTrue(config.detection.disguised_archive_name_patterns)
+            self.assertEqual(config.detection.carrier_exts, {".asset"})
+            self.assertEqual(config.detection.scene_rules[0]["scene_type"], "custom_scene")
+            self.assertEqual(config.detection.loose_scan.stream_chunk_size, 4096)
+            self.assertEqual(config.post_extract.archive_cleanup_mode, "delete")
+            self.assertFalse(config.post_extract.flatten_single_directory)
+            self.assertEqual(config.recursive_extract.mode, "fixed")
+            self.assertEqual(config.recursive_extract.max_rounds, 3)
+
+    def test_resource_locator_reads_recursive_extract_modes(self):
+        with tempfile.TemporaryDirectory() as td:
+            locator = ResourceLocator()
+            config_path = Path(td) / "smart_unpacker_config.json"
+
+            config_path.write_text(json.dumps({"recursive_extract": "*"}), encoding="utf-8")
+            with patch.object(locator, "get_resource_base_path", return_value=td):
+                config = locator.get_app_config()
+            self.assertEqual(config.recursive_extract.mode, "infinite")
+
+            config_path.write_text(json.dumps({"recursive_extract": "?"}), encoding="utf-8")
+            with patch.object(locator, "get_resource_base_path", return_value=td):
+                config = locator.get_app_config()
+            self.assertEqual(config.recursive_extract.mode, "prompt")
+
+            config_path.write_text(json.dumps({"recursive_extract": 2}), encoding="utf-8")
+            with patch.object(locator, "get_resource_base_path", return_value=td):
+                config = locator.get_app_config()
+            self.assertEqual(config.recursive_extract.mode, "fixed")
+            self.assertEqual(config.recursive_extract.max_rounds, 2)
+
+    def test_resource_locator_ignores_invalid_detection_overrides(self):
+        with tempfile.TemporaryDirectory() as td:
+            config_path = Path(td) / "smart_unpacker_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "extensions": {
+                                "standard_archive_exts": "not-a-list",
+                            },
+                            "scene_rules": "not-a-list",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            locator = ResourceLocator()
+            with patch.object(locator, "get_resource_base_path", return_value=td):
+                config = locator.get_app_config()
+
+            self.assertEqual(config.detection.standard_archive_exts, set())
+            self.assertEqual(config.detection.scene_rules, [])
+            self.assertIn(b"PK\x03\x04", config.detection.magic_signatures)
+            self.assertTrue(config.detection.split_first_patterns)
+            self.assertTrue(config.detection.disguised_archive_name_patterns)
+
+    def test_resource_locator_reads_blacklist_and_ignores_invalid_regex(self):
+        with tempfile.TemporaryDirectory() as td:
+            config_path = Path(td) / "smart_unpacker_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "blacklist": {
+                                "directory_patterns": ["weapon", "["],
+                                "filename_patterns": [r"demo\.zip", "("],
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            locator = ResourceLocator()
+            with patch.object(locator, "get_resource_base_path", return_value=td):
+                config = locator.get_app_config()
+
+            self.assertEqual(config.detection.blacklist.directory_patterns, ("weapon",))
+            self.assertEqual(config.detection.blacklist.filename_patterns, (r"demo\.zip",))
+
+    def test_directory_blacklist_skips_matching_directory_names_and_paths(self):
+        patterns = ["weapon", r"FBX\\weapon", r".*\\weapon", "FBX/weapon", ".*/weapon"]
+        for pattern in patterns:
+            with self.subTest(pattern=pattern), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                weapon_dir = root / "FBX" / "weapon"
+                weapon_dir.mkdir(parents=True)
+                (weapon_dir / "payload.zip").write_bytes(b"PK\x03\x04" + b"x")
+                (root / "keep.zip").write_bytes(b"PK\x03\x04" + b"x")
+                (root / "smart_unpacker_config.json").write_text(
+                    json.dumps(
+                        {
+                            "extraction_rules": {
+                                "extensions": {"standard_archive_exts": [".zip"]},
+                                "blacklist": {"directory_patterns": [pattern]},
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                    engine = self.make_engine(root)
+
+                candidates = {
+                    engine._windows_relpath(os.path.join(scan_root, filename), str(root))
+                    for scan_root, filename in engine._iter_scan_candidate_files(str(root))
+                }
+
+                self.assertIn("keep.zip", candidates)
+                self.assertNotIn(r"FBX\weapon\payload.zip", candidates)
+
+    def test_filename_blacklist_supports_slash_relative_path_patterns(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            nested = root / "FBX" / "weapon"
+            nested.mkdir(parents=True)
+            (nested / "demo.zip").write_bytes(b"PK\x03\x04" + b"x")
+            (root / "demo.zip").write_bytes(b"PK\x03\x04" + b"x")
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "extensions": {"standard_archive_exts": [".zip"]},
+                            "blacklist": {"filename_patterns": [r"FBX/weapon/demo\.zip"]},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+
+            candidates = {
+                engine._slash_relpath(os.path.join(scan_root, filename), str(root))
+                for scan_root, filename in engine._iter_scan_candidate_files(str(root))
+            }
+
+            self.assertIn("demo.zip", candidates)
+            self.assertNotIn("FBX/weapon/demo.zip", candidates)
+
+    def test_directory_blacklist_prevents_archive_group_inspection(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            weapon_dir = root / "FBX" / "weapon"
+            weapon_dir.mkdir(parents=True)
+            (weapon_dir / "payload.zip").write_bytes(b"PK\x03\x04" + b"x")
+            (root / "keep.zip").write_bytes(b"PK\x03\x04" + b"x")
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "extensions": {"standard_archive_exts": [".zip"]},
+                            "blacklist": {"directory_patterns": [r"FBX\\weapon"]},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+            inspection = SimpleNamespace(should_extract=False, decision="not_archive")
+            with patch.object(engine, "inspect_archive_candidate", return_value=inspection) as inspect:
+                engine._collect_archive_groups(str(root), engine._detect_scene_context(str(root)))
+
+            inspected_paths = [call.args[0] for call in inspect.call_args_list]
+            self.assertIn(str(root / "keep.zip"), inspected_paths)
+            self.assertNotIn(str(weapon_dir / "payload.zip"), inspected_paths)
+
+    def test_filename_blacklist_skips_name_and_relative_path_matches(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            nested = root / "FBX" / "weapon"
+            nested.mkdir(parents=True)
+            (root / "demo.zip").write_bytes(b"PK\x03\x04" + b"x")
+            (nested / "demo.zip").write_bytes(b"PK\x03\x04" + b"x")
+            (root / "keep.zip").write_bytes(b"PK\x03\x04" + b"x")
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "extensions": {"standard_archive_exts": [".zip"]},
+                            "blacklist": {"filename_patterns": [r"demo\.zip", r"FBX\\weapon\\demo\.zip"]},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+
+            candidates = {
+                engine._windows_relpath(os.path.join(scan_root, filename), str(root))
+                for scan_root, filename in engine._iter_scan_candidate_files(str(root))
+            }
+
+            self.assertEqual(candidates, {"keep.zip", "smart_unpacker_config.json"})
+
+    def test_filename_blacklist_filters_single_rename_instruction(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "asset.foo").write_bytes(b"PK\x03\x04" + b"x" * 128)
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "min_inspection_size_bytes": 0,
+                            "extensions": {"standard_archive_exts": [".foo"]},
+                            "blacklist": {"filename_patterns": [r"asset\.foo"]},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+            with patch.object(
+                engine,
+                "_validate_with_7z",
+                return_value={"ok": True, "encrypted": False, "error_text": ""},
+            ):
+                plan = engine.rename_planner.build_rename_plan(str(root), engine._detect_scene_context(str(root)))
+
+            self.assertEqual(plan, [])
+
+    def test_filename_blacklist_filters_series_rename_instruction(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "bundle.part01.rar.jpg").write_bytes(b"Rar!" + b"x" * 128)
+            (root / "bundle.part02.rar.jpg").write_bytes(b"x" * 128)
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "min_inspection_size_bytes": 0,
+                            "extensions": {"standard_archive_exts": [".rar"]},
+                            "blacklist": {"filename_patterns": [r"bundle\.part01\.rar\.jpg"]},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+            with patch.object(
+                engine,
+                "_validate_with_7z",
+                return_value={"ok": True, "encrypted": False, "error_text": ""},
+            ):
+                plan = engine.rename_planner.build_rename_plan(str(root), engine._detect_scene_context(str(root)))
+
+            self.assertEqual(plan, [])
+
+    def test_custom_standard_archive_extension_affects_inspection(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "smart_unpacker_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "min_inspection_size_bytes": 0,
+                            "extensions": {
+                                "standard_archive_exts": [".foo"],
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            archive = root / "demo.foo"
+            archive.write_bytes(b"PK\x03\x04" + b"x" * 128)
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+                with patch.object(
+                    engine,
+                    "_validate_with_7z",
+                    return_value={"ok": True, "encrypted": False, "error_text": ""},
+                ) as validate:
+                    info = engine.inspect_archive_candidate(str(archive))
+
+            validate.assert_called_once()
+            self.assertEqual(info.decision, "archive")
+            self.assertTrue(info.should_extract)
+
+    def test_custom_strict_semantic_extension_blocks_magic_archive(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "smart_unpacker_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "min_inspection_size_bytes": 0,
+                            "extensions": {
+                                "strict_semantic_skip_exts": [".foo"],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            archive = root / "asset.foo"
+            archive.write_bytes(b"PK\x03\x04" + b"x" * 128)
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+                with patch.object(engine, "_validate_with_7z") as validate, patch.object(engine, "_probe_archive_with_7z") as probe:
+                    info = engine.inspect_archive_candidate(str(archive))
+
+            self.assertEqual(info.decision, "not_archive")
+            self.assertFalse(info.should_extract)
+            validate.assert_not_called()
+            probe.assert_not_called()
+
+    def test_custom_threshold_keeps_magic_archive_as_maybe(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "smart_unpacker_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "min_inspection_size_bytes": 0,
+                            "thresholds": {
+                                "archive_score_threshold": 12,
+                                "maybe_archive_threshold": 3,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            archive = root / "demo.zip"
+            archive.write_bytes(b"PK\x03\x04" + b"x" * 128)
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+                info = engine.inspect_archive_candidate(str(archive))
+
+            self.assertEqual(info.decision, "maybe_archive")
+            self.assertFalse(info.should_extract)
+
+    def test_external_split_and_disguise_patterns_are_ignored(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_path = root / "smart_unpacker_config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "extraction_rules": {
+                            "split_archives": {
+                                "split_first_patterns": [r"\.seg0*1$"],
+                                "split_member_pattern": r"\.seg\d+$",
+                            },
+                            "disguise": {
+                                "disguised_archive_name_patterns": [r"\.wrapped$"],
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+
+            self.assertIsNone(engine._detect_filename_split_role("demo.seg01"))
+            self.assertFalse(engine._looks_like_disguised_archive_name("payload.wrapped"))
+            self.assertEqual(engine._detect_filename_split_role("demo.7z.001"), "first")
+            self.assertTrue(engine._looks_like_disguised_archive_name("payload.zip.jpg"))
+
+    def test_missing_extensions_disable_extension_signals(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps({"extraction_rules": {"min_inspection_size_bytes": 0}}),
+                encoding="utf-8",
+            )
+            archive = root / "demo.zip"
+            archive.write_bytes(b"PK\x03\x04" + b"x" * 128)
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+                with patch.object(
+                    engine,
+                    "_validate_with_7z",
+                    return_value={"ok": False, "encrypted": False, "error_text": ""},
+                ) as validate:
+                    info = engine.inspect_archive_candidate(str(archive))
+
+            validate.assert_called_once()
+            self.assertEqual(engine.STANDARD_EXTS, set())
+            self.assertFalse(info.validation_skipped)
+            self.assertFalse(any("标准归档扩展名" in reason for reason in info.reasons))
+
+    def test_missing_scene_rules_disable_scene_detection(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "smart_unpacker_config.json").write_text(json.dumps({"extraction_rules": {}}), encoding="utf-8")
+            (root / "www" / "js").mkdir(parents=True)
+            (root / "www" / "data").mkdir(parents=True)
+            (root / "Game.exe").write_bytes(b"MZ")
+            (root / "www" / "js" / "rpg_core.js").write_text("// core", encoding="utf-8")
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+
+            context = engine._detect_scene_context(str(root))
+            self.assertEqual(context.scene_type, "generic")
+            self.assertEqual(context.match_strength, "none")
+
+    @patch("smart_unpacker.core.cleanup.send2trash")
+    def test_cleanup_success_archives_recycle_mode_uses_recycle_bin(self, mock_trash):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive = root / "demo.zip"
+            archive.write_bytes(b"x")
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps({"post_extract": {"archive_cleanup_mode": "recycle"}}),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+            engine.unpacked_archives.append([str(archive)])
+            engine.cleanup_manager.cleanup_success_archives()
+
+            mock_trash.assert_called_once_with(str(archive))
+            self.assertTrue(archive.exists())
+
+    def test_cleanup_success_archives_keep_mode_leaves_archive(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive = root / "demo.zip"
+            archive.write_bytes(b"x")
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps({"post_extract": {"archive_cleanup_mode": "keep"}}),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+            engine.unpacked_archives.append([str(archive)])
+            engine.cleanup_manager.cleanup_success_archives()
+
+            self.assertTrue(archive.exists())
+
+    def test_cleanup_success_archives_delete_mode_removes_archive(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            archive = root / "demo.zip"
+            archive.write_bytes(b"x")
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps({"post_extract": {"archive_cleanup_mode": "delete"}}),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+            engine.unpacked_archives.append([str(archive)])
+            engine.cleanup_manager.cleanup_success_archives()
+
+            self.assertFalse(archive.exists())
+
+    def test_run_skips_flatten_when_disabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps({"post_extract": {"flatten_single_directory": False}}),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+            with patch.object(engine, "adjust_workers"), patch.object(engine, "scan_archives", return_value=[]), patch.object(
+                engine, "_cleanup_success_archives"
+            ), patch.object(engine, "flatten_dirs") as flatten:
+                summary = engine.run()
+
+            self.assertEqual(summary.success_count, 0)
+            flatten.assert_not_called()
+
+    def test_run_fixed_recursive_extract_stops_after_configured_rounds(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps({"recursive_extract": 1}),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+            with patch.object(engine, "adjust_workers"), patch.object(engine, "scan_archives", return_value=["task1"]), patch.object(
+                engine, "_run_task_round", return_value=(1, [str(root / "out")])
+            ) as run_round, patch.object(engine, "_scan_next_round_targets") as scan_next, patch.object(
+                engine, "_apply_post_extract_actions"
+            ):
+                summary = engine.run()
+
+            self.assertEqual(summary.success_count, 1)
+            run_round.assert_called_once()
+            scan_next.assert_not_called()
+
+    def test_run_prompt_recursive_extract_applies_post_extract_each_round(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "smart_unpacker_config.json").write_text(
+                json.dumps({"recursive_extract": "?"}),
+                encoding="utf-8",
+            )
+            with patch.object(ResourceLocator, "get_resource_base_path", return_value=str(root)):
+                engine = self.make_engine(root)
+            with patch.object(engine, "adjust_workers"), patch.object(engine, "scan_archives", return_value=["task1"]), patch.object(
+                engine, "_run_task_round", side_effect=[(1, [str(root / "out")]), (1, [])]
+            ) as run_round, patch.object(engine, "_scan_next_round_targets", return_value=deque(["task2"])), patch.object(
+                engine, "_apply_post_extract_actions"
+            ) as post_extract, patch("builtins.input", return_value="y"):
+                summary = engine.run()
+
+            self.assertEqual(summary.success_count, 2)
+            self.assertEqual(run_round.call_count, 2)
+            self.assertEqual(post_extract.call_count, 2)
 
 
 if __name__ == "__main__":

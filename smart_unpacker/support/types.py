@@ -5,6 +5,53 @@ from typing import Any
 
 
 @dataclass
+class LooseScanConfig:
+    stream_chunk_size: int = 1024 * 1024
+    min_prefix: int = 32
+    min_tail_bytes: int = 4 * 1024
+    max_hits: int = 3
+
+
+@dataclass
+class PostExtractConfig:
+    archive_cleanup_mode: str = "recycle"
+    flatten_single_directory: bool = True
+
+
+@dataclass
+class RecursiveExtractConfig:
+    mode: str = "infinite"
+    max_rounds: int = 0
+
+
+@dataclass
+class BlacklistConfig:
+    directory_patterns: tuple[str, ...] = ()
+    filename_patterns: tuple[str, ...] = ()
+
+
+@dataclass
+class DetectionConfig:
+    standard_archive_exts: set[str] = field(default_factory=set)
+    strict_semantic_skip_exts: set[str] = field(default_factory=set)
+    ambiguous_resource_exts: set[str] = field(default_factory=set)
+    likely_resource_exts_extra: set[str] = field(default_factory=set)
+    zip_container_exts: set[str] = field(default_factory=set)
+    archive_score_threshold: int = 6
+    maybe_archive_threshold: int = 3
+    split_first_patterns: tuple[str, ...] = ()
+    split_member_pattern: str = ""
+    disguised_archive_name_patterns: tuple[str, ...] = ()
+    magic_signatures: dict[bytes, str] = field(default_factory=dict)
+    weak_magic_signatures: dict[bytes, str] = field(default_factory=dict)
+    tail_magic_signatures: dict[bytes, str] = field(default_factory=dict)
+    carrier_exts: set[str] = field(default_factory=set)
+    loose_scan: LooseScanConfig = field(default_factory=LooseScanConfig)
+    scene_rules: list[dict[str, Any]] = field(default_factory=list)
+    blacklist: BlacklistConfig = field(default_factory=BlacklistConfig)
+
+
+@dataclass
 class SceneContext:
     target_dir: str
     scene_type: str
@@ -50,6 +97,9 @@ class AppConfig:
     scheduler_high_backlog_threshold: int = 24
     scheduler_medium_floor_workers: int = 2
     scheduler_high_floor_workers: int = 3
+    detection: DetectionConfig = field(default_factory=DetectionConfig)
+    post_extract: PostExtractConfig = field(default_factory=PostExtractConfig)
+    recursive_extract: RecursiveExtractConfig = field(default_factory=RecursiveExtractConfig)
 
 
 @dataclass

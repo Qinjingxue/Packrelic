@@ -24,8 +24,12 @@ class RenamePlanner:
         return False
 
     def directory_may_need_precheck(self, target_dir):
-        for _root, _dirs, files in os.walk(target_dir):
+        for root, _dirs, files in self.engine._walk_unignored(target_dir):
             for filename in files:
+                path = os.path.join(root, filename)
+                if self.engine.matches_blacklisted_file(path, target_dir):
+                    self.engine._log_blacklist_skip_once("precheck_file", path, target_dir)
+                    continue
                 if self._filename_needs_precheck(filename):
                     return True
         return False
@@ -103,15 +107,44 @@ class RenamePlanner:
         single_instruction = self.make_single_rename_instruction(relation, target_ext)
         return [single_instruction] if single_instruction else []
 
+    def _series_source_paths(self, instruction):
+        if instruction.new_ext_suffix.lower() == ".rar" and ".part" in instruction.prefix.lower():
+            pattern = re.escape(instruction.prefix) + r"\d+\.rar(?:\.[^.]+)?$"
+        else:
+            pattern = re.escape(instruction.prefix) + re.escape(instruction.separator) + r"\d+(?:\.[^.]+)?$"
+        try:
+            filenames = os.listdir(instruction.root)
+        except OSError:
+            return []
+        return [
+            os.path.join(instruction.root, filename)
+            for filename in filenames
+            if re.match(pattern, filename, re.I)
+        ]
+
+    def _instruction_hits_file_blacklist(self, instruction, scan_root):
+        if instruction.kind == "series":
+            source_paths = self._series_source_paths(instruction)
+        else:
+            source_paths = [os.path.join(instruction.root, instruction.source)]
+
+        for source_path in source_paths:
+            if self.engine.matches_blacklisted_file(source_path, scan_root):
+                self.engine._log_blacklist_skip_once("precheck_file", source_path, scan_root)
+                return True
+        return False
+
     def build_rename_plan(self, target_dir, scene_context):
         rename_plan = []
         seen_series = set()
-        for root, _, files in os.walk(target_dir):
+        for root, _, files in self.engine._walk_unignored(target_dir):
             root_scene_context = self.engine.scene_analyzer.resolve_scene_context_for_path(root, target_dir)
             relations = self.engine.relation_builder.build_directory_relationships(root, files, scan_root=target_dir)
             for filename in files:
                 relation = relations[filename]
                 for instruction in self.build_rename_plan_for_entry(relation, root_scene_context):
+                    if self._instruction_hits_file_blacklist(instruction, target_dir):
+                        continue
                     if instruction.kind == "series":
                         series_key = (
                             instruction.root,

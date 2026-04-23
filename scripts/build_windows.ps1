@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$promptForAcceptanceTests = ($PSBoundParameters.Count -eq 0)
 
 function Write-Step {
     param([string]$Message)
@@ -291,6 +292,19 @@ function Get-GitCommit {
     return "unknown"
 }
 
+function Confirm-AcceptanceTests {
+    while ($true) {
+        $answer = (Read-Host "Run acceptance tests before building? [Y/n]").Trim()
+        if ($answer -eq "" -or $answer -match "^(?i:y|yes)$") {
+            return $true
+        }
+        if ($answer -match "^(?i:n|no)$") {
+            return $false
+        }
+        Write-Host "Please answer Y or N." -ForegroundColor Yellow
+    }
+}
+
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repoRoot
 
@@ -325,6 +339,11 @@ $distLicensesRoot = Join-Path $distAppRoot "licenses"
 $versionValue = Get-ReleaseVersion -ExplicitVersion $Version -RepoRoot $repoRoot
 $releaseZipName = "SmartUnpacker-windows-x64-{0}.zip" -f $versionValue
 $releaseZipPath = Join-Path $releaseRoot $releaseZipName
+$runAcceptanceTests = -not $SkipTests
+
+if ($promptForAcceptanceTests) {
+    $runAcceptanceTests = Confirm-AcceptanceTests
+}
 
 Assert-PathExists -LiteralPath $requirementsPath -Description "requirements.txt"
 Assert-PathExists -LiteralPath $buildRequirementsPath -Description "requirements-build.txt"
@@ -360,7 +379,7 @@ Remove-IfExists -LiteralPath $distRoot
 Remove-IfExists -LiteralPath $releaseRoot
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 
-if (-not $SkipTests) {
+if ($runAcceptanceTests) {
     Write-Step "Running acceptance tests"
     Invoke-Native -FilePath "powershell" -Arguments @(
         "-ExecutionPolicy", "Bypass",

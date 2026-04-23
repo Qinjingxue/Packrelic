@@ -1,25 +1,11 @@
 from __future__ import annotations
 
+from smart_unpacker.detection.defaults import (
+    DEFAULT_MAGIC_SIGNATURES,
+    DEFAULT_TAIL_MAGIC_SIGNATURES,
+    DEFAULT_WEAK_MAGIC_SIGNATURES,
+)
 
-MAGICS = {
-    b"7z\xbc\xaf'\x1c": ".7z",
-    b"Rar!": ".rar",
-    b"PK\x03\x04": ".zip",
-    b"PK\x05\x06": ".zip",
-    b"PK\x07\x08": ".zip",
-    b"\x1f\x8b": ".gz",
-    b"BZh": ".bz2",
-    b"\xfd7zXZ\x00": ".xz",
-}
-
-WEAK_MAGICS = {
-    b"MZ": ".exe",
-}
-
-TAIL_MAGICS = {
-    b"7z\xbc\xaf'\x1c": ".7z",
-    b"Rar!": ".rar",
-    b"PK\x03\x04": ".zip",
-    b"PK\x05\x06": ".zip",
-    b"PK\x07\x08": ".zip",
-}
+MAGICS = dict(DEFAULT_MAGIC_SIGNATURES)
+WEAK_MAGICS = dict(DEFAULT_WEAK_MAGIC_SIGNATURES)
+TAIL_MAGICS = dict(DEFAULT_TAIL_MAGIC_SIGNATURES)

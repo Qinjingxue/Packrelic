@@ -11,6 +11,31 @@ class CleanupManager:
     def __init__(self, engine):
         self.engine = engine
 
+    def cleanup_archive_file(self, path, *, reason="[CLEAN]"):
+        f = os.path.normpath(path)
+        if not os.path.exists(f):
+            self.engine.log(f"[DEBUG] 文件已不存在，跳过清理: {f}")
+            return
+
+        fname = os.path.basename(f)
+        mode = self.engine.app_config.post_extract.archive_cleanup_mode
+        if mode == "keep":
+            self.engine.log(f"{reason} 保留原归档: {fname}")
+            return
+        if mode == "delete":
+            self.engine.log(f"{reason} 正在彻底删除: {fname}")
+            try:
+                os.remove(f)
+            except Exception as exc:
+                self.engine.log(f"[ERROR] 彻底删除失败: {fname} (错误: {exc})")
+            return
+
+        self.engine.log(f"{reason} 正在移至回收站: {fname}")
+        try:
+            send2trash(f)
+        except Exception as exc:
+            self.engine.log(f"[ERROR] 无法移至回收站: {fname} (错误: {exc})")
+
     def ensure_space(self, required_gb=5):
         required_bytes = required_gb * 1024 ** 3
         while True:
@@ -23,16 +48,11 @@ class CleanupManager:
                 if not self.engine.unpacked_archives:
                     self.engine.log("[CRITICAL] 磁盘已满，无可删除的压缩包！")
                     return False
+                if self.engine.app_config.post_extract.archive_cleanup_mode == "keep":
+                    self.engine.log("[CRITICAL] 磁盘已满，但配置为保留原压缩包，无法通过清理归档释放空间。")
+                    return False
                 for f in self.engine.unpacked_archives.popleft():
-                    if os.path.exists(f):
-                        self.engine.log(f"[SPACE] 释放空间：正在删除 {os.path.basename(f)}")
-                        try:
-                            send2trash(f)
-                        except Exception:
-                            try:
-                                os.remove(f)
-                            except Exception:
-                                pass
+                    self.cleanup_archive_file(f, reason="[SPACE] 释放空间：")
         return True
 
     def cleanup_failed_output(self, out_dir):
@@ -43,27 +63,18 @@ class CleanupManager:
                 pass
 
     def cleanup_success_archives(self):
-        self.engine.log("\n[CLEAN] 任务结束，开始清理已成功解压的归档文件...")
+        mode = self.engine.app_config.post_extract.archive_cleanup_mode
+        if mode == "keep":
+            self.engine.log("\n[CLEAN] 任务结束，配置为保留已成功解压的归档文件。")
+        else:
+            self.engine.log("\n[CLEAN] 任务结束，开始处理已成功解压的归档文件...")
         with self.engine.lock:
             if not self.engine.unpacked_archives:
                 self.engine.log("[CLEAN] 没有发现需要清理的归档文件。")
             while self.engine.unpacked_archives:
                 parts = self.engine.unpacked_archives.popleft()
                 for f in parts:
-                    f = os.path.normpath(f)
-                    if os.path.exists(f):
-                        fname = os.path.basename(f)
-                        self.engine.log(f"[CLEAN] 正在清理: {fname}")
-                        try:
-                            send2trash(f)
-                        except Exception as e:
-                            self.engine.log(f"[WARN] 无法移至回收站 ({e})，尝试直接删除: {fname}")
-                            try:
-                                os.remove(f)
-                            except Exception as e2:
-                                self.engine.log(f"[ERROR] 彻底删除失败: {fname} (错误: {e2})")
-                    else:
-                        self.engine.log(f"[DEBUG] 文件已不存在，跳过清理: {f}")
+                    self.cleanup_archive_file(f)
 
     def log_final_summary(self, start_time, success_count):
         self.engine.log("\n" + "=" * 20 + " 处理结果汇总 " + "=" * 20)

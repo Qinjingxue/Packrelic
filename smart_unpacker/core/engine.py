@@ -30,29 +30,6 @@ class Engine:
         self.completion_callback = completion_callback
         self.selected_paths = [os.path.normpath(path) for path in (selected_paths or []) if path]
 
-        self.MIN_SIZE = 1 * 1024 * 1024
-        self.STRICT_SEMANTIC_SKIP_EXTS = {
-            ".dll", ".save", ".py", ".pyc", ".json", ".xml", ".cfg", ".ini", ".sys", ".db",
-            ".msi", ".cur", ".ani", ".ttf", ".woff", ".ico", ".pak", ".obb", ".unitypackage",
-        }
-        self.AMBIGUOUS_RESOURCE_EXTS = {".dat", ".bin"}
-        self.LIKELY_RESOURCE_EXTS = self.STRICT_SEMANTIC_SKIP_EXTS | {
-            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tga",
-            ".mp3", ".wav", ".ogg", ".flac", ".aac",
-            ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
-            ".txt", ".log", ".csv", ".pdf",
-        }
-        self.STANDARD_EXTS = {".7z", ".rar", ".zip", ".gz", ".bz2", ".xz"}
-        self.ZIP_CONTAINER_EXTS = {".jar", ".apk", ".ipa", ".epub", ".odt", ".ods", ".odp", ".docx", ".xlsx", ".pptx", ".whl", ".xpi", ".war", ".ear", ".aab"}
-        self.ARCHIVE_SCORE_THRESHOLD = 6
-        self.MAYBE_ARCHIVE_THRESHOLD = 3
-        self.SPLIT_FIRST_PATTERNS = (
-            re.compile(r"\.part0*1\.rar(?:\.[^.]+)?$", re.I),
-            re.compile(r"\.(7z|zip|rar)\.001(?:\.[^.]+)?$", re.I),
-            re.compile(r"\.001(?:\.[^.]+)?$", re.I),
-        )
-        self.SPLIT_MEMBER_PATTERN = re.compile(r"\.(part\d+\.rar|\d{3})(?:\.[^.]+)?$", re.I)
-
         self.is_running = False
         self.failed_tasks = []
         self.unpacked_archives = deque()
@@ -75,7 +52,27 @@ class Engine:
 
         self.resource_locator = ResourceLocator()
         self.app_config = self.resource_locator.get_app_config()
+        detection_config = self.app_config.detection
         self.MIN_SIZE = self.app_config.min_inspection_size_bytes
+        self.STRICT_SEMANTIC_SKIP_EXTS = set(detection_config.strict_semantic_skip_exts)
+        self.AMBIGUOUS_RESOURCE_EXTS = set(detection_config.ambiguous_resource_exts)
+        self.LIKELY_RESOURCE_EXTS = self.STRICT_SEMANTIC_SKIP_EXTS | set(detection_config.likely_resource_exts_extra)
+        self.STANDARD_EXTS = set(detection_config.standard_archive_exts)
+        self.ZIP_CONTAINER_EXTS = set(detection_config.zip_container_exts)
+        self.ARCHIVE_SCORE_THRESHOLD = detection_config.archive_score_threshold
+        self.MAYBE_ARCHIVE_THRESHOLD = detection_config.maybe_archive_threshold
+        self.SPLIT_FIRST_PATTERNS = tuple(re.compile(pattern, re.I) for pattern in detection_config.split_first_patterns)
+        self.SPLIT_MEMBER_PATTERN = re.compile(detection_config.split_member_pattern, re.I)
+        self.DISGUISED_ARCHIVE_NAME_PATTERNS = tuple(
+            re.compile(pattern, re.I) for pattern in detection_config.disguised_archive_name_patterns
+        )
+        self.BLACKLIST_DIR_PATTERNS = tuple(
+            re.compile(pattern, re.I) for pattern in detection_config.blacklist.directory_patterns
+        )
+        self.BLACKLIST_FILE_PATTERNS = tuple(
+            re.compile(pattern, re.I) for pattern in detection_config.blacklist.filename_patterns
+        )
+        self._blacklist_logged_paths = set()
         self.max_workers_limit = max(1, self.app_config.max_workers_override or self.detect_max_workers())
         medium_floor = max(1, self.app_config.scheduler_medium_floor_workers)
         self.dynamic_floor_workers = min(medium_floor, self.max_workers_limit)
@@ -119,6 +116,83 @@ class Engine:
         if rel.startswith(".."):
             return None
         return rel
+
+    def _windows_relpath(self, path, start):
+        rel = self._safe_relpath(os.path.normpath(path), os.path.normpath(start))
+        if rel is None:
+            return None
+        if rel == ".":
+            return ""
+        return rel.replace("/", "\\").replace(os.sep, "\\")
+
+    def _slash_relpath(self, path, start):
+        windows_rel = self._windows_relpath(path, start)
+        return None if windows_rel is None else windows_rel.replace("\\", "/")
+
+    def _blacklist_path_candidates(self, path, scan_root, *, include_basename=True):
+        candidates = []
+        if include_basename:
+            basename = os.path.basename(os.path.normpath(path))
+            if basename:
+                candidates.append(basename)
+        windows_rel = self._windows_relpath(path, scan_root)
+        if windows_rel:
+            candidates.append(windows_rel)
+            slash_rel = windows_rel.replace("\\", "/")
+            if slash_rel != windows_rel:
+                candidates.append(slash_rel)
+        return candidates
+
+    def _matches_any_blacklist_pattern(self, patterns, candidates):
+        return any(pattern.search(candidate) for pattern in patterns for candidate in candidates if candidate)
+
+    def _log_blacklist_skip_once(self, category, path, scan_root=None):
+        rel = self._windows_relpath(path, scan_root) if scan_root else None
+        label = rel or os.path.basename(path) or path
+        key = (category, os.path.normcase(os.path.normpath(path)))
+        if key in self._blacklist_logged_paths:
+            return
+        self._blacklist_logged_paths.add(key)
+        if category == "dir":
+            self.log(f"[SCAN] 黑名单目录跳过: {label}")
+        elif category == "precheck_file":
+            self.log(f"[PRE-CHECK] 黑名单文件跳过重命名: {label}")
+        else:
+            self.log(f"[SCAN] 黑名单文件跳过: {label}")
+
+    def matches_blacklisted_dir(self, path, scan_root):
+        if not self.BLACKLIST_DIR_PATTERNS:
+            return False
+        candidates = self._blacklist_path_candidates(path, scan_root)
+        if not candidates:
+            return False
+        return self._matches_any_blacklist_pattern(self.BLACKLIST_DIR_PATTERNS, candidates)
+
+    def matches_blacklisted_file(self, path, scan_root):
+        if not self.BLACKLIST_FILE_PATTERNS:
+            return False
+        candidates = self._blacklist_path_candidates(path, scan_root)
+        if not candidates:
+            return False
+        return self._matches_any_blacklist_pattern(self.BLACKLIST_FILE_PATTERNS, candidates)
+
+    def _walk_unignored(self, target_dir, scan_root=None):
+        scan_root = os.path.normpath(scan_root or target_dir)
+        for root, dirs, files in os.walk(target_dir, topdown=True):
+            if self.matches_blacklisted_dir(root, scan_root):
+                self._log_blacklist_skip_once("dir", root, scan_root)
+                dirs[:] = []
+                continue
+
+            kept_dirs = []
+            for dirname in dirs:
+                dir_path = os.path.join(root, dirname)
+                if self.matches_blacklisted_dir(dir_path, scan_root):
+                    self._log_blacklist_skip_once("dir", dir_path, scan_root)
+                    continue
+                kept_dirs.append(dirname)
+            dirs[:] = kept_dirs
+            yield root, dirs, files
 
     def get_resource_base_path(self):
         return self.resource_locator.get_resource_base_path()
@@ -170,8 +244,12 @@ class Engine:
         return self.inspector._looks_like_disguised_archive_name(filename)
 
     def _iter_scan_candidate_files(self, target_dir):
-        for root, _, files in os.walk(target_dir):
+        for root, _, files in self._walk_unignored(target_dir):
             for filename in files:
+                path = os.path.join(root, filename)
+                if self.matches_blacklisted_file(path, target_dir):
+                    self._log_blacklist_skip_once("file", path, target_dir)
+                    continue
                 yield root, filename
 
     def _should_consider_file_for_nested_scan(self, root, filename):
@@ -213,10 +291,17 @@ class Engine:
 
     def _collect_archive_groups(self, target_dir, scene_context):
         groups = defaultdict(list)
-        for root, _, files in os.walk(target_dir):
+        for root, _, files in self._walk_unignored(target_dir):
+            allowed_files = []
+            for filename in files:
+                path = os.path.join(root, filename)
+                if self.matches_blacklisted_file(path, target_dir):
+                    self._log_blacklist_skip_once("file", path, target_dir)
+                    continue
+                allowed_files.append(filename)
             root_scene_context = self._resolve_scene_context_for_path(root, target_dir)
-            relations = self.relation_builder.build_directory_relationships(root, files, scan_root=target_dir)
-            for f in files:
+            relations = self.relation_builder.build_directory_relationships(root, allowed_files, scan_root=target_dir)
+            for f in allowed_files:
                 relation = relations[f]
                 path = relation.path
                 info = self.inspect_archive_candidate(path, relation=relation, scene_context=root_scene_context)
@@ -230,7 +315,10 @@ class Engine:
         return info.should_extract or info.decision == "maybe_archive" or relation.is_split_related
 
     def _select_group_main_archive(self, paths):
-        main = next((p for p in paths if re.search(r"\.(part0*1\.rar|7z\.001|zip\.001|7z|zip|rar|gz|bz2|xz)$", p, re.I)), None)
+        main = next((p for p in paths if self._detect_filename_split_role(p) == "first"), None)
+        if main:
+            return main
+        main = next((p for p in paths if os.path.splitext(p.lower())[1] in self.STANDARD_EXTS), None)
         if main:
             return main
         exe_main = next((p for p in paths if p.lower().endswith(".exe")), None)
@@ -463,6 +551,80 @@ class Engine:
     def flatten_dirs(self, base):
         self.cleanup_manager.flatten_dirs(base)
 
+    def _apply_post_extract_actions(self):
+        self._cleanup_success_archives()
+        if self.app_config.post_extract.flatten_single_directory:
+            flatten_targets = sorted(self.flatten_candidates, key=lambda item: item.count(os.sep))
+            if flatten_targets:
+                for flatten_target in flatten_targets:
+                    if os.path.exists(flatten_target):
+                        self.flatten_dirs(flatten_target)
+            else:
+                self.flatten_dirs(self.root_dir)
+        self.flatten_candidates.clear()
+        self.reset_scan_caches()
+
+    def _prompt_continue_recursive_extract(self, round_index):
+        while True:
+            try:
+                answer = input(f"[CLI] 第 {round_index} 轮解压完成。是否继续下一轮递归解压？(y/n): ")
+            except EOFError:
+                self.log("[CLI] 未读取到输入，停止递归解压。")
+                return False
+            except KeyboardInterrupt:
+                self.log("[CLI] 用户取消，停止递归解压。")
+                return False
+            normalized = answer.strip().lower()
+            if normalized in {"y", "yes"}:
+                return True
+            if normalized in {"n", "no", ""}:
+                return False
+            print("请输入 y 或 n。", flush=True)
+
+    def _scan_next_round_targets(self, scan_roots):
+        tasks = []
+        seen_keys = set()
+        for scan_root in scan_roots:
+            if os.path.exists(scan_root):
+                self._add_unique_tasks(tasks, seen_keys, self.scan_archives(scan_root))
+        return deque(tasks)
+
+    def _run_task_round(self, executor, pending):
+        futures = {}
+        round_success_count = 0
+        next_scan_roots = []
+        while pending or futures or self.in_progress:
+            self._update_pending_task_estimate(len(pending), len(futures))
+            while pending and len(futures) < self.max_workers_limit * 2:
+                task = pending.popleft()
+                futures[executor.submit(self.extract, task)] = task
+                self._update_pending_task_estimate(len(pending), len(futures))
+            if not futures:
+                time.sleep(0.5)
+                continue
+            done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED, timeout=1)
+            for future in done:
+                if future not in futures:
+                    continue
+                futures.pop(future)
+                try:
+                    result_path = future.result()
+                    if result_path and os.path.exists(result_path):
+                        round_success_count += 1
+                        self.flatten_candidates.add(os.path.normpath(result_path))
+                        self.reset_scan_caches()
+                        if self.should_scan_output_dir(result_path):
+                            next_scan_roots.append(result_path)
+                except Exception:
+                    pass
+                finally:
+                    self._update_pending_task_estimate(len(pending), len(futures))
+        return round_success_count, next_scan_roots
+
+    def _should_stop_after_round(self, round_index):
+        recursion = self.app_config.recursive_extract
+        return recursion.mode == "fixed" and round_index >= recursion.max_rounds
+
     def start(self):
         self.is_running = True
         threading.Thread(target=self.run, daemon=True).start()
@@ -473,46 +635,30 @@ class Engine:
         threading.Thread(target=self.adjust_workers, daemon=True).start()
         executor = ThreadPoolExecutor(max_workers=self.max_workers_limit)
         pending = deque(self.scan_archives())
-        futures = {}
         success_count = 0
+        round_index = 1
+        prompt_mode = self.app_config.recursive_extract.mode == "prompt"
+        post_extract_applied = False
         try:
-            while pending or futures or self.in_progress:
-                self._update_pending_task_estimate(len(pending), len(futures))
-                while pending and len(futures) < self.max_workers_limit * 2:
-                    t = pending.popleft()
-                    futures[executor.submit(self.extract, t)] = t
-                    self._update_pending_task_estimate(len(pending), len(futures))
-                if not futures:
-                    time.sleep(0.5)
-                    continue
-                done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED, timeout=1)
-                for f in done:
-                    if f in futures:
-                        futures.pop(f)
-                        try:
-                            res = f.result()
-                            if res and os.path.exists(res):
-                                success_count += 1
-                                self.flatten_candidates.add(os.path.normpath(res))
-                                self.reset_scan_caches()
-                                if self.should_scan_output_dir(res):
-                                    new = self.scan_archives(res)
-                                    if new:
-                                        pending.extend(new)
-                        except Exception:
-                            pass
-                        finally:
-                            self._update_pending_task_estimate(len(pending), len(futures))
+            while pending:
+                self.log(f"\n[SCAN] 开始第 {round_index} 轮递归解压扫描。")
+                round_success_count, next_scan_roots = self._run_task_round(executor, pending)
+                success_count += round_success_count
+
+                if prompt_mode:
+                    self._apply_post_extract_actions()
+                    post_extract_applied = True
+
+                if self._should_stop_after_round(round_index) or not next_scan_roots:
+                    break
+                if prompt_mode and not self._prompt_continue_recursive_extract(round_index):
+                    break
+
+                round_index += 1
+                pending = self._scan_next_round_targets(next_scan_roots)
             executor.shutdown(wait=True)
-            self._cleanup_success_archives()
-            flatten_targets = sorted(self.flatten_candidates, key=lambda item: item.count(os.sep))
-            if flatten_targets:
-                for flatten_target in flatten_targets:
-                    if os.path.exists(flatten_target):
-                        self.flatten_dirs(flatten_target)
-            else:
-                self.flatten_dirs(self.root_dir)
-            self.reset_scan_caches()
+            if not post_extract_applied:
+                self._apply_post_extract_actions()
             self._log_final_summary(start_time, success_count)
             return RunSummary(success_count=success_count, failed_tasks=list(self.failed_tasks), processed_keys=sorted(self.processed))
         finally:

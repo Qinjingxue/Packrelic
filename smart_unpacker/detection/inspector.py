@@ -5,7 +5,6 @@ import re
 import subprocess
 import zipfile
 
-from .signatures import MAGICS, TAIL_MAGICS, WEAK_MAGICS
 from smart_unpacker.support.types import InspectionResult
 
 
@@ -20,9 +19,14 @@ class ArchiveInspector:
         self.inspect_cache = {}
         self.validation_cache = {}
         self.probe_cache = {}
-        self.MAGICS = MAGICS
-        self.WEAK_MAGICS = WEAK_MAGICS
-        self.TAIL_MAGICS = TAIL_MAGICS
+        detection_config = engine.app_config.detection
+        self.MAGICS = dict(detection_config.magic_signatures)
+        self.WEAK_MAGICS = dict(detection_config.weak_magic_signatures)
+        self.TAIL_MAGICS = dict(detection_config.tail_magic_signatures)
+        self.STREAM_CHUNK_SIZE = detection_config.loose_scan.stream_chunk_size
+        self.LOOSE_SCAN_MIN_PREFIX = detection_config.loose_scan.min_prefix
+        self.LOOSE_SCAN_MIN_TAIL_BYTES = detection_config.loose_scan.min_tail_bytes
+        self.LOOSE_SCAN_MAX_HITS = detection_config.loose_scan.max_hits
         self.CARRIER_TAIL_DETECTORS = {
             ".jpg": self._find_embedded_archive_after_jpeg,
             ".jpeg": self._find_embedded_archive_after_jpeg,
@@ -31,7 +35,7 @@ class ArchiveInspector:
             ".gif": self._find_embedded_archive_after_gif,
             ".webp": self._find_embedded_archive_after_webp,
         }
-        self.CARRIER_EXTS = set(self.CARRIER_TAIL_DETECTORS)
+        self.CARRIER_EXTS = set(detection_config.carrier_exts)
         self.EXECUTABLE_PROBE_TYPES = {"pe", "elf", "macho", "te"}
 
     def clear_caches(self):
@@ -394,16 +398,7 @@ class ArchiveInspector:
 
     def _looks_like_disguised_archive_name(self, filename):
         lower_name = filename.lower()
-        return any(
-            re.search(pattern, lower_name, re.I)
-            for pattern in (
-                r"\.(7z|rar|zip|gz|bz2|xz)\.[^.]+$",
-                r"\.exe\.[^.]+$",
-                r"\.(7z|zip|rar)\.001(?:\.[^.]+)?$",
-                r"\.part\d+\.rar(?:\.[^.]+)?$",
-                r"\.\d{3}(?:\.[^.]+)?$",
-            )
-        )
+        return any(pattern.search(lower_name) for pattern in self.engine.DISGUISED_ARCHIVE_NAME_PATTERNS)
 
     def _should_probe_with_7z(self, info, ext, norm_path):
         if info.magic_matched:

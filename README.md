@@ -40,32 +40,17 @@ Smart Unpacker 是一个面向 Windows 的 Python 命令行解压工具，使用
 
 主配置文件是 `smart_unpacker_config.json`。
 
-常用配置：
+配置分为 `extraction_rules`、`post_extract`、`recursive_extract` 和 `performance` 四块。每个配置项的可选参数、默认值、含义、风险和常见示例请看：
 
-- `basic.min_inspection_size_bytes`：最小检查文件大小。小于该值的文件不会被识别和处理。默认值为 `1048576`，即 `1 MB`。调大可以减少大量小文件带来的性能开销，调小可以识别更小的伪装压缩包。
-- `basic.scheduler_profile`：并发策略。通常保持 `auto` 即可；`aggressive` 更偏性能；`conservative` 更保守，适合程序进程过多或影响其他任务时使用。
-- `advanced.scheduler`：并发细节控制。默认值均为 `0`，表示跟随 `scheduler_profile`。填写具体数值后，会覆盖对应的 profile 行为。
+[Smart Unpacker 配置文件详解](./docs/configuration.zh.md)
+
+注意：`smart_unpacker_config.json` 必须保持合法 JSON，不能写注释；修改检测规则会直接影响误判/漏判风险，建议先用 `inspect --verbose` 或 `scan` 查看结果。`post_extract.archive_cleanup_mode` 设置为 `delete` 时会直接删除原压缩文件，不经过回收站，请谨慎使用。
 
 ## 命令概览
 
-- `inspect`：递归检查文件或目录，输出每个文件的识别结果、命中原因和是否建议解压。
-- `scan`：按任务维度汇总可处理归档，方便先查看扫描结果再决定是否解压。
-- `extract`：执行扫描、密码尝试、归档校验、解压和后处理，并根据系统负载动态调整并发。
-- `passwords`：查看最终会参与尝试的密码列表，包括命令行输入、密码文件和内置高频密码。
+CLI 支持 `inspect`、`scan`、`extract`、`passwords` 和 `config` 子命令。各命令参数、临时配置覆盖、配置文件修改命令、JSON 输出结构和常见工作流请看：
 
-通用参数：
-
-- `--json`：以 JSON 格式输出结果。
-- `--quiet`：减少终端输出。
-- `--verbose`：输出更详细的信息。
-- `--pause-on-exit`：命令结束后等待按键退出，适合右键菜单场景。
-
-密码参数：
-
-- `-p, --password`：指定解压密码，可重复传入多次。
-- `--password-file`：指定密码文件，按每行一个密码读取。
-- `--prompt-passwords`：通过终端交互输入密码列表。
-- `--no-builtin-passwords`：禁用内置高频密码。
+[Smart Unpacker CLI 使用说明](./docs/cli.zh.md)
 
 ## 本地运行
 

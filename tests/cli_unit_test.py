@@ -165,6 +165,81 @@ class CliUnitTest(unittest.TestCase):
         self.assertEqual(payload["summary"]["combined_password_count"], 4)
         self.assertEqual(payload["items"][0]["combined_passwords"], ["123", "123456", "0000", "789"])
 
+    def test_config_set_updates_config_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch("smart_unpacker.app.cli.ResourceLocator.find_existing_resource_path", return_value=None), patch(
+                "smart_unpacker.app.cli.ResourceLocator.get_resource_base_path", return_value=td
+            ), redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["config", "--json", "set", "archive_cleanup_mode", "keep"]), 0)
+
+            payload = json.loads((Path(td) / "smart_unpacker_config.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["post_extract"]["archive_cleanup_mode"], "keep")
+
+    def test_config_blacklist_add_list_and_remove(self):
+        with tempfile.TemporaryDirectory() as td:
+            with patch("smart_unpacker.app.cli.ResourceLocator.find_existing_resource_path", return_value=None), patch(
+                "smart_unpacker.app.cli.ResourceLocator.get_resource_base_path", return_value=td
+            ):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(["config", "--json", "blacklist", "add-dir", "FBX/weapon"]), 0)
+                    self.assertEqual(main(["config", "--json", "blacklist", "add-file", r"FBX/weapon/demo\.zip"]), 0)
+
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    self.assertEqual(main(["config", "--json", "blacklist", "list"]), 0)
+                payload = json.loads(buffer.getvalue())
+                blacklist = payload["items"][0]
+                self.assertEqual(blacklist["directory_patterns"], ["FBX/weapon"])
+                self.assertEqual(blacklist["filename_patterns"], [r"FBX/weapon/demo\.zip"])
+
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(["config", "--json", "blacklist", "remove-dir", "FBX/weapon"]), 0)
+
+            payload = json.loads((Path(td) / "smart_unpacker_config.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["extraction_rules"]["blacklist"]["directory_patterns"], [])
+            self.assertEqual(payload["extraction_rules"]["blacklist"]["filename_patterns"], [r"FBX/weapon/demo\.zip"])
+
+    @patch("smart_unpacker.app.cli.DecompressionEngine")
+    def test_extract_runtime_overrides_are_applied_to_engine(self, mock_engine):
+        with tempfile.TemporaryDirectory() as td:
+            archive_path = Path(td) / "demo.zip"
+            archive_path.write_bytes(b"demo")
+            mock_instance = mock_engine.return_value
+            mock_instance.app_config = SimpleNamespace(
+                min_inspection_size_bytes=1048576,
+                recursive_extract=None,
+                post_extract=SimpleNamespace(archive_cleanup_mode="recycle", flatten_single_directory=True),
+                scheduler_profile="auto",
+            )
+            mock_instance.max_workers_limit = 4
+            mock_instance.reset_scan_caches.return_value = None
+            mock_instance.run.return_value = SimpleNamespace(success_count=1, failed_tasks=[], processed_keys=["demo"])
+
+            exit_code = main(
+                [
+                    "extract",
+                    str(archive_path),
+                    "--min-inspection-size-bytes",
+                    "0",
+                    "--recursive-extract",
+                    "1",
+                    "--scheduler-profile",
+                    "conservative",
+                    "--archive-cleanup-mode",
+                    "keep",
+                    "--no-flatten-single-directory",
+                ]
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(mock_instance.MIN_SIZE, 0)
+            self.assertEqual(mock_instance.app_config.min_inspection_size_bytes, 0)
+            self.assertEqual(mock_instance.app_config.recursive_extract.mode, "fixed")
+            self.assertEqual(mock_instance.app_config.recursive_extract.max_rounds, 1)
+            self.assertEqual(mock_instance.app_config.post_extract.archive_cleanup_mode, "keep")
+            self.assertFalse(mock_instance.app_config.post_extract.flatten_single_directory)
+            self.assertEqual(mock_instance.app_config.scheduler_profile, "conservative")
+
     def test_cli_reporter_uses_flush_for_terminal_output(self):
         reporter = CliReporter(json_mode=False, quiet=False, verbose=True)
         with patch("builtins.print") as mock_print:

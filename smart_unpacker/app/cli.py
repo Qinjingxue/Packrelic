@@ -8,6 +8,7 @@ import sys
 from dataclasses import asdict
 
 from smart_unpacker.core.engine import DecompressionEngine
+from smart_unpacker.detection.defaults import build_default_config_payload
 from smart_unpacker.support.passwords import dedupe_passwords, read_password_file
 from smart_unpacker.support.resources import ResourceLocator
 from smart_unpacker.support.types import CliCommandResult, CliInspectItem, CliPasswordSummary, CliScanItem
@@ -17,6 +18,16 @@ EXIT_OK = 0
 EXIT_TASK_FAILED = 1
 EXIT_USAGE = 2
 EXIT_RUNTIME = 3
+
+CONFIG_SET_KEYS = {
+    "min_inspection_size_bytes",
+    "recursive_extract",
+    "scheduler_profile",
+    "archive_cleanup_mode",
+    "flatten_single_directory",
+}
+SCHEDULER_PROFILES = {"auto", "conservative", "aggressive"}
+ARCHIVE_CLEANUP_MODES = {"keep", "recycle", "delete"}
 
 
 def configure_stdio_fallback() -> None:
@@ -120,15 +131,55 @@ def build_password_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("必须是非负整数。") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("必须是非负整数。")
+    return parsed
+
+
+def parse_bool_value(value: str) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on", "启用", "是"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off", "禁用", "否"}:
+        return False
+    raise argparse.ArgumentTypeError("必须是 true/false、yes/no、1/0。")
+
+
+def parse_recursive_extract_value(value: str):
+    normalized = str(value).strip()
+    if normalized in {"*", "?"}:
+        return normalized
+    if normalized.isdigit() and int(normalized) > 0:
+        return int(normalized)
+    raise argparse.ArgumentTypeError('必须是正整数、"*" 或 "?"。')
+
+
+def build_runtime_config_override_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--min-inspection-size-bytes", type=parse_non_negative_int, help="仅本次运行覆盖最小检测大小。")
+    parser.add_argument("--recursive-extract", type=parse_recursive_extract_value, help='仅本次运行覆盖递归解压模式，取值为正整数、"*" 或 "?"。')
+    parser.add_argument("--scheduler-profile", choices=sorted(SCHEDULER_PROFILES), help="仅本次运行覆盖并发调度档位。")
+    parser.add_argument("--archive-cleanup-mode", choices=sorted(ARCHIVE_CLEANUP_MODES), help="仅本次运行覆盖原归档后处理方式。")
+    flatten_group = parser.add_mutually_exclusive_group()
+    flatten_group.add_argument("--flatten-single-directory", dest="flatten_single_directory", action="store_true", default=None, help="仅本次运行启用单子目录压平。")
+    flatten_group.add_argument("--no-flatten-single-directory", dest="flatten_single_directory", action="store_false", help="仅本次运行禁用单子目录压平。")
+    return parser
+
+
 def build_cli_parser():
     common_parser = build_common_parser()
     password_parser = build_password_parser()
+    runtime_config_parser = build_runtime_config_override_parser()
 
     parser = argparse.ArgumentParser(
         description="智能解压工具：命令行模式。",
         usage=(
             "SmartUnpacker [-h] <command> [command options] [paths...]\n"
-            "                     例如: SmartUnpacker extract [options] <paths...>"
         ),
         epilog=(
             "示例:\n"
@@ -145,7 +196,7 @@ def build_cli_parser():
 
     extract_parser = subparsers.add_parser(
         "extract",
-        parents=[common_parser, password_parser],
+        parents=[common_parser, password_parser, runtime_config_parser],
         help="执行预检查、扫描、解压和清理。",
         usage="SmartUnpacker extract [options] <paths...>",
     )
@@ -153,7 +204,7 @@ def build_cli_parser():
 
     scan_parser = subparsers.add_parser(
         "scan",
-        parents=[common_parser],
+        parents=[common_parser, runtime_config_parser],
         help="只扫描候选归档，不修改文件系统。",
         usage="SmartUnpacker scan [options] <paths...>",
     )
@@ -161,7 +212,7 @@ def build_cli_parser():
 
     inspect_parser = subparsers.add_parser(
         "inspect",
-        parents=[common_parser],
+        parents=[common_parser, runtime_config_parser],
         help="输出文件检测详情，不修改文件系统。",
         usage="SmartUnpacker inspect [options] <paths...>",
     )
@@ -173,6 +224,31 @@ def build_cli_parser():
         help="查看当前会参与尝试的密码列表。",
         usage="SmartUnpacker passwords [options]",
     )
+
+    config_parser = subparsers.add_parser(
+        "config",
+        parents=[common_parser],
+        help="查看或修改 smart_unpacker_config.json。",
+        usage="SmartUnpacker config [options] <show|set|blacklist> ...",
+    )
+    config_subparsers = config_parser.add_subparsers(dest="config_action", required=True)
+    config_subparsers.add_parser("show", help="显示当前配置文件内容。", usage="SmartUnpacker config show [options]")
+
+    config_set_parser = config_subparsers.add_parser(
+        "set",
+        help="修改一个常用配置项。",
+        usage="SmartUnpacker config set <key> <value>",
+    )
+    config_set_parser.add_argument("key", choices=sorted(CONFIG_SET_KEYS), help="要修改的配置项。")
+    config_set_parser.add_argument("value", help="新的配置值。")
+
+    blacklist_parser = config_subparsers.add_parser(
+        "blacklist",
+        help="添加、删除或查看黑名单规则。",
+        usage="SmartUnpacker config blacklist <list|add-dir|remove-dir|add-file|remove-file> [pattern]",
+    )
+    blacklist_parser.add_argument("operation", choices=["list", "add-dir", "remove-dir", "add-file", "remove-file"], help="黑名单操作。")
+    blacklist_parser.add_argument("pattern", nargs="?", help="要添加或删除的正则表达式。")
 
     return parser
 
@@ -215,6 +291,166 @@ def collect_cli_passwords(args):
     if getattr(args, "prompt_passwords", False):
         passwords = prompt_passwords_terminal(passwords)
     return dedupe_passwords(passwords)
+
+
+def _get_config_file_path(locator: ResourceLocator | None = None) -> str:
+    locator = locator or ResourceLocator()
+    return locator.find_existing_resource_path("smart_unpacker_config.json") or locator.get_resource_path("smart_unpacker_config.json")
+
+
+def _read_config_payload() -> tuple[str, dict]:
+    config_path = _get_config_file_path()
+    if not os.path.exists(config_path):
+        return config_path, build_default_config_payload()
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        payload = build_default_config_payload()
+    if not isinstance(payload, dict):
+        payload = build_default_config_payload()
+    return config_path, payload
+
+
+def _write_config_payload(config_path: str, payload: dict) -> None:
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+
+
+def _ensure_dict(parent: dict, key: str) -> dict:
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        value = {}
+        parent[key] = value
+    return value
+
+
+def _ensure_list(parent: dict, key: str) -> list:
+    value = parent.get(key)
+    if not isinstance(value, list):
+        value = []
+        parent[key] = value
+    return value
+
+
+def _validate_config_set_value(key: str, raw_value: str):
+    if key == "min_inspection_size_bytes":
+        return parse_non_negative_int(raw_value)
+    if key == "recursive_extract":
+        return parse_recursive_extract_value(raw_value)
+    if key == "scheduler_profile":
+        normalized = raw_value.strip().lower()
+        if normalized not in SCHEDULER_PROFILES:
+            raise ValueError(f"scheduler_profile 必须是: {', '.join(sorted(SCHEDULER_PROFILES))}")
+        return normalized
+    if key == "archive_cleanup_mode":
+        normalized = raw_value.strip().lower()
+        if normalized not in ARCHIVE_CLEANUP_MODES:
+            raise ValueError(f"archive_cleanup_mode 必须是: {', '.join(sorted(ARCHIVE_CLEANUP_MODES))}")
+        return normalized
+    if key == "flatten_single_directory":
+        return parse_bool_value(raw_value)
+    raise ValueError(f"不支持的配置项: {key}")
+
+
+def _set_config_value(payload: dict, key: str, value) -> None:
+    if key == "min_inspection_size_bytes":
+        extraction_rules = _ensure_dict(payload, "extraction_rules")
+        extraction_rules["min_inspection_size_bytes"] = value
+    elif key == "recursive_extract":
+        payload["recursive_extract"] = value
+    elif key == "scheduler_profile":
+        performance = _ensure_dict(payload, "performance")
+        performance["scheduler_profile"] = value
+    elif key == "archive_cleanup_mode":
+        post_extract = _ensure_dict(payload, "post_extract")
+        post_extract["archive_cleanup_mode"] = value
+    elif key == "flatten_single_directory":
+        post_extract = _ensure_dict(payload, "post_extract")
+        post_extract["flatten_single_directory"] = value
+
+
+def _blacklist_payload(payload: dict) -> dict:
+    extraction_rules = _ensure_dict(payload, "extraction_rules")
+    blacklist = _ensure_dict(extraction_rules, "blacklist")
+    _ensure_list(blacklist, "directory_patterns")
+    _ensure_list(blacklist, "filename_patterns")
+    return blacklist
+
+
+def _apply_blacklist_operation(payload: dict, operation: str, pattern: str | None) -> dict:
+    blacklist = _blacklist_payload(payload)
+    if operation == "list":
+        return blacklist
+    if not pattern:
+        raise ValueError(f"{operation} 需要提供 pattern。")
+
+    key = "directory_patterns" if operation.endswith("-dir") else "filename_patterns"
+    patterns = _ensure_list(blacklist, key)
+    if operation.startswith("add-"):
+        try:
+            re.compile(pattern, re.I)
+        except re.error as exc:
+            raise ValueError(f"非法正则表达式: {exc}") from exc
+        if pattern not in patterns:
+            patterns.append(pattern)
+    elif operation.startswith("remove-"):
+        blacklist[key] = [item for item in patterns if item != pattern]
+    return blacklist
+
+
+def _collect_runtime_config_overrides(args) -> dict:
+    overrides = {}
+    if getattr(args, "min_inspection_size_bytes", None) is not None:
+        overrides["min_inspection_size_bytes"] = args.min_inspection_size_bytes
+    if getattr(args, "recursive_extract", None) is not None:
+        overrides["recursive_extract"] = args.recursive_extract
+    if getattr(args, "scheduler_profile", None) is not None:
+        overrides["scheduler_profile"] = args.scheduler_profile
+    if getattr(args, "archive_cleanup_mode", None) is not None:
+        overrides["archive_cleanup_mode"] = args.archive_cleanup_mode
+    if getattr(args, "flatten_single_directory", None) is not None:
+        overrides["flatten_single_directory"] = args.flatten_single_directory
+    return overrides
+
+
+def apply_runtime_config_overrides(engine: DecompressionEngine, args) -> dict:
+    overrides = _collect_runtime_config_overrides(args)
+    if not overrides:
+        return {}
+
+    if "min_inspection_size_bytes" in overrides:
+        engine.app_config.min_inspection_size_bytes = overrides["min_inspection_size_bytes"]
+        engine.MIN_SIZE = overrides["min_inspection_size_bytes"]
+    if "recursive_extract" in overrides:
+        engine.app_config.recursive_extract = ResourceLocator()._coerce_recursive_extract(overrides["recursive_extract"])
+    if "archive_cleanup_mode" in overrides:
+        engine.app_config.post_extract.archive_cleanup_mode = overrides["archive_cleanup_mode"]
+    if "flatten_single_directory" in overrides:
+        engine.app_config.post_extract.flatten_single_directory = overrides["flatten_single_directory"]
+    if "scheduler_profile" in overrides:
+        locator = ResourceLocator()
+        resolved = locator._build_scheduler_profile_defaults(overrides["scheduler_profile"])
+        engine.app_config.scheduler_profile = resolved["scheduler_profile"]
+        engine.app_config.initial_concurrency_limit = resolved["initial_concurrency_limit"]
+        engine.app_config.scheduler_poll_interval_ms = resolved["scheduler_poll_interval_ms"]
+        engine.app_config.scheduler_scale_up_threshold_mb_s = resolved["scheduler_scale_up_threshold_mb_s"]
+        engine.app_config.scheduler_scale_up_backlog_threshold_mb_s = resolved["scheduler_scale_up_backlog_threshold_mb_s"]
+        engine.app_config.scheduler_scale_down_threshold_mb_s = resolved["scheduler_scale_down_threshold_mb_s"]
+        engine.app_config.scheduler_scale_up_streak_required = resolved["scheduler_scale_up_streak_required"]
+        engine.app_config.scheduler_scale_down_streak_required = resolved["scheduler_scale_down_streak_required"]
+        engine.app_config.scheduler_medium_backlog_threshold = resolved["scheduler_medium_backlog_threshold"]
+        engine.app_config.scheduler_high_backlog_threshold = resolved["scheduler_high_backlog_threshold"]
+        engine.app_config.scheduler_medium_floor_workers = resolved["scheduler_medium_floor_workers"]
+        engine.app_config.scheduler_high_floor_workers = resolved["scheduler_high_floor_workers"]
+        engine.current_concurrency_limit = min(
+            max(1, resolved["initial_concurrency_limit"]),
+            max(1, engine.max_workers_limit),
+        )
+    engine.reset_scan_caches()
+    return overrides
 
 
 def build_password_summary(user_passwords: list[str], use_builtin_passwords: bool, recent_passwords: list[str] | None = None) -> CliPasswordSummary:
@@ -458,6 +694,7 @@ def handle_extract(args, reporter: CliReporter) -> tuple[int, CliCommandResult]:
         selected_paths=list(target_paths),
         use_builtin_passwords=not args.no_builtin_passwords,
     )
+    config_overrides = apply_runtime_config_overrides(engine, args)
     run_summary = engine.run()
 
     result = CliCommandResult(
@@ -468,6 +705,7 @@ def handle_extract(args, reporter: CliReporter) -> tuple[int, CliCommandResult]:
             "json": args.json,
             "quiet": args.quiet,
             "verbose": args.verbose,
+            "config_overrides": config_overrides,
         },
         summary={
             "success_count": run_summary.success_count,
@@ -498,6 +736,7 @@ def handle_scan(args, reporter: CliReporter) -> tuple[int, CliCommandResult]:
 
     common_root = resolve_common_root(target_paths)
     engine = DecompressionEngine(common_root, [], None, None, selected_paths=list(target_paths))
+    config_overrides = apply_runtime_config_overrides(engine, args)
     tasks = engine.scan_archives_readonly()
     scan_items = build_scan_items(engine, tasks)
     summary = summarize_scan(scan_items)
@@ -506,7 +745,7 @@ def handle_scan(args, reporter: CliReporter) -> tuple[int, CliCommandResult]:
 
     return EXIT_OK, CliCommandResult(
         command="scan",
-        inputs={"paths": list(target_paths), "common_root": common_root},
+        inputs={"paths": list(target_paths), "common_root": common_root, "config_overrides": config_overrides},
         summary=summary,
         tasks=[asdict(item) for item in scan_items],
         logs=list(reporter.logs),
@@ -528,6 +767,7 @@ def handle_inspect(args, reporter: CliReporter) -> tuple[int, CliCommandResult]:
 
     common_root = resolve_common_root(target_paths)
     engine = DecompressionEngine(common_root, [], None, None, selected_paths=list(target_paths))
+    config_overrides = apply_runtime_config_overrides(engine, args)
     items = collect_inspection_items(engine, target_paths)
     summary = summarize_inspection(items)
     if not args.json:
@@ -535,7 +775,7 @@ def handle_inspect(args, reporter: CliReporter) -> tuple[int, CliCommandResult]:
 
     return EXIT_OK, CliCommandResult(
         command="inspect",
-        inputs={"paths": list(target_paths), "common_root": common_root},
+        inputs={"paths": list(target_paths), "common_root": common_root, "config_overrides": config_overrides},
         summary=summary,
         items=[asdict(item) for item in items],
         logs=list(reporter.logs),
@@ -587,6 +827,63 @@ def handle_passwords(args, reporter: CliReporter) -> tuple[int, CliCommandResult
     )
 
 
+def handle_config(args, reporter: CliReporter) -> tuple[int, CliCommandResult]:
+    try:
+        config_path, payload = _read_config_payload()
+        changed = False
+        item = payload
+        summary = {"config_path": config_path, "changed": False}
+
+        if args.config_action == "show":
+            if not args.json and not args.quiet:
+                print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
+        elif args.config_action == "set":
+            value = _validate_config_set_value(args.key, args.value)
+            _set_config_value(payload, args.key, value)
+            _write_config_payload(config_path, payload)
+            changed = True
+            item = {"key": args.key, "value": value}
+            reporter.info(f"[CONFIG] 已修改 {args.key} = {value}")
+        elif args.config_action == "blacklist":
+            item = _apply_blacklist_operation(payload, args.operation, args.pattern)
+            if args.operation != "list":
+                _write_config_payload(config_path, payload)
+                changed = True
+                reporter.info(f"[CONFIG] 黑名单已更新: {args.operation} {args.pattern}")
+            elif not args.json and not args.quiet:
+                reporter.info("[CONFIG] 目录黑名单:")
+                for pattern in item.get("directory_patterns", []):
+                    reporter.info(f"  - {pattern}")
+                reporter.info("[CONFIG] 文件名黑名单:")
+                for pattern in item.get("filename_patterns", []):
+                    reporter.info(f"  - {pattern}")
+        else:
+            return EXIT_USAGE, CliCommandResult(command="config", inputs={}, summary={}, errors=[f"未知配置命令: {args.config_action}"])
+    except Exception as exc:
+        error = str(exc)
+        reporter.error(f"[CONFIG] {error}")
+        return EXIT_USAGE, CliCommandResult(
+            command="config",
+            inputs={"action": getattr(args, "config_action", None)},
+            summary={},
+            errors=[error],
+        )
+
+    summary["changed"] = changed
+    return EXIT_OK, CliCommandResult(
+        command="config",
+        inputs={
+            "action": args.config_action,
+            "operation": getattr(args, "operation", None),
+            "key": getattr(args, "key", None),
+            "pattern": getattr(args, "pattern", None),
+        },
+        summary=summary,
+        items=[item],
+        logs=list(reporter.logs),
+    )
+
+
 def dispatch_command(args, reporter: CliReporter) -> tuple[int, CliCommandResult]:
     if args.command == "extract":
         return handle_extract(args, reporter)
@@ -596,6 +893,8 @@ def dispatch_command(args, reporter: CliReporter) -> tuple[int, CliCommandResult
         return handle_inspect(args, reporter)
     if args.command == "passwords":
         return handle_passwords(args, reporter)
+    if args.command == "config":
+        return handle_config(args, reporter)
     return EXIT_USAGE, CliCommandResult(command="", inputs={}, summary={}, errors=[f"未知命令: {args.command}"])
 
 
