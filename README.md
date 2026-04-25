@@ -1,6 +1,8 @@
 # Smart Unpacker
 
-Smart Unpacker 是一个面向 Windows 的智能批量解压工具。它会先扫描文件和目录，结合扩展名、文件头、嵌入式压缩包证据、分卷关系、目录场景和 7-Zip 确认结果，尽量只解压真正应该解压的归档文件。
+Smart Unpacker 是一个面向 Windows 的智能批量解压CLI工具。它会先扫描文件和目录，结合扩展名、文件头、嵌入式压缩包证据、分卷关系、目录场景和 7-Zip 确认结果，尽量只解压真正应该解压的归档文件，使用codex开发。
+
+主要功能是一键批量解压处理复杂的压缩包文件，该项目可以轻松处理各种压缩包脏数据，包括嵌套压缩，伪装carrier压缩包，分卷压缩，自解压，也能应对损坏，缺失分卷的压缩包。推荐注册为windows右键菜单使用
 
 当前项目的 CLI 已支持中文，默认配置文件是 `smart_unpacker_config.json`。源码运行入口是 `python sunpack_cli.py`；Windows 打包后入口是 `sunpack.exe`。
 
