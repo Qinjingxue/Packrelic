@@ -177,6 +177,8 @@ sunpack extract <目标目录> --ask-pw --pause
 
 ## 测试
 
+该项目为保证功能延续性，有较为完善的测试系统
+
 运行单元和功能测试：
 
 ```powershell
