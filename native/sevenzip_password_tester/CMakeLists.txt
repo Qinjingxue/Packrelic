@@ -16,7 +16,24 @@ target_include_directories(sevenzip_password_tester
 )
 
 if(WIN32)
-    target_compile_definitions(sevenzip_password_tester PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(sevenzip_password_tester PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX SUP7Z_BUILD_DLL)
+    target_link_libraries(sevenzip_password_tester PUBLIC OleAut32)
+endif()
+
+add_library(sevenzip_password_tester_capi SHARED
+    src/archive_probe.cpp
+    src/archive_test.cpp
+    src/password_tester.cpp
+)
+
+target_include_directories(sevenzip_password_tester_capi
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+if(WIN32)
+    target_compile_definitions(sevenzip_password_tester_capi PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX SUP7Z_BUILD_DLL)
+    target_link_libraries(sevenzip_password_tester_capi PRIVATE OleAut32)
 endif()
 
 add_executable(sevenzip_password_tester_smoke

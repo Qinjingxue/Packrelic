@@ -59,3 +59,14 @@ def get_7z_path() -> str:
                 if seven_z.exists():
                     return str(seven_z)
     return "7z"
+
+
+def get_7z_dll_path() -> str | None:
+    if sys.platform != "win32":
+        return None
+    for root in candidate_resource_roots():
+        for relative in (Path("tools") / "7z.dll", Path("7z.dll")):
+            seven_z = root / relative
+            if seven_z.exists():
+                return str(seven_z)
+    return None

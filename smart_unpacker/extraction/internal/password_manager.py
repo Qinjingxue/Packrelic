@@ -6,8 +6,7 @@ from smart_unpacker.extraction.internal.errors import (
     has_definite_wrong_password,
 )
 from smart_unpacker.passwords import dedupe_passwords, parse_password_lines, read_password_file
-from smart_unpacker.support.resources import get_7z_path
-from smart_unpacker.support.external_command_cache import cached_readonly_command
+from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester
 
 class PasswordManager:
     def __init__(
@@ -27,6 +26,7 @@ class PasswordManager:
         else:
             self.builtin_passwords = []
         self.recent_successful: List[str] = []
+        self.native_password_tester = NativePasswordTester()
 
     @property
     def recent_passwords(self) -> List[str]:
@@ -57,28 +57,22 @@ class PasswordManager:
         return has_definite_wrong_password(err_text)
 
     def test_password(self, archive_path: str, password: str = "") -> Tuple[subprocess.CompletedProcess, str]:
-        seven_z_path = get_7z_path()
-        import sys
-        si = None
-        if sys.platform == "win32":
-            si = subprocess.STARTUPINFO()
-            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-        cmd = [seven_z_path, "t", archive_path, "-y"]
-        if password:
-            cmd.append(f"-p{password}")
-
-        result = cached_readonly_command(
-            cmd,
-            archive_path,
-            subprocess.run,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            startupinfo=si,
-            stdin=subprocess.DEVNULL,
-        )
-        return result, f"{result.stdout}\n{result.stderr}".lower()
+        native_test = self.native_password_tester.test_archive(archive_path, password=password)
+        if native_test is None:
+            result = subprocess.CompletedProcess(
+                args=["7z.dll", "test-archive", archive_path],
+                returncode=2,
+                stdout="7z.dll backend unavailable",
+                stderr="7z.dll backend unavailable",
+            )
+            return result, "7z.dll backend unavailable"
+        result = native_test.as_completed_process(archive_path)
+        error_text = native_test.message.lower()
+        if native_test.encrypted and "wrong password" not in error_text:
+            error_text = f"{error_text}\nwrong password".strip()
+        if native_test.checksum_error and "checksum error" not in error_text:
+            error_text = f"{error_text}\nchecksum error".strip()
+        return result, error_text
 
     def test_without_password(self, archive_path: str) -> Tuple[subprocess.CompletedProcess, str]:
         return self.test_password(archive_path, "")
@@ -88,26 +82,19 @@ class PasswordManager:
         if not passwords_to_try:
             passwords_to_try = [""]
 
-        last_error = ""
-        last_result = None
-
-        for pwd in passwords_to_try:
-            result, combined = self.test_password(archive_path, pwd)
-            
-            if result.returncode == 0:
+        native_attempt = self.native_password_tester.try_passwords(archive_path, passwords_to_try)
+        if native_attempt is not None:
+            native_result = native_attempt.as_completed_process(archive_path)
+            if native_attempt.ok:
+                pwd = passwords_to_try[native_attempt.matched_index]
                 self.add_recent_password(pwd)
-                return pwd, result, ""
-                
-            last_result = result
-            last_error = combined
-            
-            if self._has_definite_wrong_password(last_error):
-                continue
+                return pwd, native_result, ""
+            return None, native_result, native_attempt.message.lower() or "wrong password"
 
-            if self._has_archive_damage_signals(last_error):
-                return pwd, result, last_error
-                
-            if "wrong password" not in last_error and "cannot open encrypted archive" not in last_error:
-                return None, result, last_error
-                
-        return None, last_result, last_error
+        result = subprocess.CompletedProcess(
+            args=["7z.dll", "test-passwords", archive_path],
+            returncode=2,
+            stdout="7z.dll backend unavailable",
+            stderr="7z.dll backend unavailable",
+        )
+        return None, result, "7z.dll backend unavailable"

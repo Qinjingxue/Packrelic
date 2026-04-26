@@ -16,6 +16,8 @@ enum class PasswordTestStatus {
 struct PasswordTestResult {
     PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
     bool backend_available = false;
+    int matched_index = -1;
+    int attempts = 0;
     std::string message;
 };
 
@@ -27,6 +29,60 @@ PasswordTestResult test_password(
     const std::wstring& password
 );
 
+PasswordTestResult test_passwords(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const wchar_t* const* passwords,
+    int password_count
+);
+
 const char* status_name(PasswordTestStatus status);
 
 }  // namespace smart_unpacker::sevenzip
+
+#ifdef _WIN32
+#ifdef SUP7Z_BUILD_DLL
+#define SUP7Z_API extern "C" __declspec(dllexport)
+#else
+#define SUP7Z_API extern "C" __declspec(dllimport)
+#endif
+
+SUP7Z_API int sup7z_try_passwords(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* const* passwords,
+    int password_count,
+    int* matched_index,
+    int* attempts,
+    wchar_t* message,
+    int message_chars
+);
+
+SUP7Z_API int sup7z_test_archive(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    const wchar_t* password,
+    int* command_ok,
+    int* encrypted,
+    int* checksum_error,
+    wchar_t* archive_type,
+    int archive_type_chars,
+    wchar_t* message,
+    int message_chars
+);
+
+SUP7Z_API int sup7z_probe_archive(
+    const wchar_t* seven_zip_dll_path,
+    const wchar_t* archive_path,
+    int* is_archive,
+    int* is_encrypted,
+    int* is_broken,
+    int* checksum_error,
+    unsigned long long* offset,
+    int* item_count,
+    wchar_t* archive_type,
+    int archive_type_chars,
+    wchar_t* message,
+    int message_chars
+);
+#endif

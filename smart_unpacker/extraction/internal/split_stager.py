@@ -1,11 +1,11 @@
 import itertools
 import os
 import shutil
-import subprocess
 import tempfile
 from dataclasses import dataclass
 from typing import List, Optional
 
+from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 
 
@@ -20,6 +20,7 @@ class SplitVolumeStager:
     def __init__(self, seven_z_path: str):
         self.seven_z_path = seven_z_path
         self._relations = RelationsGroupBuilder()
+        self._native_tester = NativePasswordTester()
 
     def _format_numbered_volume(self, prefix: str, number: int, style: str, width: int) -> str:
         if style == "rar_part":
@@ -78,16 +79,8 @@ class SplitVolumeStager:
                     self._link_or_copy(source, target)
 
                 staged_archive = self._format_numbered_volume(staged_prefix, 1, style, width)
-                test_cmd = [self.seven_z_path, "t", staged_archive, "-y"]
-                result = subprocess.run(
-                    test_cmd,
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    startupinfo=startupinfo,
-                    stdin=subprocess.DEVNULL,
-                )
-                if result.returncode == 0:
+                result = self._native_tester.test_archive(staged_archive)
+                if result and result.ok:
                     cleanup_parts = list(dict.fromkeys(list(all_parts) + candidates))
                     print("[SPLIT] Fixed misnamed split volumes in temporary staging directory.")
                     return StagedSplit(archive=staged_archive, all_parts=cleanup_parts, temp_dir=temp_dir)

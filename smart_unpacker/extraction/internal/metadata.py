@@ -1,12 +1,10 @@
 import os
 import re
-import subprocess
 from typing import List, Optional, Tuple, Dict, Any
 
 from smart_unpacker_native import scan_zip_central_directory_names as _NATIVE_SCAN_ZIP_NAMES
 
-from smart_unpacker.support.resources import get_7z_path
-from smart_unpacker.support.external_command_cache import cached_readonly_command
+from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester
 
 class ArchiveMetadataScanResult:
     def __init__(self, archive_path: str, archive_type: str, reasons: List[str] = None):
@@ -267,40 +265,17 @@ class ArchiveMetadataScanner:
 
     def _scan_with_7z_listing(self, archive_path: str, archive_type: str, password: Optional[str] = None) -> ArchiveMetadataScanResult:
         result = ArchiveMetadataScanResult(archive_path=archive_path, archive_type=archive_type)
-        seven_z_path = get_7z_path()
-        cmd = [seven_z_path, "l", "-slt", "-sccUTF-8", archive_path]
-        if password:
-            cmd.append(f"-p{password}")
-            
-        try:
-            import sys
-            si = None
-            if sys.platform == "win32":
-                si = subprocess.STARTUPINFO()
-                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                
-            run_result = cached_readonly_command(
-                cmd,
-                archive_path,
-                subprocess.run,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                startupinfo=si,
-                stdin=subprocess.DEVNULL,
-                timeout=self.LIST_TIMEOUT_SECONDS,
-            )
-            output = f"{run_result.stdout}\n{run_result.stderr}"
-            path_count = sum(1 for line in output.splitlines() if line.startswith("Path = "))
-            result.sample_count = max(0, path_count - 1)
-            if run_result.returncode == 0:
-                result.reasons.append(f"{archive_type.upper()} 元数据可由 7z 正常列出，保持默认编码处理")
-            else:
-                result.warnings.append(f"{archive_type.upper()} 元数据列出返回码 {run_result.returncode}，保持默认解压参数")
-        except subprocess.TimeoutExpired:
-            result.warnings.append(f"{archive_type.upper()} 元数据列出超时，保持默认解压参数")
-        except Exception as exc:
-            result.warnings.append(f"{archive_type.upper()} 元数据列出失败: {exc}")
+        probe = NativePasswordTester().probe_archive(archive_path)
+        if probe is None:
+            result.warnings.append(f"{archive_type.upper()} 元数据列出失败: 7z.dll backend unavailable")
+            return result
+        result.sample_count = max(0, int(probe.item_count or 0))
+        if probe.is_archive and not probe.is_encrypted:
+            result.reasons.append(f"{archive_type.upper()} 元数据可由 7z.dll 正常列出，保持默认编码处理")
+        elif probe.is_encrypted:
+            result.warnings.append(f"{archive_type.upper()} 元数据需要密码，保持默认解压参数")
+        else:
+            result.warnings.append(f"{archive_type.upper()} 元数据列出失败: {probe.message}")
         return result
 
     def _is_ascii_name(self, raw_name: bytes) -> bool:
