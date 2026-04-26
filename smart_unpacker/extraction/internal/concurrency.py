@@ -85,6 +85,9 @@ class ConcurrencyScheduler:
         self.config = config
         initial_limit = config.get("initial_concurrency_limit", current_limit)
         self.current_limit = max(1, min(initial_limit, max_workers))
+        self.cpu_limit = self.current_limit
+        self.io_limit = self.current_limit
+        self.memory_limit = self.current_limit
         self.max_workers = max_workers
         self.min_workers = 1
         self.dynamic_floor_workers = 1
@@ -100,6 +103,12 @@ class ConcurrencyScheduler:
 
         self.scale_up_streak = 0
         self.scale_down_streak = 0
+        self.cpu_scale_up_streak = 0
+        self.cpu_scale_down_streak = 0
+        self.io_scale_up_streak = 0
+        self.io_scale_down_streak = 0
+        self.memory_scale_up_streak = 0
+        self.memory_scale_down_streak = 0
         self.io_history = []
 
         self.cond = threading.Condition()
@@ -129,21 +138,33 @@ class ConcurrencyScheduler:
             now_bytes = now_io.read_bytes + now_io.write_bytes
             delta = now_bytes - last_bytes
             last_bytes = now_bytes
+            try:
+                cpu_percent = psutil.cpu_percent(interval=None)
+            except Exception:
+                cpu_percent = None
+            try:
+                available_memory = psutil.virtual_memory().available
+            except Exception:
+                available_memory = None
 
             self.io_history.append(delta)
             if len(self.io_history) > 5:
                 self.io_history.pop(0)
 
             avg_delta = sum(self.io_history) / len(self.io_history)
-            self.adjust_once(avg_delta)
+            self.adjust_once(avg_delta, cpu_percent=cpu_percent, available_memory=available_memory)
 
-    def adjust_once(self, avg_delta: float):
+    def adjust_once(self, avg_delta: float, cpu_percent: float | None = None, available_memory: int | None = None):
         scale_up_threshold = self.config.get("scale_up_threshold_mb_s", 50) * 1024 * 1024
         scale_up_backlog_threshold = self.config.get(
             "scale_up_backlog_threshold_mb_s",
             self.config.get("scale_up_threshold_mb_s", 50) * 2,
         ) * 1024 * 1024
         scale_down_threshold = self.config.get("scale_down_threshold_mb_s", 200) * 1024 * 1024
+        cpu_scale_up_threshold = self.config.get("cpu_scale_up_threshold_percent", 65)
+        cpu_scale_down_threshold = self.config.get("cpu_scale_down_threshold_percent", 88)
+        memory_scale_down_available = self.config.get("memory_scale_down_available_mb", 1024) * 1024 * 1024
+        memory_scale_up_available = self.config.get("memory_scale_up_available_mb", 2048) * 1024 * 1024
         scale_up_streak_req = max(1, self.config.get("scale_up_streak_required", 3))
         scale_down_streak_req = max(1, self.config.get("scale_down_streak_required", 2))
         medium_backlog_threshold = max(1, self.config.get("medium_backlog_threshold", 8))
@@ -163,31 +184,39 @@ class ConcurrencyScheduler:
                 dynamic_floor = self.min_workers
             self.dynamic_floor_workers = dynamic_floor
 
-            old_limit = self.current_limit
-            near_capacity = self.active_resource_tokens >= max(1, self.current_limit - 1)
+            old_limits = (self.cpu_limit, self.io_limit, self.memory_limit, self.current_limit)
+            backlog_wants_more = backlog > max(self.cpu_limit, self.io_limit, self.memory_limit) * 2
 
-            if avg_delta < scale_up_threshold or (
-                backlog > self.current_limit * 2 and avg_delta < scale_up_backlog_threshold
-            ):
-                self.scale_up_streak += 1
-                self.scale_down_streak = 0
-            elif avg_delta > scale_down_threshold and near_capacity and backlog <= self.current_limit * 4:
-                self.scale_down_streak += 1
-                self.scale_up_streak = 0
-            else:
-                self.scale_up_streak = 0
-                self.scale_down_streak = 0
-
-            if self.scale_up_streak >= scale_up_streak_req and self.current_limit < self.max_workers:
-                step = 2 if backlog >= self.current_limit * 4 and avg_delta < scale_up_threshold else 1
-                self.current_limit = min(self.max_workers, self.current_limit + step)
-                self.scale_up_streak = 0
-            elif self.scale_down_streak >= scale_down_streak_req and self.current_limit > dynamic_floor:
-                self.current_limit = max(dynamic_floor, self.current_limit - 1)
-                self.scale_down_streak = 0
-
-            self.current_limit = max(dynamic_floor, min(self.current_limit, self.max_workers))
-            if old_limit != self.current_limit:
+            self._adjust_cpu_limit_locked(
+                cpu_percent,
+                backlog_wants_more,
+                dynamic_floor,
+                scale_up_streak_req,
+                scale_down_streak_req,
+                cpu_scale_up_threshold,
+                cpu_scale_down_threshold,
+            )
+            self._adjust_io_limit_locked(
+                avg_delta,
+                backlog,
+                dynamic_floor,
+                scale_up_threshold,
+                scale_up_backlog_threshold,
+                scale_down_threshold,
+                scale_up_streak_req,
+                scale_down_streak_req,
+            )
+            self._adjust_memory_limit_locked(
+                available_memory,
+                backlog_wants_more,
+                dynamic_floor,
+                scale_up_streak_req,
+                scale_down_streak_req,
+                memory_scale_down_available,
+                memory_scale_up_available,
+            )
+            self._refresh_current_limit_locked()
+            if old_limits != (self.cpu_limit, self.io_limit, self.memory_limit, self.current_limit):
                 self.cond.notify_all()
 
     def update_pending_task_estimate(self, pending_count: int, futures_count: int = 0):
@@ -222,7 +251,12 @@ class ConcurrencyScheduler:
             self.cond.notify_all()
 
     def _effective_budget_locked(self):
-        return self.base_budget.scale(self.current_limit, self.max_workers)
+        normalized = self.base_budget.normalized()
+        return type(normalized)(
+            cpu=max(1, min(normalized.cpu, self.cpu_limit)),
+            io=max(1, min(normalized.io, self.io_limit)),
+            memory=max(1, min(normalized.memory, self.memory_limit)),
+        )
 
     def _can_acquire_locked(self, demand: ResourceDemand) -> bool:
         demand = demand.normalized()
@@ -250,3 +284,110 @@ class ConcurrencyScheduler:
             self.active_io_tokens,
             self.active_memory_tokens,
         )
+
+    def _adjust_cpu_limit_locked(
+        self,
+        cpu_percent: float | None,
+        backlog_wants_more: bool,
+        dynamic_floor: int,
+        scale_up_streak_req: int,
+        scale_down_streak_req: int,
+        scale_up_threshold: float,
+        scale_down_threshold: float,
+    ) -> None:
+        if cpu_percent is None:
+            self.cpu_limit = max(dynamic_floor, min(self.cpu_limit, self.max_workers))
+            return
+        near_capacity = self.active_cpu_tokens >= max(1, self.cpu_limit - 1)
+        if backlog_wants_more and cpu_percent < scale_up_threshold:
+            self.cpu_scale_up_streak += 1
+            self.cpu_scale_down_streak = 0
+        elif cpu_percent > scale_down_threshold and near_capacity:
+            self.cpu_scale_down_streak += 1
+            self.cpu_scale_up_streak = 0
+        else:
+            self.cpu_scale_up_streak = 0
+            self.cpu_scale_down_streak = 0
+
+        if self.cpu_scale_up_streak >= scale_up_streak_req and self.cpu_limit < self.max_workers:
+            self.cpu_limit = min(self.max_workers, self.cpu_limit + 1)
+            self.cpu_scale_up_streak = 0
+        elif self.cpu_scale_down_streak >= scale_down_streak_req and self.cpu_limit > dynamic_floor:
+            self.cpu_limit = max(dynamic_floor, self.cpu_limit - 1)
+            self.cpu_scale_down_streak = 0
+        self.cpu_limit = max(dynamic_floor, min(self.cpu_limit, self.max_workers))
+
+    def _adjust_io_limit_locked(
+        self,
+        avg_delta: float,
+        backlog: int,
+        dynamic_floor: int,
+        scale_up_threshold: float,
+        scale_up_backlog_threshold: float,
+        scale_down_threshold: float,
+        scale_up_streak_req: int,
+        scale_down_streak_req: int,
+    ) -> None:
+        near_capacity = self.active_io_tokens >= max(1, self.io_limit - 1)
+        if avg_delta < scale_up_threshold or (backlog > self.io_limit * 2 and avg_delta < scale_up_backlog_threshold):
+            self.io_scale_up_streak += 1
+            self.io_scale_down_streak = 0
+            self.scale_up_streak = self.io_scale_up_streak
+            self.scale_down_streak = 0
+        elif avg_delta > scale_down_threshold and near_capacity and backlog <= self.io_limit * 4:
+            self.io_scale_down_streak += 1
+            self.io_scale_up_streak = 0
+            self.scale_down_streak = self.io_scale_down_streak
+            self.scale_up_streak = 0
+        else:
+            self.io_scale_up_streak = 0
+            self.io_scale_down_streak = 0
+            self.scale_up_streak = 0
+            self.scale_down_streak = 0
+
+        if self.io_scale_up_streak >= scale_up_streak_req and self.io_limit < self.max_workers:
+            step = 2 if backlog >= self.io_limit * 4 and avg_delta < scale_up_threshold else 1
+            self.io_limit = min(self.max_workers, self.io_limit + step)
+            self.io_scale_up_streak = 0
+            self.scale_up_streak = 0
+        elif self.io_scale_down_streak >= scale_down_streak_req and self.io_limit > dynamic_floor:
+            self.io_limit = max(dynamic_floor, self.io_limit - 1)
+            self.io_scale_down_streak = 0
+            self.scale_down_streak = 0
+        self.io_limit = max(dynamic_floor, min(self.io_limit, self.max_workers))
+
+    def _adjust_memory_limit_locked(
+        self,
+        available_memory: int | None,
+        backlog_wants_more: bool,
+        dynamic_floor: int,
+        scale_up_streak_req: int,
+        scale_down_streak_req: int,
+        scale_down_available: int,
+        scale_up_available: int,
+    ) -> None:
+        if available_memory is None:
+            self.memory_limit = max(dynamic_floor, min(self.memory_limit, self.max_workers))
+            return
+        memory_floor = self.min_workers if available_memory < scale_down_available else dynamic_floor
+        near_capacity = self.active_memory_tokens >= max(1, self.memory_limit - 1)
+        if backlog_wants_more and available_memory > scale_up_available:
+            self.memory_scale_up_streak += 1
+            self.memory_scale_down_streak = 0
+        elif available_memory < scale_down_available and near_capacity:
+            self.memory_scale_down_streak += 1
+            self.memory_scale_up_streak = 0
+        else:
+            self.memory_scale_up_streak = 0
+            self.memory_scale_down_streak = 0
+
+        if self.memory_scale_up_streak >= scale_up_streak_req and self.memory_limit < self.max_workers:
+            self.memory_limit = min(self.max_workers, self.memory_limit + 1)
+            self.memory_scale_up_streak = 0
+        elif self.memory_scale_down_streak >= scale_down_streak_req and self.memory_limit > memory_floor:
+            self.memory_limit = max(memory_floor, self.memory_limit - 1)
+            self.memory_scale_down_streak = 0
+        self.memory_limit = max(memory_floor, min(self.memory_limit, self.max_workers))
+
+    def _refresh_current_limit_locked(self) -> None:
+        self.current_limit = max(1, min(self.max_workers, max(self.cpu_limit, self.io_limit, self.memory_limit)))

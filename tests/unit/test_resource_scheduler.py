@@ -60,6 +60,50 @@ def test_concurrency_scheduler_requires_all_resource_dimensions():
     assert scheduler.try_acquire_slot(demand={"cpu": 1, "io": 1, "memory": 1}) is True
 
 
+def test_concurrency_scheduler_adjusts_cpu_io_memory_limits_independently():
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "cpu_tokens": 6,
+            "io_tokens": 6,
+            "memory_tokens": 6,
+            "scale_up_threshold_mb_s": 10,
+            "scale_up_backlog_threshold_mb_s": 20,
+            "scale_down_threshold_mb_s": 100,
+            "cpu_scale_up_threshold_percent": 65,
+            "cpu_scale_down_threshold_percent": 85,
+            "memory_scale_down_available_mb": 1024,
+            "memory_scale_up_available_mb": 2048,
+            "scale_up_streak_required": 1,
+            "scale_down_streak_required": 1,
+        },
+        current_limit=2,
+        max_workers=6,
+    )
+    scheduler.pending_task_estimate = 20
+
+    scheduler.adjust_once(
+        0,
+        cpu_percent=95,
+        available_memory=512 * 1024 * 1024,
+    )
+
+    assert scheduler.io_limit > 2
+    assert scheduler.cpu_limit == 2
+    assert scheduler.memory_limit == 2
+
+    scheduler.active_memory_tokens = scheduler.memory_limit
+    scheduler.adjust_once(
+        150 * 1024 * 1024,
+        cpu_percent=95,
+        available_memory=512 * 1024 * 1024,
+    )
+
+    assert scheduler.memory_limit == 1
+    assert scheduler.io_limit >= 2
+    assert scheduler.cpu_limit >= 1
+
+
 def test_task_executor_submits_only_after_resource_tokens_are_available(tmp_path):
     scheduler = ConcurrencyScheduler(
         {

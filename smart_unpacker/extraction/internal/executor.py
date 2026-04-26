@@ -66,7 +66,13 @@ class TaskExecutor:
                     else:
                         done = {future for future in futures if future.done()}
                         if not done:
-                            continue
+                            done, _running = concurrent.futures.wait(
+                                futures,
+                                timeout=0.05,
+                                return_when=concurrent.futures.FIRST_COMPLETED,
+                            )
+                            if not done:
+                                continue
 
                     for future in done:
                         futures.pop(future, None)
