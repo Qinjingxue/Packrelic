@@ -23,7 +23,8 @@ def _rule_pipeline_config():
         },
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "archive_identity", "enabled": True},
+        {"name": "embedded_payload_identity", "enabled": True},
+        {"name": "zip_structure_identity", "enabled": True},
         {
             "name": "scene_penalty",
             "enabled": True,

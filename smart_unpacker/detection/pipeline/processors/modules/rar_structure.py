@@ -18,6 +18,7 @@ def _empty_result(error: str = "") -> dict[str, Any]:
     return {
         "plausible": False,
         "error": error,
+        "magic_matched": False,
         "format": "",
         "detected_ext": "",
         "version": 0,
@@ -55,6 +56,7 @@ def _inspect_rar4(data: bytes, file_size: int) -> dict[str, Any]:
     result = {
         "plausible": False,
         "error": "",
+        "magic_matched": True,
         "format": "rar",
         "detected_ext": ".rar",
         "version": 4,
@@ -97,6 +99,7 @@ def _inspect_rar5(data: bytes, file_size: int) -> dict[str, Any]:
     result = {
         "plausible": False,
         "error": "",
+        "magic_matched": True,
         "format": "rar",
         "detected_ext": ".rar",
         "version": 5,
@@ -173,6 +176,15 @@ def inspect_rar_structure(
         return _inspect_rar5(data, file_size)
     if data.startswith(RAR4_SIGNATURE):
         return _inspect_rar4(data, file_size)
+    if data.startswith(b"Rar!"):
+        result = _empty_result("rar_signature_incomplete_or_unknown")
+        result.update({
+            "magic_matched": True,
+            "format": "rar",
+            "detected_ext": ".rar",
+            "evidence": ["rar:signature"],
+        })
+        return result
     return _empty_result("rar_signature_not_found")
 
 

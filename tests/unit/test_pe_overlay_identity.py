@@ -35,7 +35,7 @@ def _config():
     return with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
     }, scoring=[
-        {"name": "pe_overlay_archive_identity", "enabled": True},
+        {"name": "embedded_payload_identity", "enabled": True},
     ])
 
 
@@ -56,7 +56,7 @@ def test_pe_overlay_structure_detects_archive_at_overlay_start(tmp_path):
     assert decision.should_extract is False
     assert decision.decision == "maybe_archive"
     assert decision.total_score == 5
-    assert decision.matched_rules == ["pe_overlay_archive_identity"]
+    assert decision.matched_rules == ["embedded_payload_identity"]
     assert bag.get("file.container_type") == "pe"
     assert bag.get("file.detected_ext") == ".7z"
     assert bag.get("file.embedded_archive_found") is True

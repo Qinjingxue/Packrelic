@@ -74,7 +74,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag = FactBag()
             bag.set("file.path", str(carrier))
             decision = DetectionScheduler(config_with_rules([
-                {"name": "archive_identity", "enabled": True},
+                {"name": "embedded_payload_identity", "enabled": True},
             ])).evaluate(bag, FactProvider(str(carrier)))
 
             self.assertTrue(decision.should_extract)
@@ -98,7 +98,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(carrier))
             decision = DetectionScheduler(config_with_rules([
                 {
-                    "name": "archive_identity",
+                    "name": "embedded_payload_identity",
                     "enabled": True,
                     "carrier_scan_tail_window_bytes": 128,
                 },
@@ -118,7 +118,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(carrier))
             decision = DetectionScheduler(config_with_rules([
                 {
-                    "name": "archive_identity",
+                    "name": "embedded_payload_identity",
                     "enabled": True,
                     "carrier_exts": [".jpg"],
                     "ambiguous_resource_exts": [],
@@ -140,7 +140,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(carrier))
             decision = DetectionScheduler(config_with_rules([
                 {
-                    "name": "archive_identity",
+                    "name": "embedded_payload_identity",
                     "enabled": True,
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
@@ -167,7 +167,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(carrier))
             decision = DetectionScheduler(config_with_rules([
                 {
-                    "name": "archive_identity",
+                    "name": "embedded_payload_identity",
                     "enabled": True,
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
@@ -190,7 +190,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(carrier))
             decision = DetectionScheduler(config_with_rules([
                 {
-                    "name": "archive_identity",
+                    "name": "embedded_payload_identity",
                     "enabled": True,
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
@@ -213,7 +213,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(carrier))
             decision = DetectionScheduler(config_with_rules([
                 {
-                    "name": "archive_identity",
+                    "name": "embedded_payload_identity",
                     "enabled": True,
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
@@ -235,7 +235,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(carrier))
             decision = DetectionScheduler(config_with_rules([
                 {
-                    "name": "archive_identity",
+                    "name": "embedded_payload_identity",
                     "enabled": True,
                     "ambiguous_resource_exts": [".bin"],
                     "loose_scan_score": 5,
@@ -267,7 +267,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             }, precheck=[
                 {"name": "scene_protect", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
             ], scoring=[
-                {"name": "archive_identity", "enabled": True},
+                {"name": "embedded_payload_identity", "enabled": True},
                 {"name": "scene_penalty", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
             ])
             decision = DetectionScheduler(config).evaluate(bag, FactProvider(str(resource)))

@@ -54,7 +54,7 @@ def pressure_config(passwords: list[str] | None = None) -> dict:
             "enabled": True,
             "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001", ".exe"]}],
         },
-        {"name": "archive_identity", "enabled": True},
+        {"name": "embedded_payload_identity", "enabled": True},
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},

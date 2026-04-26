@@ -138,21 +138,21 @@ from smart_unpacker.detection.pipeline.processors.registry import register_proce
 
 
 @register_processor(
-    "archive_identity",
-    input_facts={"archive.magic_start", "embedded_archive.analysis"},
-    output_facts={"archive.identity"},
+    "my_archive_structure",
+    input_facts={"file.path", "file.magic_bytes"},
+    output_facts={"my_archive.structure"},
     schemas={
-        "archive.identity": {
+        "my_archive.structure": {
             "type": "dict",
-            "description": "统一的压缩包身份判断。",
+            "description": "自定义压缩格式结构判断。",
         },
     },
 )
-def process_archive_identity(context):
+def process_my_archive_structure(context):
     ...
 ```
 
-处理器适合放“聚合事实”的逻辑，例如 `archive.identity` 会统一魔数、嵌入载荷和 ZIP 结构证据。这样 scoring 规则只消费归一化结果，不需要重复扫描文件。
+处理器适合放派生事实逻辑，例如结构校验、嵌入载荷扫描或场景事实归一化。这样 scoring 规则只消费 facts 做加减分，不需要重复扫描文件。
 
 处理器的输出 fact 同样会写入全局 `FACT_SCHEMA`，规则可以直接在 `required_facts` 中依赖它。
 
@@ -166,19 +166,18 @@ def process_archive_identity(context):
 | `seven_zip_structure_accept` | `precheck` | 对 start header 与 next header CRC 均可信的 7z 结构直接接受。 |
 | `rar_structure_accept` | `precheck` | 对 main header 与 header CRC 均可信的 RAR4/RAR5 结构直接接受。 |
 | `extension` | `scoring` | 按扩展名组给候选加分。 |
-| `archive_identity` | `scoring` | 消费 `archive.identity`，根据通用起始魔数和嵌入载荷证据加分并写入检测扩展名。 |
+| `embedded_payload_identity` | `scoring` | 消费 `embedded_archive.analysis` 和 `pe.overlay_structure`，按普通载体或 PE overlay 中的归档载荷证据加分。 |
 | `seven_zip_structure_identity` | `scoring` | 消费 `7z.structure`，按 7z start header CRC 和 next header 范围证据加分。 |
 | `rar_structure_identity` | `scoring` | 消费 `rar.structure`，按 RAR4/RAR5 首个 header 结构证据加分。 |
 | `zip_structure_identity` | `scoring` | 消费 `zip.eocd_structure`，按 ZIP EOCD/central directory 证据加分。 |
 | `tar_structure_identity` | `scoring` | 消费 `tar.header_structure`，按 TAR header checksum 证据加分。 |
 | `archive_container_identity` | `scoring` | 消费 `archive.container_structure`，按 CAB、ARJ、CPIO 结构证据加分。 |
 | `compression_stream_identity` | `scoring` | 消费 `compression.stream_structure`，按 gzip、bzip2、xz、zstd 结构证据加分。 |
-| `pe_overlay_archive_identity` | `scoring` | 消费 `pe.overlay_structure`，按 PE overlay 中的归档载荷证据加分。 |
 | `scene_penalty` | `scoring` | 对运行目录资源、弱保护路径和常见资源文件扣分。 |
 | `seven_zip_probe` | `confirmation` | 用 7-Zip 轻量探测可疑候选。 |
 | `seven_zip_validation` | `confirmation` | 用 7-Zip 测试候选是否可读、是否加密。 |
 
-`blacklist` 和 `size_minimum` 已移到 `filesystem.scan_filters`，会在候选进入 detection 规则流水线前执行。默认流水线使用 `extension`、结构类 identity 规则、`archive_identity` 和 `scene_penalty`。历史 scoring 规则已移出 active 规则包，底层 `magic_bytes` fact collector 与 `embedded_archive` processor 仍由 `archive_identity` 间接使用。
+`blacklist` 和 `size_minimum` 已移到 `filesystem.scan_filters`，会在候选进入 detection 规则流水线前执行。默认流水线使用 `extension`、结构类 identity 规则、`embedded_payload_identity` 和 `scene_penalty`。魔数弱证据归属各格式结构规则；普通载体与 PE overlay 载荷统一由 `embedded_payload_identity` 处理。
 
 ## 常用事实名
 
@@ -200,7 +199,6 @@ def process_archive_identity(context):
 | `file.logical_name` | `str` | 分卷或关系组推导出的逻辑名称。 |
 | `relation.is_split_related` | `bool` | 候选是否属于分卷关系。 |
 | `embedded_archive.analysis` | `dict` | 嵌入式压缩包扫描结果。 |
-| `archive.identity` | `dict` | 统一的压缩包身份判断。 |
 | `7z.structure` | `dict` | 7z signature、start header CRC 与 next header 范围检查结果。 |
 | `rar.structure` | `dict` | RAR4/RAR5 signature 与首个 header 结构检查结果。 |
 | `7z.probe` | `dict` | 7-Zip 轻量探测结果。 |

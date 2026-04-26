@@ -8,7 +8,7 @@ from tests.helpers.detection_config import with_detection_pipeline
 
 def _payload():
     return with_detection_pipeline(
-        scoring=[{"name": "archive_identity", "enabled": True}],
+        scoring=[{"name": "embedded_payload_identity", "enabled": True}],
     )
 
 
@@ -56,4 +56,4 @@ def test_effective_config_includes_thresholds_scheduler_and_rule_pipeline():
     assert effective["filesystem"]["directory_scan_mode"] == "current_dir_only"
     assert effective["scheduler"]["scheduler_profile"] == "auto"
     assert effective["scheduler"]["resolved_scheduler_profile"] in {"conservative", "aggressive"}
-    assert effective["detection"]["rule_pipeline"]["scoring"][0]["name"] == "archive_identity"
+    assert effective["detection"]["rule_pipeline"]["scoring"][0]["name"] == "embedded_payload_identity"

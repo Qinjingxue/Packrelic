@@ -14,7 +14,7 @@ SCAN_CONFIG = with_detection_pipeline({
     {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
 ], scoring=[
     {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 1, "extensions": [".zip", ".7z", ".rar", ".001"]}]},
-    {"name": "archive_identity", "enabled": True},
+    {"name": "embedded_payload_identity", "enabled": True},
     {"name": "seven_zip_structure_identity", "enabled": True, "structure_score": 1},
     {"name": "rar_structure_identity", "enabled": True, "structure_score": 1},
 ])

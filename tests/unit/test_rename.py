@@ -46,7 +46,6 @@ def test_rename_planner_keeps_embedded_carrier_extension(tmp_path):
     bag.set("file.detected_ext", ".rar")
     bag.set("file.embedded_archive_found", True)
     bag.set("embedded_archive.analysis", {"found": True, "detected_ext": ".rar", "offset": 128})
-    bag.set("archive.identity", {"offset": 128})
 
     instructions = RenameScheduler().plan([ArchiveTask(fact_bag=bag, score=10)])
 

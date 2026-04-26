@@ -1,4 +1,3 @@
-IDENTITY_SCAN_EXTS = [".7z", ".zip", ".rar", ".gz", ".bz2", ".xz", ".001"]
 CARRIER_EXTS = [".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"]
 AMBIGUOUS_RESOURCE_EXTS = [
     ".dat", ".bin", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tga",
@@ -52,8 +51,7 @@ def with_detection_pipeline(
 def _complete_rule(rule: dict) -> dict:
     result = dict(rule)
     name = result.get("name")
-    if name == "archive_identity":
-        result.setdefault("identity_scan_exts", list(IDENTITY_SCAN_EXTS))
+    if name == "embedded_payload_identity":
         result.setdefault("carrier_exts", list(CARRIER_EXTS))
         result.setdefault("ambiguous_resource_exts", list(AMBIGUOUS_RESOURCE_EXTS))
     elif name == "scene_penalty":

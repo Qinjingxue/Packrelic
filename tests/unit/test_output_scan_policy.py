@@ -10,7 +10,7 @@ def _config():
             "extension_score_groups": [{"score": 5, "extensions": [".zip"]}],
         },
         {
-            "name": "archive_identity",
+            "name": "embedded_payload_identity",
             "ambiguous_resource_exts": [".bin"],
             "carrier_exts": [".png"],
         },

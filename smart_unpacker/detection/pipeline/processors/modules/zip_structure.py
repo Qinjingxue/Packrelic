@@ -14,6 +14,7 @@ def inspect_zip_local_header(path: str, offset: int) -> dict[str, Any]:
     offset = max(0, int(offset or 0))
     result = {
         "offset": offset,
+        "magic_matched": False,
         "plausible": False,
         "error": "",
     }
@@ -28,9 +29,11 @@ def inspect_zip_local_header(path: str, offset: int) -> dict[str, Any]:
         return result
 
     if len(header) < LOCAL_HEADER_LENGTH:
+        result["magic_matched"] = header.startswith(b"PK")
         result["error"] = "short_header"
         return result
     if header[:4] != b"PK\x03\x04":
+        result["magic_matched"] = header.startswith((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"))
         result["error"] = "bad_signature"
         return result
 
@@ -61,6 +64,7 @@ def inspect_zip_local_header(path: str, offset: int) -> dict[str, Any]:
         return result
 
     result.update({
+        "magic_matched": True,
         "plausible": True,
         "version_needed": version_needed,
         "compression_method": compression_method,

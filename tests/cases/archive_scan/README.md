@@ -94,7 +94,9 @@ tests/cases/archive_scan/
 | 规则名 | 含义 |
 | --- | --- |
 | `extension` | 扩展名规则命中，例如 `.zip`、`.7z`。 |
-| `archive_identity` | 文件内容/魔数/嵌入归档身份识别命中。 |
+| `embedded_payload_identity` | 普通载体或 PE overlay 中的嵌入归档载荷命中。 |
+| `seven_zip_structure_identity` | 7z 起始魔数或结构证据命中。 |
+| `zip_structure_identity` | ZIP local header 或 EOCD/central directory 结构证据命中。 |
 | `scene_penalty` | 场景扣分规则参与计算。 |
 | `seven_zip_probe` | 7-Zip 轻量探测确认或拒绝。 |
 | `seven_zip_validation` | 7-Zip 测试确认或拒绝。 |
@@ -145,7 +147,7 @@ tests/cases/archive_scan/
       "path": "payload.bin",
       "should_extract": true,
       "decision": "archive",
-      "matched_rules_include": ["archive_identity"]
+      "matched_rules_include": ["seven_zip_structure_identity"]
     }
   ]
 }

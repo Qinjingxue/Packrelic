@@ -17,9 +17,8 @@ CONFIGS: dict[str, dict[str, Any]] = {
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
         {
-            "name": "archive_identity",
+            "name": "embedded_payload_identity",
             "enabled": True,
-            "identity_scan_exts": [".7z", ".zip", ".rar", ".gz", ".bz2", ".xz", ".001"],
             "carrier_exts": [],
             "ambiguous_resource_exts": [".bin"],
             "loose_scan_score": 5,
@@ -31,7 +30,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
-        {"name": "archive_identity", "enabled": True, "carrier_tail_score": 5},
+        {"name": "embedded_payload_identity", "enabled": True, "carrier_tail_score": 5},
     ]),
     "scene_protect_enabled": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
@@ -60,7 +59,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
         {"name": "scene_protect", "enabled": True},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "archive_identity", "enabled": True},
+        {"name": "embedded_payload_identity", "enabled": True},
         {"name": "seven_zip_structure_identity", "enabled": True},
         {"name": "rar_structure_identity", "enabled": True},
         {"name": "scene_penalty", "enabled": True},

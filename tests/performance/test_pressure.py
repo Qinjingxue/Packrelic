@@ -28,7 +28,7 @@ def pressure_scan_config() -> dict:
         },
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "archive_identity", "enabled": True, "carrier_tail_score": 5},
+        {"name": "embedded_payload_identity", "enabled": True, "carrier_tail_score": 5},
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True},
         {"name": "seven_zip_validation", "enabled": True},

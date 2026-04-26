@@ -27,11 +27,11 @@ class RenameScheduler:
             detected_ext = bag.get("file.detected_ext")
             probe_offset = bag.get("file.probe_offset")
             embedded_archive_found = bool(bag.get("file.embedded_archive_found"))
-            archive_identity = bag.get("archive.identity") or {}
             embedded_analysis = bag.get("embedded_archive.analysis") or {}
+            overlay_analysis = bag.get("pe.overlay_structure") or {}
             embedded_offset = max(
-                int(archive_identity.get("offset") or 0),
                 int(embedded_analysis.get("offset") or 0),
+                int(overlay_analysis.get("archive_offset") or 0),
             )
             split_role = bag.get("file.split_role")
             match_rar_disguised = bag.get("relation.match_rar_disguised")

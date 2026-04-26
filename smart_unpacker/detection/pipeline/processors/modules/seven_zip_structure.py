@@ -16,6 +16,7 @@ def _empty_result(error: str = "") -> dict[str, Any]:
     return {
         "plausible": False,
         "error": error,
+        "magic_matched": False,
         "format": "",
         "detected_ext": "",
         "version_major": 0,
@@ -48,7 +49,15 @@ def inspect_seven_zip_structure(
         return _empty_result(f"os_error:{exc}")
 
     if file_size < HEADER_SIZE:
-        return _empty_result("file_too_small")
+        result = _empty_result("file_too_small")
+        if header.startswith(SEVEN_Z_SIGNATURE):
+            result.update({
+                "magic_matched": True,
+                "format": "7z",
+                "detected_ext": ".7z",
+                "evidence": ["7z:signature"],
+            })
+        return result
     if len(header) < HEADER_SIZE:
         return _empty_result("short_header")
     if not header.startswith(SEVEN_Z_SIGNATURE):
@@ -64,6 +73,7 @@ def inspect_seven_zip_structure(
     result = {
         "plausible": False,
         "error": "",
+        "magic_matched": True,
         "format": "7z",
         "detected_ext": ".7z",
         "version_major": version_major,

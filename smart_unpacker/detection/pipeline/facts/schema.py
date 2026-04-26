@@ -159,7 +159,7 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     },
     "file.magic_matched": {
         "type": "bool",
-        "producer": "rules.scoring.archive_identity",
+        "producer": "rules.scoring",
         "description": "Whether archive identity matched a strong magic signature.",
     },
     "file.container_type": {
@@ -189,18 +189,13 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     },
     "file.embedded_archive_found": {
         "type": "bool",
-        "producer": "rules.scoring.archive_identity",
+        "producer": "rules.scoring.embedded_payload_identity",
         "description": "Whether a carrier/ambiguous resource contains an embedded archive payload.",
     },
     "embedded_archive.analysis": {
         "type": "dict",
         "producer": "processors.embedded_archive",
         "description": "Embedded archive scan result including found, detected_ext, offset, mode, and ZIP plausibility.",
-    },
-    "archive.identity": {
-        "type": "dict",
-        "producer": "processors.archive_identity",
-        "description": "Unified archive identity guess produced from magic bytes and embedded archive evidence facts.",
     },
     "zip.local_header": {
         "type": "dict",

@@ -20,7 +20,7 @@ def scan_config(patterns=None, blocked_extensions=None):
         },
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "archive_identity", "enabled": True},
+        {"name": "embedded_payload_identity", "enabled": True},
     ])
 
 
@@ -136,7 +136,7 @@ def test_scene_protect_stops_runtime_resource_archive_but_not_generic_control(tm
         {"name": "scene_protect", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-        {"name": "archive_identity", "enabled": True},
+        {"name": "embedded_payload_identity", "enabled": True},
     ])
 
     decisions = decisions_for(tmp_path, config)

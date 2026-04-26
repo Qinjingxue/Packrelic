@@ -7,6 +7,7 @@ from smart_unpacker.detection.pipeline.rules.registry import register_rule
 
 
 DEFAULT_SEVEN_Z_STRUCTURE_SCORE = 5
+DEFAULT_SEVEN_Z_MAGIC_SCORE = 2
 
 
 @register_rule(name="seven_zip_structure_identity", layer="scoring")
@@ -21,17 +22,28 @@ class SevenZipStructureIdentityScoreRule(RuleBase):
             "default": DEFAULT_SEVEN_Z_STRUCTURE_SCORE,
             "description": "Score for a plausible 7z start-header structure.",
         },
+        "magic_score": {
+            "type": "int",
+            "required": False,
+            "default": DEFAULT_SEVEN_Z_MAGIC_SCORE,
+            "description": "Score for a 7z magic signature without stronger start-header structure.",
+        },
     }
 
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
         structure = facts.get("7z.structure") or {}
-        if not structure.get("plausible"):
+        if not structure.get("plausible") and not structure.get("magic_matched"):
             return RuleEffect.pass_()
         facts.set("file.detected_ext", ".7z")
         facts.set("file.magic_matched", True)
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", 0)
-        score = config.get("structure_score", DEFAULT_SEVEN_Z_STRUCTURE_SCORE)
+        score = (
+            config.get("structure_score", DEFAULT_SEVEN_Z_STRUCTURE_SCORE)
+            if structure.get("plausible")
+            else config.get("magic_score", DEFAULT_SEVEN_Z_MAGIC_SCORE)
+        )
         if not score:
             return RuleEffect.pass_()
-        return RuleEffect.add_score(score, reason="7z structure: start header CRC and next header range")
+        reason = "7z structure: start header CRC and next header range" if structure.get("plausible") else "7z structure: magic signature"
+        return RuleEffect.add_score(score, reason=reason)

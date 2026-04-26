@@ -16,6 +16,7 @@ def _empty_result(error: str = "") -> dict[str, Any]:
     return {
         "plausible": False,
         "error": error,
+        "magic_matched": False,
         "eocd_offset": 0,
         "central_directory_offset": 0,
         "central_directory_size": 0,
@@ -94,6 +95,7 @@ def inspect_zip_eocd_structure(path: str) -> dict[str, Any]:
     result = {
         "plausible": False,
         "error": "",
+        "magic_matched": True,
         "eocd_offset": eocd_offset,
         "central_directory_offset": physical_central_offset,
         "central_directory_size": central_directory_size,

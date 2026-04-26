@@ -27,7 +27,7 @@ class OutputScanPolicy:
         _, ext = os.path.splitext(filename)
         embedded_config = module_config(self.config, "processors", "embedded_archive")
         if not embedded_config:
-            embedded_config = self._rule_config("scoring", "archive_identity")
+            embedded_config = self._rule_config("scoring", "embedded_payload_identity")
 
         extension_config = self._rule_config("scoring", "extension")
         standard_exts = set(self._normalize_extension_score_groups(extension_config.get("extension_score_groups", [])))
