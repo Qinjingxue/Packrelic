@@ -34,6 +34,26 @@ class PasswordResolver:
         if not self.password_tester.passwords:
             return self._remember(archive_key, "", encrypted=False)
 
+        if self._facts_require_password(fact_bag):
+            password, result, error = self.password_tester.find_working_password(archive_path, part_paths=part_paths)
+            if password is None:
+                test_result, error_text = self.password_tester.test_without_password(archive_path, part_paths=part_paths)
+                if has_archive_damage_signals(error_text) and not has_definite_wrong_password(error_text):
+                    return PasswordResolution(
+                        password=None,
+                        test_result=test_result,
+                        error_text=error_text,
+                        archive_key=archive_key,
+                    )
+            return self._remember(
+                archive_key,
+                password,
+                test_result=result,
+                error_text=error,
+                encrypted=True,
+                remember_only_on_success=True,
+            )
+
         test_result, error_text = self.password_tester.test_without_password(archive_path, part_paths=part_paths)
         if test_result.returncode == 0:
             return self._remember(archive_key, "", test_result=test_result, encrypted=False)
@@ -94,6 +114,15 @@ class PasswordResolver:
             if health.get("is_archive") and not health.get("is_encrypted") and not health.get("is_wrong_password"):
                 return True
         return bool(fact_bag.get("file.validation_ok")) and not bool(fact_bag.get("file.validation_encrypted"))
+
+    @staticmethod
+    def _facts_require_password(fact_bag: FactBag | None) -> bool:
+        if fact_bag is None:
+            return False
+        health = fact_bag.get("resource.health") or {}
+        if isinstance(health, dict) and (health.get("is_encrypted") or health.get("is_wrong_password")):
+            return True
+        return bool(fact_bag.get("file.validation_encrypted"))
 
     @staticmethod
     def _archive_key_from_fact_bag(fact_bag: FactBag | None) -> str:

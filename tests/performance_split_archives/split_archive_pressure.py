@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.coordinator.runner import PipelineRunner
 from smart_unpacker.coordinator.scanner import ScanOrchestrator
+from smart_unpacker.extraction.internal.workflow import preflight as preflight_module
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.tool_config import get_optional_rar, require_7z
@@ -44,6 +46,117 @@ class PressureCase:
     expected: str
     build_seconds: float
     skip_reason: str | None = None
+
+
+class TimingRecorder:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._totals: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._restore_callbacks: list[Callable[[], None]] = []
+
+    def measure(self, label: str, callback: Callable, *args, **kwargs):
+        started = time.perf_counter()
+        try:
+            return callback(*args, **kwargs)
+        finally:
+            elapsed = time.perf_counter() - started
+            with self._lock:
+                self._totals[label] = self._totals.get(label, 0.0) + elapsed
+                self._counts[label] = self._counts.get(label, 0) + 1
+
+    def ms(self, label: str) -> float:
+        return round(self._totals.get(label, 0.0) * 1000, 2)
+
+    def snapshot(self) -> dict:
+        labels = sorted(self._totals)
+        return {
+            label: {
+                "ms": round(self._totals[label] * 1000, 2),
+                "count": self._counts.get(label, 0),
+            }
+            for label in labels
+        }
+
+    def add_restore(self, callback: Callable[[], None]) -> None:
+        self._restore_callbacks.append(callback)
+
+    def restore(self) -> None:
+        while self._restore_callbacks:
+            self._restore_callbacks.pop()()
+
+
+def wrap_method(owner, method_name: str, recorder: TimingRecorder, label: str):
+    original = getattr(owner, method_name)
+
+    def wrapped(*args, **kwargs):
+        return recorder.measure(label, original, *args, **kwargs)
+
+    setattr(owner, method_name, wrapped)
+    recorder.add_restore(lambda: setattr(owner, method_name, original))
+
+
+def wrap_attribute(owner, attribute_name: str, recorder: TimingRecorder, label: str):
+    original = getattr(owner, attribute_name)
+
+    def wrapped(*args, **kwargs):
+        return recorder.measure(label, original, *args, **kwargs)
+
+    setattr(owner, attribute_name, wrapped)
+    recorder.add_restore(lambda: setattr(owner, attribute_name, original))
+
+
+def attach_pipeline_timing(runner: PipelineRunner) -> TimingRecorder:
+    recorder = TimingRecorder()
+    wrap_method(runner.task_scanner, "scan_targets", recorder, "pipeline_scan")
+    wrap_method(runner.batch_runner, "prepare_tasks", recorder, "prepare")
+    wrap_method(runner.extractor, "inspect", recorder, "health_password_preflight")
+    wrap_method(runner.batch_runner.resource_inspector, "inspect", recorder, "resource_preflight")
+    wrap_method(runner.batch_runner.resource_inspector, "record_estimated_single_task_profile", recorder, "resource_estimate")
+    wrap_attribute(preflight_module, "cached_check_archive_health", recorder, "health_probe")
+    wrap_attribute(preflight_module, "cached_test_archive", recorder, "preflight_structural_test")
+    wrap_method(runner.extractor.password_resolver, "resolve", recorder, "password_resolve")
+    wrap_method(runner.extractor.password_tester, "test_password", recorder, "password_native_test_archive")
+    wrap_method(runner.extractor.password_tester, "find_working_password", recorder, "password_find_working")
+    wrap_method(runner.extractor.password_tester.native_password_tester, "try_passwords", recorder, "password_native_try")
+    wrap_method(runner.extractor, "extract", recorder, "extract")
+    wrap_method(runner.batch_runner.verifier, "verify", recorder, "verify")
+    wrap_method(runner.postprocess_actions, "apply", recorder, "postprocess")
+    return recorder
+
+
+def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
+    if recorder is None:
+        return {
+            "pipeline_scan_ms": 0.0,
+            "prepare_ms": 0.0,
+            "preflight_ms": 0.0,
+            "health_ms": 0.0,
+            "password_resolve_ms": 0.0,
+            "password_native_test_ms": 0.0,
+            "resource_ms": 0.0,
+            "extract_ms": 0.0,
+            "verify_ms": 0.0,
+            "postprocess_ms": 0.0,
+            "timings": {},
+        }
+    return {
+        "pipeline_scan_ms": recorder.ms("pipeline_scan"),
+        "prepare_ms": recorder.ms("prepare"),
+        "preflight_ms": recorder.ms("health_password_preflight"),
+        "health_ms": recorder.ms("health_probe"),
+        "password_resolve_ms": recorder.ms("password_resolve"),
+        "password_native_test_ms": round((
+            recorder.ms("password_native_test_archive")
+            + recorder.ms("password_native_try")
+            + recorder.ms("preflight_structural_test")
+        ), 2),
+        "resource_ms": recorder.ms("resource_preflight") + recorder.ms("resource_estimate"),
+        "extract_ms": recorder.ms("extract"),
+        "verify_ms": recorder.ms("verify"),
+        "postprocess_ms": recorder.ms("postprocess"),
+        "timings": recorder.snapshot(),
+    }
 
 
 def pressure_config(passwords: list[str] | None = None, scheduler_profile: str = "single") -> dict:
@@ -317,6 +430,7 @@ def run_case(pressure_case: PressureCase) -> dict:
             "failed_tasks": [],
             "skip_reason": pressure_case.skip_reason,
             "files": [],
+            **timing_columns(None),
         }
 
     clean_outputs(pressure_case.case)
@@ -326,8 +440,13 @@ def run_case(pressure_case: PressureCase) -> dict:
     scan_results = ScanOrchestrator(scan_config).scan(str(pressure_case.case.archive_dir))
     scan_seconds = time.perf_counter() - started
 
+    runner = PipelineRunner(pressure_config(passwords=pressure_case.passwords))
+    pipeline_timing = attach_pipeline_timing(runner)
     started = time.perf_counter()
-    summary = PipelineRunner(pressure_config(passwords=pressure_case.passwords)).run(str(pressure_case.case.archive_dir))
+    try:
+        summary = runner.run(str(pressure_case.case.archive_dir))
+    finally:
+        pipeline_timing.restore()
     pipeline_seconds = time.perf_counter() - started
 
     extracted = marker_extracted(pressure_case.case)
@@ -351,6 +470,7 @@ def run_case(pressure_case: PressureCase) -> dict:
         "failed_tasks": list(summary.failed_tasks),
         "skip_reason": pressure_case.skip_reason,
         "files": sorted(path.name for path in pressure_case.case.archive_dir.iterdir() if path.is_file()),
+        **timing_columns(pipeline_timing),
     }
 
 
@@ -406,9 +526,15 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
     scan_results = ScanOrchestrator(scan_config).scan(str(batch_dir))
     scan_seconds = time.perf_counter() - started
 
+    runner = PipelineRunner(pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto"))
+    pipeline_timing = attach_pipeline_timing(runner)
     started = time.perf_counter()
-    summary = PipelineRunner(pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")).run(str(batch_dir))
+    try:
+        summary = runner.run(str(batch_dir))
+    finally:
+        pipeline_timing.restore()
     pipeline_seconds = time.perf_counter() - started
+    timing_data = timing_columns(pipeline_timing)
 
     rows: list[dict] = []
     expected_successes = sum(1 for pressure_case in pressure_cases if pressure_case.expected == "success")
@@ -437,6 +563,7 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
         "failed_tasks": list(summary.failed_tasks),
         "skip_reason": None,
         "files": batch_files,
+        **timing_data,
     })
 
     for pressure_case in pressure_cases:
@@ -470,6 +597,7 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
             "failed_tasks": case_failed_tasks,
             "skip_reason": pressure_case.skip_reason,
             "files": list(case.metadata.get("batch_files") or [case.entry_path.name]),
+            **timing_data,
         })
     return rows
 
@@ -485,6 +613,15 @@ def print_table(rows: list[dict]):
         "build_ms",
         "scan_ms",
         "pipeline_ms",
+        "pipeline_scan_ms",
+        "preflight_ms",
+        "health_ms",
+        "password_resolve_ms",
+        "password_native_test_ms",
+        "resource_ms",
+        "extract_ms",
+        "verify_ms",
+        "postprocess_ms",
         "scan_results",
         "success_count",
         "failed_count",

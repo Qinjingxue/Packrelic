@@ -31,6 +31,10 @@ By default the script is report-oriented and exits with 0 even if a scenario exp
 an unexpected observed result. Use `--strict` when you want expectation mismatches to
 return a non-zero exit code.
 
+The report includes per-layer timing columns. `pipeline_ms` is wall-clock time for
+the project pipeline call, while `extract_ms` is accumulated worker time across
+archive extraction tasks and can exceed wall time when tasks run concurrently.
+
 `--profile acceptance` runs a small representative subset one case at a time.
 `--profile acceptance-batch` puts a broad representative matrix into one input
 directory and runs the pipeline once; this mixed-directory batch is included in

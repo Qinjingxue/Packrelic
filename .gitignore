@@ -30,6 +30,7 @@ env/
 # Local reports and generated outputs
 reports/
 *.log
+.smart_unpacker_cache/
 
 # Local fixtures and private samples
 fixtures/samples/

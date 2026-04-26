@@ -32,8 +32,8 @@ class PasswordStore:
 
     def candidates(self) -> List[str]:
         return dedupe_passwords(
-            list(self.user_passwords)
-            + list(self.recent_passwords)
+            list(self.recent_passwords)
+            + list(self.user_passwords)
             + list(self.builtin_passwords)
         )
 
