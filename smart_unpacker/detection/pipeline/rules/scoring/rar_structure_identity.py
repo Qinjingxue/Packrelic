@@ -8,6 +8,7 @@ from smart_unpacker.detection.pipeline.rules.registry import register_rule
 
 DEFAULT_RAR_STRUCTURE_SCORE = 5
 DEFAULT_RAR_MAGIC_SCORE = 2
+DEFAULT_RAR_BLOCK_WALK_SCORE = 6
 
 
 @register_rule(name="rar_structure_identity", layer="scoring")
@@ -28,6 +29,12 @@ class RarStructureIdentityScoreRule(RuleBase):
             "default": DEFAULT_RAR_MAGIC_SCORE,
             "description": "Score for a RAR magic signature without stronger first-header structure.",
         },
+        "block_walk_score": {
+            "type": "int",
+            "required": False,
+            "default": DEFAULT_RAR_BLOCK_WALK_SCORE,
+            "description": "Score for a RAR main header plus a valid following block/header.",
+        },
     }
 
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
@@ -38,13 +45,15 @@ class RarStructureIdentityScoreRule(RuleBase):
         facts.set("file.magic_matched", True)
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", 0)
-        score = (
-            config.get("structure_score", DEFAULT_RAR_STRUCTURE_SCORE)
-            if structure.get("plausible")
-            else config.get("magic_score", DEFAULT_RAR_MAGIC_SCORE)
-        )
+        if structure.get("block_walk_ok"):
+            score = config.get("block_walk_score", DEFAULT_RAR_BLOCK_WALK_SCORE)
+            reason = f"RAR structure: RAR{structure.get('version') or ''} second block walk"
+        elif structure.get("plausible"):
+            score = config.get("structure_score", DEFAULT_RAR_STRUCTURE_SCORE)
+            reason = f"RAR structure: RAR{structure.get('version') or ''} first header"
+        else:
+            score = config.get("magic_score", DEFAULT_RAR_MAGIC_SCORE)
+            reason = "RAR structure: magic signature"
         if not score:
             return RuleEffect.pass_()
-        version = structure.get("version") or ""
-        reason = f"RAR structure: RAR{version} first header" if structure.get("plausible") else "RAR structure: magic signature"
         return RuleEffect.add_score(score, reason=reason)

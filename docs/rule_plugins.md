@@ -163,12 +163,12 @@ def process_my_archive_structure(context):
 | `scene_protect` | `precheck` | 保护游戏、程序等运行目录中的资源归档。 |
 | `zip_structure_accept` | `precheck` | 对 EOCD、central directory entry walk 和 local header 回指可信的 ZIP 结构直接接受。 |
 | `tar_structure_accept` | `precheck` | 对 ustar header checksum 和 entry walk 可信的 TAR 结构直接接受。 |
-| `seven_zip_structure_accept` | `precheck` | 对 start header 与 next header CRC 均可信的 7z 结构直接接受。 |
-| `rar_structure_accept` | `precheck` | 对 main header 与 header CRC 均可信的 RAR4/RAR5 结构直接接受。 |
+| `seven_zip_structure_accept` | `precheck` | 对 start header、next header CRC 和 next header NID 均可信的 7z 结构直接接受。 |
+| `rar_structure_accept` | `precheck` | 对 main header CRC 与后续 block/header walk 均可信的 RAR4/RAR5 结构直接接受。 |
 | `extension` | `scoring` | 按扩展名组给候选加分。 |
 | `embedded_payload_identity` | `scoring` | 消费 `embedded_archive.analysis` 和 `pe.overlay_structure`，按普通载体或 PE overlay 中的归档载荷证据加分。 |
-| `seven_zip_structure_identity` | `scoring` | 消费 `7z.structure`，按 7z start header CRC 和 next header 范围证据加分。 |
-| `rar_structure_identity` | `scoring` | 消费 `rar.structure`，按 RAR4/RAR5 首个 header 结构证据加分。 |
+| `seven_zip_structure_identity` | `scoring` | 消费 `7z.structure`，按 7z magic、start header、next header CRC/NID 证据加分。 |
+| `rar_structure_identity` | `scoring` | 消费 `rar.structure`，按 RAR magic、main header CRC、second block/header walk 证据加分。 |
 | `zip_structure_identity` | `scoring` | 消费 `zip.local_header` 和 `zip.eocd_structure`，按 ZIP magic、local header、EOCD/CD、CD entry walk 证据加分。 |
 | `tar_structure_identity` | `scoring` | 消费 `tar.header_structure`，按 TAR header checksum、ustar marker 和 entry walk 证据加分。 |
 | `archive_container_identity` | `scoring` | 消费 `archive.container_structure`，按 CAB、ARJ、CPIO 结构证据加分。 |
@@ -199,8 +199,8 @@ def process_my_archive_structure(context):
 | `file.logical_name` | `str` | 分卷或关系组推导出的逻辑名称。 |
 | `relation.is_split_related` | `bool` | 候选是否属于分卷关系。 |
 | `embedded_archive.analysis` | `dict` | 嵌入式压缩包扫描结果。 |
-| `7z.structure` | `dict` | 7z signature、start header CRC 与 next header 范围检查结果。 |
-| `rar.structure` | `dict` | RAR4/RAR5 signature 与首个 header 结构检查结果。 |
+| `7z.structure` | `dict` | 7z signature、start header CRC、next header CRC 与 NID 检查结果。 |
+| `rar.structure` | `dict` | RAR4/RAR5 signature、main header CRC 与 second block/header walk 检查结果。 |
 | `7z.probe` | `dict` | 7-Zip 轻量探测结果。 |
 | `7z.validation` | `dict` | 7-Zip 测试结果。 |
 | `scene.context` | `dict` | 目录场景识别结果。 |

@@ -10,7 +10,9 @@ RAR4_SIGNATURE = b"Rar!\x1a\x07\x00"
 RAR5_SIGNATURE = b"Rar!\x1a\x07\x01\x00"
 RAR4_KNOWN_BLOCK_TYPES = {0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B}
 RAR4_MAIN_HEADER_TYPE = 0x73
+RAR4_LONG_BLOCK_FLAG = 0x8000
 RAR5_MAIN_HEADER_TYPE = 1
+RAR5_KNOWN_HEADER_TYPES = {1, 2, 3, 4, 5}
 DEFAULT_MAX_FIRST_HEADER_CHECK_BYTES = 1024 * 1024
 
 
@@ -27,6 +29,11 @@ def _empty_result(error: str = "") -> dict[str, Any]:
         "first_header_type": 0,
         "header_crc_checked": False,
         "header_crc_ok": False,
+        "second_block_checked": False,
+        "second_block_ok": False,
+        "second_block_type": 0,
+        "second_block_size": 0,
+        "block_walk_ok": False,
         "strong_accept": False,
         "confidence": "none",
         "evidence": [],
@@ -43,6 +50,76 @@ def _read_vint(data: bytes, offset: int) -> tuple[int, int] | None:
             return value, index + 1
         shift += 7
     return None
+
+
+def _inspect_rar4_block(data: bytes, offset: int, file_size: int) -> dict[str, Any]:
+    result = {"ok": False, "type": 0, "size": 0, "error": ""}
+    if offset >= file_size:
+        return result
+    if len(data) < offset + 7 or file_size < offset + 7:
+        result["error"] = "rar4_second_block_too_small"
+        return result
+    header = data[offset:offset + 7]
+    header_crc = int.from_bytes(header[0:2], "little")
+    header_type = header[2]
+    header_flags = int.from_bytes(header[3:5], "little")
+    header_size = int.from_bytes(header[5:7], "little")
+    result.update({"type": header_type, "size": header_size})
+    if header_type not in RAR4_KNOWN_BLOCK_TYPES:
+        result["error"] = "rar4_second_block_unknown_type"
+        return result
+    if header_size < 7 or offset + header_size > file_size or len(data) < offset + header_size:
+        result["error"] = "rar4_second_block_size_out_of_range"
+        return result
+    full_header = data[offset:offset + header_size]
+    if (zlib.crc32(full_header[2:]) & 0xFFFF) != header_crc:
+        result["error"] = "rar4_second_block_crc_mismatch"
+        return result
+    block_size = header_size
+    if header_flags & RAR4_LONG_BLOCK_FLAG:
+        if header_size < 11:
+            result["error"] = "rar4_second_block_add_size_missing"
+            return result
+        add_size = int.from_bytes(full_header[7:11], "little")
+        block_size += add_size
+        if offset + block_size > file_size:
+            result["error"] = "rar4_second_block_payload_out_of_range"
+            return result
+    result.update({"ok": True, "size": block_size})
+    return result
+
+
+def _inspect_rar5_block(data: bytes, offset: int, file_size: int) -> dict[str, Any]:
+    result = {"ok": False, "type": 0, "size": 0, "error": ""}
+    if offset >= file_size:
+        return result
+    if len(data) < offset + 6 or file_size < offset + 6:
+        result["error"] = "rar5_second_header_too_small"
+        return result
+    parsed_size = _read_vint(data, offset + 4)
+    if parsed_size is None:
+        result["error"] = "rar5_second_header_size_vint_missing"
+        return result
+    header_size, after_size = parsed_size
+    parsed_type = _read_vint(data, after_size)
+    if parsed_type is None:
+        result["error"] = "rar5_second_header_type_vint_missing"
+        return result
+    header_type, _after_type = parsed_type
+    result.update({"type": header_type, "size": header_size})
+    if header_type not in RAR5_KNOWN_HEADER_TYPES:
+        result["error"] = "rar5_second_header_unknown_type"
+        return result
+    if header_size <= 0 or offset + 4 + header_size > file_size or len(data) < offset + 4 + header_size:
+        result["error"] = "rar5_second_header_size_out_of_range"
+        return result
+    stored_crc = int.from_bytes(data[offset:offset + 4], "little")
+    header_data = data[offset + 4:offset + 4 + header_size]
+    if (zlib.crc32(header_data) & 0xFFFFFFFF) != stored_crc:
+        result["error"] = "rar5_second_header_crc_mismatch"
+        return result
+    result.update({"ok": True, "size": 4 + header_size})
+    return result
 
 
 def _inspect_rar4(data: bytes, file_size: int) -> dict[str, Any]:
@@ -65,6 +142,11 @@ def _inspect_rar4(data: bytes, file_size: int) -> dict[str, Any]:
         "first_header_type": header_type,
         "header_crc_checked": False,
         "header_crc_ok": False,
+        "second_block_checked": False,
+        "second_block_ok": False,
+        "second_block_type": 0,
+        "second_block_size": 0,
+        "block_walk_ok": False,
         "strong_accept": False,
         "confidence": "none",
         "evidence": ["rar4:signature"],
@@ -86,7 +168,19 @@ def _inspect_rar4(data: bytes, file_size: int) -> dict[str, Any]:
             result["evidence"].append("rar4:header_crc")
         elif header_type == RAR4_MAIN_HEADER_TYPE:
             result["error"] = "rar4_header_crc_mismatch"
-    if header_type == RAR4_MAIN_HEADER_TYPE and result["header_crc_ok"]:
+    second_offset = first_header_offset + header_size
+    if header_type == RAR4_MAIN_HEADER_TYPE and result["header_crc_ok"] and second_offset < file_size:
+        second = _inspect_rar4_block(data, second_offset, file_size)
+        result["second_block_checked"] = True
+        result["second_block_ok"] = second["ok"]
+        result["second_block_type"] = second["type"]
+        result["second_block_size"] = second["size"]
+        result["block_walk_ok"] = second["ok"]
+        if second["ok"]:
+            result["evidence"].append("rar4:second_block")
+        else:
+            result["error"] = second["error"]
+    if header_type == RAR4_MAIN_HEADER_TYPE and result["header_crc_ok"] and (second_offset >= file_size or result["block_walk_ok"]):
         result["strong_accept"] = True
     return result
 
@@ -108,6 +202,11 @@ def _inspect_rar5(data: bytes, file_size: int) -> dict[str, Any]:
         "first_header_type": 0,
         "header_crc_checked": False,
         "header_crc_ok": False,
+        "second_block_checked": False,
+        "second_block_ok": False,
+        "second_block_type": 0,
+        "second_block_size": 0,
+        "block_walk_ok": False,
         "strong_accept": False,
         "confidence": "none",
         "evidence": ["rar5:signature"],
@@ -138,7 +237,19 @@ def _inspect_rar5(data: bytes, file_size: int) -> dict[str, Any]:
             result["evidence"].append("rar5:header_crc")
         elif header_type == RAR5_MAIN_HEADER_TYPE:
             result["error"] = "rar5_header_crc_mismatch"
-    if header_type == RAR5_MAIN_HEADER_TYPE and result["header_crc_ok"]:
+    second_offset = first_header_offset + 4 + header_size
+    if header_type == RAR5_MAIN_HEADER_TYPE and result["header_crc_ok"] and second_offset < file_size:
+        second = _inspect_rar5_block(data, second_offset, file_size)
+        result["second_block_checked"] = True
+        result["second_block_ok"] = second["ok"]
+        result["second_block_type"] = second["type"]
+        result["second_block_size"] = second["size"]
+        result["block_walk_ok"] = second["ok"]
+        if second["ok"]:
+            result["evidence"].append("rar5:second_header")
+        else:
+            result["error"] = second["error"]
+    if header_type == RAR5_MAIN_HEADER_TYPE and result["header_crc_ok"] and (second_offset >= file_size or result["block_walk_ok"]):
         result["strong_accept"] = True
     return result
 
@@ -157,7 +268,7 @@ def inspect_rar_structure(
                 data = handle.read(64)
             if data.startswith(RAR4_SIGNATURE) and len(data) >= len(RAR4_SIGNATURE) + 7:
                 header_size = int.from_bytes(data[len(RAR4_SIGNATURE) + 5:len(RAR4_SIGNATURE) + 7], "little")
-                read_size = min(file_size, len(RAR4_SIGNATURE) + header_size, max_first_header_check_bytes)
+                read_size = min(file_size, len(RAR4_SIGNATURE) + header_size + 64, max_first_header_check_bytes)
                 if len(data) < read_size:
                     handle.seek(0)
                     data = handle.read(read_size)
@@ -165,7 +276,7 @@ def inspect_rar_structure(
                 parsed_size = _read_vint(data, len(RAR5_SIGNATURE) + 4)
                 if parsed_size is not None:
                     header_size, _after_size = parsed_size
-                    read_size = min(file_size, len(RAR5_SIGNATURE) + 4 + header_size, max_first_header_check_bytes)
+                    read_size = min(file_size, len(RAR5_SIGNATURE) + 4 + header_size + 64, max_first_header_check_bytes)
                     if len(data) < read_size:
                         handle.seek(0)
                         data = handle.read(read_size)
@@ -195,7 +306,7 @@ def inspect_rar_structure(
     schemas={
         "rar.structure": {
             "type": "dict",
-            "description": "RAR4/RAR5 signature, first-header structure, and optional header CRC check.",
+            "description": "RAR4/RAR5 signature, main-header CRC, and optional second block/header walk checks.",
         },
     },
 )

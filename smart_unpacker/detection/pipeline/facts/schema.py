@@ -245,12 +245,12 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
     "7z.structure": {
         "type": "dict",
         "producer": "processors.seven_zip_structure",
-        "description": "7z signature, version, start-header CRC, next-header range, and optional next-header CRC check.",
+        "description": "7z signature, version, start-header CRC, next-header range, CRC, and first-NID checks.",
     },
     "rar.structure": {
         "type": "dict",
         "producer": "processors.rar_structure",
-        "description": "RAR4/RAR5 signature, first-header structure, and optional header CRC check.",
+        "description": "RAR4/RAR5 signature, main-header CRC, and optional second block/header walk checks.",
     },
 }
 

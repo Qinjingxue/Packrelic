@@ -22,14 +22,18 @@ def _rar4_header() -> bytes:
     body = bytes([0x73]) + b"\x00\x00" + struct.pack("<H", 7)
     header_crc = zlib.crc32(body) & 0xFFFF
     first_header = struct.pack("<H", header_crc) + body
-    return b"Rar!\x1a\x07\x00" + first_header + b"payload"
+    end_body = bytes([0x7B]) + b"\x00\x00" + struct.pack("<H", 7)
+    end_header = struct.pack("<H", zlib.crc32(end_body) & 0xFFFF) + end_body
+    return b"Rar!\x1a\x07\x00" + first_header + end_header
 
 
 def _rar5_header() -> bytes:
     # CRC32 + header size vint + main header type vint.
     header_data = b"\x02" + b"\x01"
     first_header = struct.pack("<I", zlib.crc32(header_data) & 0xFFFFFFFF) + header_data
-    return b"Rar!\x1a\x07\x01\x00" + first_header + b"payload"
+    end_data = b"\x02" + b"\x05"
+    end_header = struct.pack("<I", zlib.crc32(end_data) & 0xFFFFFFFF) + end_data
+    return b"Rar!\x1a\x07\x01\x00" + first_header + end_header
 
 
 def _config(rule_name: str):
@@ -58,6 +62,9 @@ def test_seven_zip_structure_identity_scores_crc_valid_header(tmp_path):
     assert structure["plausible"] is True
     assert structure["start_header_crc_ok"] is True
     assert structure["next_header_crc_ok"] is True
+    assert structure["next_header_nid"] == 0x17
+    assert structure["next_header_nid_valid"] is True
+    assert structure["next_header_semantic_ok"] is True
     assert structure["strong_accept"] is True
 
     bag = FactBag()
@@ -98,6 +105,19 @@ def test_seven_zip_structure_accept_passes_on_bad_next_header_crc(tmp_path):
     assert decision.decision_stage == "scoring"
 
 
+def test_seven_zip_structure_rejects_unknown_next_header_nid_for_strong_accept(tmp_path):
+    target = tmp_path / "bad-nid.7z"
+    target.write_bytes(_seven_zip_header(next_header=b"\xff\x00"))
+
+    structure = inspect_seven_zip_structure(str(target))
+
+    assert structure["plausible"] is True
+    assert structure["next_header_crc_ok"] is True
+    assert structure["next_header_nid_valid"] is False
+    assert structure["next_header_semantic_ok"] is False
+    assert structure["strong_accept"] is False
+
+
 def test_seven_zip_structure_rejects_bad_start_header_crc(tmp_path):
     target = tmp_path / "bad.7z"
     data = bytearray(_seven_zip_header())
@@ -122,6 +142,9 @@ def test_rar_structure_identity_scores_rar4_and_rar5_headers(tmp_path):
         assert structure["plausible"] is True
         assert structure["version"] == version
         assert structure["header_crc_ok"] is True
+        assert structure["second_block_checked"] is True
+        assert structure["second_block_ok"] is True
+        assert structure["block_walk_ok"] is True
         assert structure["strong_accept"] is True
 
         bag = FactBag()
@@ -161,6 +184,22 @@ def test_rar_structure_accept_passes_on_bad_header_crc(tmp_path):
 
     assert decision.should_extract is False
     assert decision.decision_stage == "scoring"
+
+
+def test_rar_structure_second_block_walk_detects_bad_following_block(tmp_path):
+    target = tmp_path / "bad-second.rar"
+    data = bytearray(_rar5_header())
+    data[-1] ^= 0xFF
+    target.write_bytes(bytes(data))
+
+    structure = inspect_rar_structure(str(target))
+
+    assert structure["plausible"] is True
+    assert structure["header_crc_ok"] is True
+    assert structure["second_block_checked"] is True
+    assert structure["second_block_ok"] is False
+    assert structure["block_walk_ok"] is False
+    assert structure["strong_accept"] is False
 
 
 def test_rar_structure_rejects_unknown_rar4_first_header_type(tmp_path):

@@ -10,6 +10,9 @@ from smart_unpacker.detection.pipeline.processors.registry import register_proce
 SEVEN_Z_SIGNATURE = b"7z\xbc\xaf\x27\x1c"
 HEADER_SIZE = 32
 DEFAULT_MAX_NEXT_HEADER_CHECK_BYTES = 1024 * 1024
+SEVEN_Z_HEADER_NID = 0x01
+SEVEN_Z_ENCODED_HEADER_NID = 0x17
+SEVEN_Z_VALID_NEXT_HEADER_NIDS = {SEVEN_Z_HEADER_NID, SEVEN_Z_ENCODED_HEADER_NID}
 
 
 def _empty_result(error: str = "") -> dict[str, Any]:
@@ -27,6 +30,9 @@ def _empty_result(error: str = "") -> dict[str, Any]:
         "start_header_crc_ok": False,
         "next_header_crc_checked": False,
         "next_header_crc_ok": False,
+        "next_header_nid": 0,
+        "next_header_nid_valid": False,
+        "next_header_semantic_ok": False,
         "strong_accept": False,
         "confidence": "none",
         "evidence": [],
@@ -84,6 +90,9 @@ def inspect_seven_zip_structure(
         "start_header_crc_ok": stored_start_crc == computed_start_crc,
         "next_header_crc_checked": False,
         "next_header_crc_ok": False,
+        "next_header_nid": 0,
+        "next_header_nid_valid": False,
+        "next_header_semantic_ok": False,
         "strong_accept": False,
         "confidence": "none",
         "evidence": ["7z:signature"],
@@ -116,9 +125,16 @@ def inspect_seven_zip_structure(
             return result
         result["next_header_crc_checked"] = True
         result["next_header_crc_ok"] = (zlib.crc32(next_header) & 0xFFFFFFFF) == next_header_crc
+        result["next_header_nid"] = next_header[0] if next_header else 0
+        result["next_header_nid_valid"] = result["next_header_nid"] in SEVEN_Z_VALID_NEXT_HEADER_NIDS
+        result["next_header_semantic_ok"] = result["next_header_crc_ok"] and result["next_header_nid_valid"]
         if result["next_header_crc_ok"]:
-            result["strong_accept"] = True
             result["evidence"].append("7z:next_header_crc")
+            if result["next_header_nid_valid"]:
+                result["strong_accept"] = True
+                result["evidence"].append("7z:next_header_nid")
+            else:
+                result["error"] = "next_header_nid_unrecognized"
         else:
             result["error"] = "next_header_crc_mismatch"
     return result
@@ -131,7 +147,7 @@ def inspect_seven_zip_structure(
     schemas={
         "7z.structure": {
             "type": "dict",
-            "description": "7z signature, version, start-header CRC, next-header range, and optional next-header CRC check.",
+            "description": "7z signature, version, start-header CRC, next-header range, CRC, and first-NID checks.",
         },
     },
 )

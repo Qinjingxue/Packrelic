@@ -8,6 +8,7 @@ from smart_unpacker.detection.pipeline.rules.registry import register_rule
 
 DEFAULT_SEVEN_Z_STRUCTURE_SCORE = 5
 DEFAULT_SEVEN_Z_MAGIC_SCORE = 2
+DEFAULT_SEVEN_Z_NID_SCORE = 6
 
 
 @register_rule(name="seven_zip_structure_identity", layer="scoring")
@@ -28,6 +29,12 @@ class SevenZipStructureIdentityScoreRule(RuleBase):
             "default": DEFAULT_SEVEN_Z_MAGIC_SCORE,
             "description": "Score for a 7z magic signature without stronger start-header structure.",
         },
+        "next_header_nid_score": {
+            "type": "int",
+            "required": False,
+            "default": DEFAULT_SEVEN_Z_NID_SCORE,
+            "description": "Score for a 7z next header whose CRC and first NID are both valid.",
+        },
     }
 
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:
@@ -38,12 +45,15 @@ class SevenZipStructureIdentityScoreRule(RuleBase):
         facts.set("file.magic_matched", True)
         facts.set("file.probe_detected_archive", True)
         facts.set("file.probe_offset", 0)
-        score = (
-            config.get("structure_score", DEFAULT_SEVEN_Z_STRUCTURE_SCORE)
-            if structure.get("plausible")
-            else config.get("magic_score", DEFAULT_SEVEN_Z_MAGIC_SCORE)
-        )
+        if structure.get("next_header_semantic_ok"):
+            score = config.get("next_header_nid_score", DEFAULT_SEVEN_Z_NID_SCORE)
+            reason = "7z structure: next header CRC and NID"
+        elif structure.get("plausible"):
+            score = config.get("structure_score", DEFAULT_SEVEN_Z_STRUCTURE_SCORE)
+            reason = "7z structure: start header CRC and next header range"
+        else:
+            score = config.get("magic_score", DEFAULT_SEVEN_Z_MAGIC_SCORE)
+            reason = "7z structure: magic signature"
         if not score:
             return RuleEffect.pass_()
-        reason = "7z structure: start header CRC and next header range" if structure.get("plausible") else "7z structure: magic signature"
         return RuleEffect.add_score(score, reason=reason)
