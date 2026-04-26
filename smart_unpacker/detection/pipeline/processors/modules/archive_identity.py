@@ -6,9 +6,6 @@ from smart_unpacker.detection.pipeline.processors.context import FactProcessorCo
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 
 MAGIC_SIGNATURES = (
-    (b"7z\xbc\xaf\x27\x1c", "7z", ".7z"),
-    (b"Rar!\x1a\x07\x01\x00", "rar", ".rar"),
-    (b"Rar!\x1a\x07\x00", "rar", ".rar"),
     (b"PK\x03\x04", "zip", ".zip"),
     (b"PK\x05\x06", "zip", ".zip"),
     (b"PK\x07\x08", "zip", ".zip"),

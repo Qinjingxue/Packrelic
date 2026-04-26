@@ -164,7 +164,9 @@ def process_archive_identity(context):
 | `zip_structure_accept` | `precheck` | 对高置信 ZIP EOCD/central directory 结构直接接受。 |
 | `tar_structure_accept` | `precheck` | 对高置信 ustar header checksum 结构直接接受。 |
 | `extension` | `scoring` | 按扩展名组给候选加分。 |
-| `archive_identity` | `scoring` | 消费 `archive.identity`，根据真实内容证据加分并写入检测扩展名。 |
+| `archive_identity` | `scoring` | 消费 `archive.identity`，根据通用起始魔数和嵌入载荷证据加分并写入检测扩展名。 |
+| `seven_zip_structure_identity` | `scoring` | 消费 `7z.structure`，按 7z start header CRC 和 next header 范围证据加分。 |
+| `rar_structure_identity` | `scoring` | 消费 `rar.structure`，按 RAR4/RAR5 首个 header 结构证据加分。 |
 | `zip_structure_identity` | `scoring` | 消费 `zip.eocd_structure`，按 ZIP EOCD/central directory 证据加分。 |
 | `tar_structure_identity` | `scoring` | 消费 `tar.header_structure`，按 TAR header checksum 证据加分。 |
 | `archive_container_identity` | `scoring` | 消费 `archive.container_structure`，按 CAB、ARJ、CPIO 结构证据加分。 |
@@ -174,7 +176,7 @@ def process_archive_identity(context):
 | `seven_zip_probe` | `confirmation` | 用 7-Zip 轻量探测可疑候选。 |
 | `seven_zip_validation` | `confirmation` | 用 7-Zip 测试候选是否可读、是否加密。 |
 
-`blacklist` 和 `size_minimum` 已移到 `filesystem.scan_filters`，会在候选进入 detection 规则流水线前执行。默认流水线使用 `extension`、`archive_identity` 和 `scene_penalty`。历史 scoring 规则已移出 active 规则包，底层 `magic_bytes` fact collector 与 `embedded_archive` processor 仍由 `archive_identity` 间接使用。
+`blacklist` 和 `size_minimum` 已移到 `filesystem.scan_filters`，会在候选进入 detection 规则流水线前执行。默认流水线使用 `extension`、结构类 identity 规则、`archive_identity` 和 `scene_penalty`。历史 scoring 规则已移出 active 规则包，底层 `magic_bytes` fact collector 与 `embedded_archive` processor 仍由 `archive_identity` 间接使用。
 
 ## 常用事实名
 
@@ -197,6 +199,8 @@ def process_archive_identity(context):
 | `relation.is_split_related` | `bool` | 候选是否属于分卷关系。 |
 | `embedded_archive.analysis` | `dict` | 嵌入式压缩包扫描结果。 |
 | `archive.identity` | `dict` | 统一的压缩包身份判断。 |
+| `7z.structure` | `dict` | 7z signature、start header CRC 与 next header 范围检查结果。 |
+| `rar.structure` | `dict` | RAR4/RAR5 signature 与首个 header 结构检查结果。 |
 | `7z.probe` | `dict` | 7-Zip 轻量探测结果。 |
 | `7z.validation` | `dict` | 7-Zip 测试结果。 |
 | `scene.context` | `dict` | 目录场景识别结果。 |

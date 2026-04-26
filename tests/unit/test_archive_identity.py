@@ -32,22 +32,18 @@ def _rule_config():
     ])
 
 
-def test_archive_identity_detects_magic_start_7z(tmp_path):
+def test_archive_identity_no_longer_detects_magic_start_7z(tmp_path):
     target = tmp_path / "payload.dat"
     target.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"x" * 128)
 
     magic = analyze_archive_magic_start(str(target), target.read_bytes()[:16])
     identity = build_archive_identity(str(target), magic_bytes=target.read_bytes()[:16])
 
-    assert identity["is_archive_like"] is True
-    assert identity["format"] == "7z"
-    assert identity["detected_ext"] == ".7z"
-    assert identity["offset"] == 0
-    assert identity["mode"] == "magic_start"
-    assert identity["confidence"] == "strong"
+    assert magic["matched"] is False
+    assert identity["is_archive_like"] is False
 
 
-def test_archive_identity_detects_rar_and_zip_magic(tmp_path):
+def test_archive_identity_detects_zip_magic_but_not_rar_magic(tmp_path):
     rar = tmp_path / "payload.one"
     zip_path = tmp_path / "payload.two"
     rar.write_bytes(b"Rar!\x1a\x07\x01\x00" + b"x" * 128)
@@ -57,8 +53,7 @@ def test_archive_identity_detects_rar_and_zip_magic(tmp_path):
     rar_identity = build_archive_identity(str(rar), magic_bytes=rar.read_bytes()[:16])
     zip_identity = build_archive_identity(str(zip_path), magic_bytes=zip_path.read_bytes()[:16])
 
-    assert rar_identity["format"] == "rar"
-    assert rar_identity["detected_ext"] == ".rar"
+    assert rar_identity["is_archive_like"] is False
     assert zip_identity["format"] == "zip"
     assert zip_identity["detected_ext"] == ".zip"
     assert zip_identity["zip_local_header"]["plausible"] is True
@@ -117,9 +112,10 @@ def test_archive_identity_rule_sets_detected_facts(tmp_path):
     assert bag.get("file.embedded_archive_found") is True
 
 
-def test_archive_identity_rule_detects_magic_start_on_ambiguous_extension(tmp_path):
+def test_archive_identity_rule_detects_zip_magic_start_on_ambiguous_extension(tmp_path):
     target = tmp_path / "payload.bin"
-    target.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"x" * 128)
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("x", "payload")
     bag = FactBag()
     config = with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
@@ -130,5 +126,5 @@ def test_archive_identity_rule_detects_magic_start_on_ambiguous_extension(tmp_pa
     decision = DetectionScheduler(config).evaluate(bag, FactProvider(str(target)))
 
     assert decision.should_extract is True
-    assert bag.get("file.detected_ext") == ".7z"
+    assert bag.get("file.detected_ext") == ".zip"
     assert bag.get("archive.identity").get("mode") == "magic_start"

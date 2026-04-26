@@ -29,7 +29,8 @@ def edge_config(passwords: list[str] | None = None) -> dict:
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
         {"name": "archive_identity", "enabled": True},
-        {"name": "archive_identity", "enabled": True},
+        {"name": "seven_zip_structure_identity", "enabled": True},
+        {"name": "rar_structure_identity", "enabled": True},
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},

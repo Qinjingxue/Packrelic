@@ -67,6 +67,8 @@
       {"name": "compression_stream_structure", "enabled": true},
       {"name": "archive_container_structure", "enabled": true},
       {"name": "pe_overlay_structure", "enabled": true},
+      {"name": "seven_zip_structure", "enabled": true},
+      {"name": "rar_structure", "enabled": true},
       {"name": "archive_identity", "enabled": true}
     ],
     "rule_pipeline": {
@@ -118,6 +120,16 @@
           "carrier_scan_prefix_window_bytes": 8388608,
           "carrier_scan_full_scan_max_bytes": 0,
           "carrier_scan_deep_scan": false
+        },
+        {
+          "name": "seven_zip_structure_identity",
+          "enabled": true,
+          "structure_score": 5
+        },
+        {
+          "name": "rar_structure_identity",
+          "enabled": true,
+          "structure_score": 5
         },
         {
           "name": "zip_structure_identity",

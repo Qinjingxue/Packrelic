@@ -1,4 +1,6 @@
 from pathlib import Path
+import struct
+import zlib
 
 import pytest
 
@@ -13,7 +15,16 @@ SCAN_CONFIG = with_detection_pipeline({
 ], scoring=[
     {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 1, "extensions": [".zip", ".7z", ".rar", ".001"]}]},
     {"name": "archive_identity", "enabled": True},
+    {"name": "seven_zip_structure_identity", "enabled": True, "structure_score": 1},
+    {"name": "rar_structure_identity", "enabled": True, "structure_score": 1},
 ])
+
+
+def _minimal_7z_header() -> bytes:
+    next_header = b"\x17\x06"
+    start_header = struct.pack("<QQI", 0, len(next_header), zlib.crc32(next_header) & 0xFFFFFFFF)
+    start_crc = zlib.crc32(start_header) & 0xFFFFFFFF
+    return b"7z\xbc\xaf\x27\x1c" + b"\x00\x04" + struct.pack("<I", start_crc) + start_header + next_header
 
 
 def _write_files(root: Path, names: list[str]):
@@ -115,7 +126,7 @@ def test_disguised_sfx_companion_groups_with_disguised_parts_not_noise(tmp_path)
             "helper.part1.rar",
         ],
     )
-    (root / "bundle.exe").write_bytes(b"7z\xbc\xaf\x27\x1c")
+    (root / "bundle.exe").write_bytes(_minimal_7z_header())
     (root / "helper.exe").write_bytes(b"MZ")
 
     actual = _scan_parts(root)

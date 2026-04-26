@@ -247,6 +247,16 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.pe_overlay_structure",
         "description": "PE header, overlay range, and archive-like overlay evidence derived from the candidate file.",
     },
+    "7z.structure": {
+        "type": "dict",
+        "producer": "processors.seven_zip_structure",
+        "description": "Lightweight 7z signature, version, start-header CRC, and next-header range check.",
+    },
+    "rar.structure": {
+        "type": "dict",
+        "producer": "processors.rar_structure",
+        "description": "Lightweight RAR4/RAR5 signature and first-header structure check.",
+    },
 }
 
 
