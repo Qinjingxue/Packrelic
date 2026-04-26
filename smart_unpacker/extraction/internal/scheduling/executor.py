@@ -2,8 +2,8 @@ import concurrent.futures
 import time
 from typing import Any, Callable
 
-from smart_unpacker.extraction.internal.concurrency import ConcurrencyScheduler
-from smart_unpacker.extraction.internal.resource_model import (
+from smart_unpacker.extraction.internal.scheduling.concurrency import ConcurrencyScheduler
+from smart_unpacker.extraction.internal.scheduling.resource_model import (
     ResourceDemand,
     demand_from_value,
     estimate_task_work_bytes,

@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.extraction.internal.concurrency import ConcurrencyScheduler
-from smart_unpacker.extraction.internal.errors import classify_extract_error, should_retry_extract_failure
-from smart_unpacker.extraction.internal.executor import TaskExecutor
-from smart_unpacker.extraction.internal.resource_model import build_resource_profile_key, estimate_resource_demand
+from smart_unpacker.extraction.internal.scheduling.concurrency import ConcurrencyScheduler
+from smart_unpacker.extraction.internal.workflow.errors import classify_extract_error, should_retry_extract_failure
+from smart_unpacker.extraction.internal.scheduling.executor import TaskExecutor
+from smart_unpacker.extraction.internal.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 
 
 def test_resource_demand_estimation_distinguishes_heavy_lzma_archive():

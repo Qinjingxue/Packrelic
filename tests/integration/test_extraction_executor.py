@@ -20,7 +20,7 @@ def test_extractor_failure_path_runs_through_concurrent_executor(tmp_path, monke
     def fake_run(*_args, **_kwargs):
         return subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="can not open file as archive")
 
-    monkeypatch.setattr("smart_unpacker.extraction.scheduler.subprocess.run", fake_run)
+    monkeypatch.setattr("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", fake_run)
 
     results = extractor.extract_all([task, task], lambda _item: str(out_dir))
 

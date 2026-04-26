@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from smart_unpacker.extraction.internal.concurrency import ConcurrencyScheduler
+from smart_unpacker.extraction.internal.scheduling.concurrency import ConcurrencyScheduler
 from smart_unpacker.coordinator.output_scan import OutputScanPolicy
 from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
@@ -73,7 +73,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
             succeeded = SimpleNamespace(returncode=0, stdout="", stderr="")
-            with patch("smart_unpacker.extraction.scheduler.subprocess.run", return_value=succeeded):
+            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", return_value=succeeded):
                 result = extractor.extract(task, str(out_dir))
 
             self.assertTrue(result.success)
@@ -102,7 +102,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            with patch("smart_unpacker.extraction.scheduler.subprocess.run", side_effect=[failed, succeeded]):
+            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", side_effect=[failed, succeeded]):
                 result = extractor.extract(task, str(out_dir))
 
             self.assertTrue(result.success)
@@ -136,8 +136,8 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            with patch("smart_unpacker.extraction.scheduler.subprocess.run", side_effect=fake_run):
-                with patch("smart_unpacker.extraction.scheduler.time.sleep", return_value=None):
+            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", side_effect=fake_run):
+                with patch("smart_unpacker.extraction.internal.workflow.retry_policy.time.sleep", return_value=None):
                     result = extractor.extract(task, str(out_dir))
 
             self.assertTrue(result.success)
@@ -158,7 +158,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            with patch("smart_unpacker.extraction.scheduler.subprocess.run", return_value=failed) as run_mock:
+            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", return_value=failed) as run_mock:
                 result = extractor.extract(task, str(out_dir))
 
             self.assertFalse(result.success)
@@ -180,8 +180,8 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
-            with patch("smart_unpacker.extraction.scheduler.subprocess.run", return_value=failed):
-                with patch("smart_unpacker.extraction.scheduler.time.sleep", return_value=None):
+            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.run", return_value=failed):
+                with patch("smart_unpacker.extraction.internal.workflow.retry_policy.time.sleep", return_value=None):
                     result = extractor.extract(task, str(out_dir))
 
             self.assertFalse(result.success)
@@ -197,7 +197,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
             scheduler = ConcurrencyScheduler({}, current_limit=1, max_workers=1)
 
-            with patch("smart_unpacker.extraction.scheduler.subprocess.Popen", side_effect=OSError("blocked")):
+            with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.Popen", side_effect=OSError("blocked")):
                 result = extractor._run_extract_command(
                     ["7z", "x", str(archive_path)],
                     startupinfo=None,

@@ -1,97 +1,22 @@
-import json
 import os
-import subprocess
 import threading
 import time
-from collections import defaultdict, deque
-from pathlib import Path
 
 import psutil
 
-from smart_unpacker.extraction.internal.resource_model import (
+from smart_unpacker.extraction.internal.scheduling.machine_probe import detect_max_workers, resolve_max_workers
+from smart_unpacker.extraction.internal.scheduling.profile_calibration import SchedulerFeedback
+from smart_unpacker.extraction.internal.scheduling.resource_model import (
     ResourceDemand,
     TaskRunFeedback,
     build_resource_budget,
     demand_from_value,
 )
-
-
-SCHEDULER_PROFILES = {
-    "conservative": {
-        "initial_concurrency_limit": 4,
-        "poll_interval_ms": 1000,
-        "process_sample_interval_ms": 500,
-        "max_extract_task_seconds": 0,
-        "process_no_progress_timeout_seconds": 0,
-        "scale_up_threshold_mb_s": 20,
-        "scale_up_backlog_threshold_mb_s": 40,
-        "scale_down_threshold_mb_s": 140,
-        "scale_up_streak_required": 2,
-        "scale_down_streak_required": 3,
-        "medium_backlog_threshold": 8,
-        "high_backlog_threshold": 24,
-        "medium_floor_workers": 2,
-        "high_floor_workers": 3,
-    },
-    "aggressive": {
-        "initial_concurrency_limit": 6,
-        "poll_interval_ms": 500,
-        "process_sample_interval_ms": 500,
-        "max_extract_task_seconds": 0,
-        "process_no_progress_timeout_seconds": 0,
-        "scale_up_threshold_mb_s": 80,
-        "scale_up_backlog_threshold_mb_s": 160,
-        "scale_down_threshold_mb_s": 400,
-        "scale_up_streak_required": 2,
-        "scale_down_streak_required": 3,
-        "medium_backlog_threshold": 8,
-        "high_backlog_threshold": 24,
-        "medium_floor_workers": 4,
-        "high_floor_workers": 6,
-    },
-}
-
-
-def select_auto_scheduler_profile() -> str:
-    cpu_count = os.cpu_count() or 4
-    memory_gb = 0.0
-    try:
-        memory_gb = psutil.virtual_memory().total / (1024**3)
-    except Exception:
-        memory_gb = 0.0
-    if cpu_count >= 12 and memory_gb >= 24:
-        return "aggressive"
-    return "conservative"
-
-
-def build_scheduler_profile_config(requested_profile: str | None) -> dict:
-    requested_profile = requested_profile or "auto"
-    resolved_profile = select_auto_scheduler_profile() if requested_profile == "auto" else requested_profile
-    config = dict(SCHEDULER_PROFILES.get(resolved_profile, SCHEDULER_PROFILES["conservative"]))
-    config["scheduler_profile"] = requested_profile
-    config["resolved_scheduler_profile"] = resolved_profile
-    return config
-
-
-def detect_max_workers() -> int:
-    cpu_count = os.cpu_count() or 4
-    if os.name == "nt":
-        try:
-            result = subprocess.run(
-                ["powershell", "-Command", "Get-PhysicalDisk | Select-Object -Property MediaType"],
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-            )
-            if "SSD" in result.stdout.upper():
-                return max(2, cpu_count)
-        except Exception:
-            pass
-    return 2
-
-
-def resolve_max_workers() -> int:
-    return max(1, detect_max_workers())
+from smart_unpacker.extraction.internal.scheduling.scheduler_profiles import (
+    SCHEDULER_PROFILES,
+    build_scheduler_profile_config,
+    select_auto_scheduler_profile,
+)
 
 
 class ConcurrencyScheduler:
@@ -124,29 +49,29 @@ class ConcurrencyScheduler:
         self.memory_scale_up_streak = 0
         self.memory_scale_down_streak = 0
         self.io_history = []
-        self.feedback_window_size = max(4, int(config.get("throughput_window_size", 8) or 8))
-        self.throughput_regression_ratio = float(config.get("throughput_regression_ratio", 0.95) or 0.95)
-        self.feedback_window: deque[TaskRunFeedback] = deque(maxlen=self.feedback_window_size)
-        self.profile_window_size = max(4, int(config.get("profile_calibration_window_size", 4) or 4))
-        self.profile_regression_ratio = float(config.get("profile_regression_ratio", 0.80) or 0.80)
-        self.profile_improvement_ratio = float(config.get("profile_improvement_ratio", 1.20) or 1.20)
-        self.profile_calibration_max_delta = max(0, int(config.get("profile_calibration_max_delta", 1) or 1))
-        self.profile_calibration_min_parallel = max(1, int(config.get("profile_calibration_min_parallel", 2) or 2))
-        self.profile_feedback_windows: dict[str, deque[TaskRunFeedback]] = defaultdict(
-            lambda: deque(maxlen=self.profile_window_size)
-        )
-        self.profile_calibration_cache_enabled = bool(config.get("profile_calibration_cache_enabled", True))
-        self.profile_calibration_cache_path = self._resolve_profile_calibration_cache_path(
-            config.get("profile_calibration_cache_path")
-        )
-        self.profile_adjustments: dict[str, dict[str, int]] = self._load_profile_adjustments()
-        self.profile_adjustments_dirty = False
+        self.feedback = SchedulerFeedback(config)
         self.live_process_cpu_percent = 0.0
         self.live_process_memory_bytes = 0
         self.live_process_io_bytes = 0
 
         self.cond = threading.Condition()
         self.thread = None
+
+    @property
+    def profile_adjustments(self) -> dict[str, dict[str, int]]:
+        return self.feedback.profile_adjustments
+
+    @property
+    def profile_adjustments_dirty(self) -> bool:
+        return self.feedback.profile_adjustments_dirty
+
+    @profile_adjustments_dirty.setter
+    def profile_adjustments_dirty(self, value: bool) -> None:
+        self.feedback.profile_adjustments_dirty = bool(value)
+
+    @property
+    def profile_calibration_cache_path(self):
+        return self.feedback.profile_calibration_cache_path
 
     def start(self):
         self.is_running = True
@@ -228,7 +153,7 @@ class ConcurrencyScheduler:
 
             old_limits = (self.cpu_limit, self.io_limit, self.memory_limit, self.current_limit)
             backlog_wants_more = backlog > max(self.cpu_limit, self.io_limit, self.memory_limit) * 2
-            throughput_allows_scale_up = self._throughput_allows_scale_up_locked()
+            throughput_allows_scale_up = self.feedback.throughput_allows_scale_up()
 
             self._adjust_cpu_limit_locked(
                 effective_cpu_percent,
@@ -291,11 +216,7 @@ class ConcurrencyScheduler:
         if feedback.throughput_bytes_per_second <= 0:
             return
         with self.cond:
-            self.feedback_window.append(feedback)
-            if feedback.profile_key:
-                window = self.profile_feedback_windows[feedback.profile_key]
-                window.append(feedback)
-                self._recalibrate_profile_locked(feedback.profile_key, window)
+            self.feedback.record_task_feedback(feedback)
 
     def record_process_sample(
         self,
@@ -310,34 +231,14 @@ class ConcurrencyScheduler:
             self.live_process_cpu_percent = max(self.live_process_cpu_percent, normalized_cpu)
             self.live_process_memory_bytes = max(self.live_process_memory_bytes, max(0, int(memory_bytes or 0)))
             self.live_process_io_bytes += max(0, int(io_bytes or 0))
-            if profile_key and memory_bytes > 0:
-                adjustment = dict(self.profile_adjustments.get(profile_key, {"cpu": 0, "io": 0, "memory": 0}))
-                memory_mb = memory_bytes / (1024 * 1024)
-                if memory_mb >= 2048:
-                    adjustment["memory"] = min(self.profile_calibration_max_delta, int(adjustment.get("memory", 0)) + 1)
-                    self._set_profile_adjustment_locked(profile_key, adjustment)
+            self.feedback.record_process_memory_sample(profile_key, int(memory_bytes or 0))
 
     def apply_profile_calibration(self, demand: ResourceDemand | dict, profile_key: str = "") -> ResourceDemand:
         demand_value = demand_from_value(demand)
         if not profile_key:
             return demand_value
         with self.cond:
-            adjustment = self.profile_adjustments.get(profile_key, {})
-            calibrated = ResourceDemand(
-                cpu=max(1, demand_value.cpu + int(adjustment.get("cpu", 0))),
-                io=max(1, demand_value.io + int(adjustment.get("io", 0))),
-                memory=max(1, demand_value.memory + int(adjustment.get("memory", 0))),
-            ).normalized()
-            if self.profile_calibration_min_parallel > 1 and any(
-                int(adjustment.get(key, 0)) > 0 for key in ("cpu", "io", "memory")
-            ):
-                min_parallel_cap = max(1, self.current_limit // self.profile_calibration_min_parallel)
-                calibrated = ResourceDemand(
-                    cpu=min(calibrated.cpu, max(demand_value.cpu, min_parallel_cap)),
-                    io=min(calibrated.io, max(demand_value.io, min_parallel_cap)),
-                    memory=min(calibrated.memory, max(demand_value.memory, min_parallel_cap)),
-                ).normalized()
-            return calibrated
+            return self.feedback.apply_profile_calibration(demand_value, profile_key, current_limit=self.current_limit)
 
     def acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None):
         demand_value = demand_from_value(demand or token_cost)
@@ -522,123 +423,9 @@ class ConcurrencyScheduler:
     def _refresh_current_limit_locked(self) -> None:
         self.current_limit = max(1, min(self.max_workers, max(self.cpu_limit, self.io_limit, self.memory_limit)))
 
-    def _throughput_allows_scale_up_locked(self) -> bool:
-        if len(self.feedback_window) < self.feedback_window_size:
-            return True
-        samples = [sample for sample in self.feedback_window if sample.success and sample.throughput_bytes_per_second > 0]
-        if len(samples) < self.feedback_window_size:
-            return True
-        midpoint = len(samples) // 2
-        previous = samples[:midpoint]
-        recent = samples[midpoint:]
-        previous_throughput = sum(item.throughput_bytes_per_second for item in previous) / len(previous)
-        recent_throughput = sum(item.throughput_bytes_per_second for item in recent) / len(recent)
-        previous_workers = sum(item.active_workers_at_start for item in previous) / len(previous)
-        recent_workers = sum(item.active_workers_at_start for item in recent) / len(recent)
-        if recent_workers <= previous_workers:
-            return True
-        previous_total_throughput = previous_throughput * previous_workers
-        recent_total_throughput = recent_throughput * recent_workers
-        return recent_total_throughput >= previous_total_throughput * self.throughput_regression_ratio
-
-    def _recalibrate_profile_locked(self, profile_key: str, window: deque[TaskRunFeedback]) -> None:
-        if len(window) < self.profile_window_size:
-            return
-        samples = [sample for sample in window if sample.success and sample.throughput_bytes_per_second > 0]
-        if len(samples) < self.profile_window_size:
-            return
-        midpoint = len(samples) // 2
-        previous = samples[:midpoint]
-        recent = samples[midpoint:]
-        previous_total = self._estimated_total_throughput(previous)
-        recent_total = self._estimated_total_throughput(recent)
-        previous_workers = sum(item.active_workers_at_start for item in previous) / len(previous)
-        recent_workers = sum(item.active_workers_at_start for item in recent) / len(recent)
-        if recent_workers <= previous_workers:
-            return
-
-        adjustment = dict(self.profile_adjustments.get(profile_key, {"cpu": 0, "io": 0, "memory": 0}))
-        if recent_total < previous_total * self.profile_regression_ratio:
-            adjustment["cpu"] = min(self.profile_calibration_max_delta, int(adjustment.get("cpu", 0)) + 1)
-            adjustment["io"] = min(self.profile_calibration_max_delta, int(adjustment.get("io", 0)) + 1)
-        elif recent_total > previous_total * self.profile_improvement_ratio:
-            average_cpu_demand = sum(item.demand.cpu for item in samples) / len(samples)
-            average_io_demand = sum(item.demand.io for item in samples) / len(samples)
-            if average_cpu_demand > 1:
-                adjustment["cpu"] = max(-1, int(adjustment.get("cpu", 0)) - 1)
-            if average_io_demand > 2:
-                adjustment["io"] = max(-1, int(adjustment.get("io", 0)) - 1)
-        self._set_profile_adjustment_locked(profile_key, adjustment)
-
-    def _estimated_total_throughput(self, samples: list[TaskRunFeedback]) -> float:
-        throughput = sum(item.throughput_bytes_per_second for item in samples) / len(samples)
-        workers = sum(item.active_workers_at_start for item in samples) / len(samples)
-        return throughput * workers
-
-    def _set_profile_adjustment_locked(self, profile_key: str, adjustment: dict[str, int]) -> None:
-        cleaned = {
-            "cpu": max(-1, min(self.profile_calibration_max_delta, int(adjustment.get("cpu", 0)))),
-            "io": max(-1, min(self.profile_calibration_max_delta, int(adjustment.get("io", 0)))),
-            "memory": max(0, min(self.profile_calibration_max_delta, int(adjustment.get("memory", 0)))),
-        }
-        if self.profile_adjustments.get(profile_key) != cleaned:
-            self.profile_adjustments[profile_key] = cleaned
-            self.profile_adjustments_dirty = True
-
-    def _resolve_profile_calibration_cache_path(self, configured_path) -> Path:
-        if configured_path:
-            return Path(configured_path)
-        project_root = Path(__file__).resolve().parents[3]
-        return project_root / ".smart_unpacker_cache" / "profile_calibration.json"
-
-    def _load_profile_adjustments(self) -> dict[str, dict[str, int]]:
-        if not self.profile_calibration_cache_enabled:
-            return {}
-        try:
-            payload = json.loads(self.profile_calibration_cache_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        if not isinstance(payload, dict) or payload.get("version") != 3:
-            return {}
-        profiles = payload.get("profiles", {})
-        if not isinstance(profiles, dict):
-            return {}
-        loaded: dict[str, dict[str, int]] = {}
-        for profile_key, adjustment in profiles.items():
-            if not isinstance(profile_key, str) or not isinstance(adjustment, dict):
-                continue
-            try:
-                loaded[profile_key] = {
-                    "cpu": max(-1, min(self.profile_calibration_max_delta, int(adjustment.get("cpu", 0)))),
-                    "io": max(-1, min(self.profile_calibration_max_delta, int(adjustment.get("io", 0)))),
-                    "memory": max(0, min(self.profile_calibration_max_delta, int(adjustment.get("memory", 0)))),
-                }
-            except Exception:
-                continue
-        return loaded
-
     def _save_profile_adjustments(self) -> None:
-        if (
-            not self.profile_calibration_cache_enabled
-            or not self.profile_adjustments_dirty
-            or not self.profile_adjustments
-        ):
-            return
-        with self.cond:
-            profiles = dict(self.profile_adjustments)
-            self.profile_adjustments_dirty = False
-        payload = {
-            "version": 3,
-            "updated_at": int(time.time()),
-            "profiles": profiles,
-        }
         try:
-            self.profile_calibration_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_path = self.profile_calibration_cache_path.with_suffix(
-                self.profile_calibration_cache_path.suffix + ".tmp"
-            )
-            temporary_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-            os.replace(temporary_path, self.profile_calibration_cache_path)
+            self.feedback.save()
         except Exception:
             with self.cond:
-                self.profile_adjustments_dirty = True
+                self.feedback.mark_save_failed()

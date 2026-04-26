@@ -1,15 +1,15 @@
 from dataclasses import dataclass
 
 from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.extraction.internal.native_password_tester import (
+from smart_unpacker.extraction.internal.sevenzip.native_password_tester import (
     STATUS_BACKEND_UNAVAILABLE,
     STATUS_UNSUPPORTED,
     cached_analyze_archive_resources,
     cached_check_archive_health,
     get_native_password_tester,
 )
-from smart_unpacker.extraction.internal.errors import has_archive_damage_signals, has_definite_wrong_password
-from smart_unpacker.extraction.internal.resource_model import build_resource_profile_key, estimate_resource_demand
+from smart_unpacker.extraction.internal.workflow.errors import has_archive_damage_signals, has_definite_wrong_password
+from smart_unpacker.extraction.internal.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 from smart_unpacker.extraction.result import ExtractionResult
 
 

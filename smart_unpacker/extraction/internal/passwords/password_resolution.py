@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from smart_unpacker.extraction.internal.errors import has_archive_damage_signals, has_definite_wrong_password
-from smart_unpacker.extraction.internal.password_manager import ArchivePasswordTester
+from smart_unpacker.extraction.internal.workflow.errors import has_archive_damage_signals, has_definite_wrong_password
+from smart_unpacker.extraction.internal.passwords.password_manager import ArchivePasswordTester
 from smart_unpacker.contracts.detection import FactBag
 
 
