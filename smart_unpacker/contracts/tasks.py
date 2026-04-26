@@ -54,12 +54,12 @@ class ArchiveTask:
         main_path = fact_bag.get("candidate.entry_path") or ""
         all_parts = list(fact_bag.get("candidate.member_paths") or [])
         logical_name = fact_bag.get("candidate.logical_name") or ""
-        key = logical_name or main_path
         is_split = bool(
             fact_bag.get("relation.is_split_related")
             or fact_bag.get("candidate.kind") == "split_archive"
             or len(all_parts) > 1
         )
+        key = logical_name if is_split else main_path
         is_sfx_stub = bool(
             fact_bag.get("relation.is_split_exe_companion")
             or fact_bag.get("relation.is_disguised_split_exe_companion")

@@ -22,3 +22,18 @@ def test_relation_group_builder_groups_split_volumes(tmp_path):
     assert split_group.member_paths == [str(second)]
     assert split_group.is_split_candidate is True
     assert orphan_group.relation.is_split_related is False
+
+
+def test_relation_group_builder_keeps_same_stem_archives_separate(tmp_path):
+    seven_zip = tmp_path / "collision.7z"
+    zip_file = tmp_path / "collision.zip"
+    seven_zip.write_bytes(b"seven")
+    zip_file.write_bytes(b"zip")
+
+    snapshot = DirectoryScanner(str(tmp_path)).scan()
+    groups = RelationsScheduler().build_candidate_groups(snapshot)
+    collision_groups = [group for group in groups if group.logical_name == "collision"]
+
+    assert sorted(Path(group.head_path).name for group in collision_groups) == ["collision.7z", "collision.zip"]
+    assert all(group.member_paths == [] for group in collision_groups)
+    assert all(group.is_split_candidate is False for group in collision_groups)

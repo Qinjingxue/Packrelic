@@ -44,13 +44,18 @@ class RelationsGroupBuilder:
                 if not group_entries:
                     continue
 
-                if any(relations[entry.path.name].is_split_related for entry in group_entries):
+                has_split_relation = any(relations[entry.path.name].is_split_related for entry in group_entries)
+                if has_split_relation:
                     group_entries = [
                         entry for entry in group_entries
                         if relations[entry.path.name].is_split_related
                     ]
                     if not group_entries:
                         continue
+                elif len(group_entries) > 1:
+                    for entry in group_entries:
+                        groups.append(self._build_group([entry], relations, directory_index))
+                    continue
 
                 groups.append(self._build_group(group_entries, relations, directory_index))
 

@@ -19,6 +19,8 @@ def _bag_paths(bag: FactBag) -> list[str]:
 
 def _bag_key(bag: FactBag) -> str:
     path = bag.get("file.path", "")
+    if not bag.get("relation.is_split_related"):
+        return os.path.normcase(os.path.normpath(path))
     parent = os.path.dirname(os.path.normpath(path)) if path else ""
     logical_name = bag.get("file.logical_name") or os.path.basename(path)
     return os.path.normcase(os.path.join(parent, logical_name.lower()))
@@ -78,13 +80,17 @@ def build_fact_bags_for_targets(
         parent_bags = session.fact_bags_for_directory(parent)
 
         selected_key = os.path.normcase(os.path.normpath(file_path))
-        expected_name = session.logical_name_for_archive(os.path.basename(file_path)).lower()
         matched = [
             bag for bag in parent_bags
-            if os.path.basename(bag.get("file.logical_name", "")).lower() == expected_name
+            if selected_key in _bag_paths(bag)
         ]
         if not matched:
-            matched = [bag for bag in parent_bags if selected_key in _bag_paths(bag)]
+            expected_name = session.logical_name_for_archive(os.path.basename(file_path)).lower()
+            matched = [
+                bag for bag in parent_bags
+                if bag.get("relation.is_split_related")
+                and os.path.basename(bag.get("file.logical_name", "")).lower() == expected_name
+            ]
         _add_unique(fact_bags, seen_keys, matched)
 
     return fact_bags
