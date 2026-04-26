@@ -89,6 +89,10 @@ class PasswordResolver:
     def _facts_confirm_unencrypted(fact_bag: FactBag | None) -> bool:
         if fact_bag is None:
             return False
+        health = fact_bag.get("resource.health") or {}
+        if isinstance(health, dict):
+            if health.get("is_archive") and not health.get("is_encrypted") and not health.get("is_wrong_password"):
+                return True
         return bool(fact_bag.get("file.validation_ok")) and not bool(fact_bag.get("file.validation_encrypted"))
 
     @staticmethod
