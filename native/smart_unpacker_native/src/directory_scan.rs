@@ -67,6 +67,41 @@ pub(crate) fn scan_directory_entries(
         .collect()
 }
 
+#[pyfunction]
+pub(crate) fn list_regular_files_in_directory(
+    py: Python<'_>,
+    directory: &str,
+) -> PyResult<Vec<Py<PyDict>>> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut records = Vec::new();
+    for item in entries {
+        let Ok(entry) = item else {
+            continue;
+        };
+        let path = entry.path();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        records.push(DirectoryEntryRecord {
+            path: path_to_string(&path),
+            is_dir: false,
+            size: Some(metadata.len()),
+            mtime_ns: metadata_mtime_ns(&metadata),
+        });
+    }
+    records
+        .into_iter()
+        .map(|entry| entry.into_py_dict(py))
+        .collect()
+}
+
 fn compile_case_insensitive_regexes(patterns: Vec<String>) -> PyResult<Vec<regex::Regex>> {
     let mut regexes = Vec::new();
     for pattern in patterns {

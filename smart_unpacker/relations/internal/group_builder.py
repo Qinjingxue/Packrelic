@@ -8,6 +8,11 @@ from typing import Dict, List, Optional, Set
 from smart_unpacker.contracts.filesystem import DirectorySnapshot, FileEntry
 from smart_unpacker.relations.internal.models import CandidateGroup, DirectoryFileIndex, FileRelation
 
+try:
+    from smart_unpacker_native import list_regular_files_in_directory as _native_list_regular_files_in_directory
+except ImportError:  # pragma: no cover - exercised when native extension is absent
+    _native_list_regular_files_in_directory = None
+
 
 SPLIT_FIRST_PATTERNS = [
     re.compile(r"\.part0*1\.rar(?:\.[^.]+)?$", re.IGNORECASE),
@@ -228,10 +233,8 @@ class RelationsGroupBuilder:
     def find_standard_split_siblings(self, archive: str) -> List[str]:
         directory = os.path.dirname(archive) or "."
         base = os.path.splitext(os.path.basename(archive))[0]
-        try:
-            names = os.listdir(directory)
-        except OSError:
-            return []
+        entries = self._iter_directory_files(directory)
+        names = [entry.path.name for entry in entries]
 
         lower_names = {name.lower() for name in names}
         expected_heads = {
@@ -254,7 +257,8 @@ class RelationsGroupBuilder:
             return []
 
         siblings = []
-        for name in names:
+        for entry in entries:
+            name = entry.path.name
             lower = name.lower()
             if self.is_standard_split_sibling(base.lower(), lower, legacy_rar_present):
                 siblings.append(os.path.join(directory, name))
@@ -500,6 +504,34 @@ class RelationsGroupBuilder:
         if directory_index is not None:
             return list(directory_index.entries)
 
+        native_entries = self._native_directory_files(directory)
+        if native_entries is not None:
+            return native_entries
+
+        return self._python_directory_files(directory)
+
+    def _native_directory_files(self, directory: str) -> List[FileEntry] | None:
+        if _native_list_regular_files_in_directory is None:
+            return None
+        try:
+            rows = _native_list_regular_files_in_directory(directory)
+        except Exception:
+            return None
+        entries: List[FileEntry] = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("path"):
+                continue
+            entries.append(
+                FileEntry(
+                    path=Path(row["path"]),
+                    is_dir=False,
+                    size=row.get("size"),
+                    mtime_ns=row.get("mtime_ns"),
+                )
+            )
+        return entries
+
+    def _python_directory_files(self, directory: str) -> List[FileEntry]:
         try:
             filenames = os.listdir(directory)
         except OSError:

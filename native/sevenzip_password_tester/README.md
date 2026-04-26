@@ -1,10 +1,21 @@
 # sevenzip_password_tester
 
-C++ scaffold for a future in-process `7z.dll` password-test backend.
+Windows C++ wrapper around the bundled `7z.dll`.
 
-This project currently proves that the local C++ toolchain can build and load
-the bundled `7z.dll`. It intentionally does not replace Python's existing
-`7z t` subprocess fallback yet.
+This component provides the in-process 7-Zip backend used by Smart Unpacker for
+archive probing, archive testing, and password attempts. It avoids spawning
+`7z.exe` for high-volume detection/password checks. The final extraction step
+still uses `7z.exe x`.
+
+## Build Requirements
+
+- Windows
+- CMake 3.25 or newer
+- A C++17 compiler toolchain, such as Visual Studio Build Tools 2022
+- Repository `tools\7z.dll`
+
+The project build scripts install Python build dependencies, including CMake,
+but they do not install the Visual Studio C++ compiler.
 
 ## Build
 
@@ -14,15 +25,37 @@ cmake --build native\sevenzip_password_tester\build --config Release
 ctest --test-dir native\sevenzip_password_tester\build -C Release --output-on-failure
 ```
 
-Run the smoke executable with the repository DLL:
-
-```powershell
-native\sevenzip_password_tester\build\Release\sevenzip_password_tester_smoke.exe tools\7z.dll
-```
-
-Expected status for now:
+The runtime DLL is:
 
 ```text
-backend_available=true
-status=unsupported
+native\sevenzip_password_tester\build\Release\sevenzip_password_tester_capi.dll
 ```
+
+Development and release scripts copy it to:
+
+```text
+tools\sevenzip_password_tester_capi.dll
+```
+
+That path is preferred by Python at runtime.
+
+## C API
+
+The wrapper exports a narrow C ABI:
+
+- `sup7z_try_passwords`
+- `sup7z_test_archive`
+- `sup7z_probe_archive`
+
+Python calls these through `smart_unpacker.extraction.internal.native_password_tester`.
+
+## Runtime Responsibility
+
+Use this wrapper for:
+
+- password attempts over a supplied password array
+- `7z t`-style archive testing
+- `7z l`-style archive probing fields currently consumed by the detection pipeline
+
+Keep final extraction on `7z.exe` unless the extraction scheduler is explicitly
+redesigned around the 7-Zip COM interfaces.

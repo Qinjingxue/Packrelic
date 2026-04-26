@@ -2,9 +2,11 @@
 
 Rust/PyO3 extension module for narrow native helpers used by Smart Unpacker.
 
-This crate should stay focused on byte-search primitives. Python remains
-responsible for configuration, rule decisions, ZIP plausibility checks, 7-Zip
-integration, and error reporting.
+This crate should stay focused on cross-platform filesystem and byte-structure
+hot paths. Python remains responsible for configuration, rule decisions,
+task orchestration, and error reporting. 7-Zip archive probing/password testing
+lives in the separate C++ `native/sevenzip_password_tester` wrapper because it
+is Windows/COM/7z.dll-specific.
 
 ## Build
 
@@ -44,6 +46,11 @@ Return value:
 ```python
 [{"path": "C:/data/archive.zip", "is_dir": False, "size": 123, "mtime_ns": 123456789}]
 ```
+
+`list_regular_files_in_directory(directory)` lists regular files directly under
+one directory and returns path/size/mtime metadata. This is intentionally a thin
+filesystem helper used by relation grouping; Python still owns split-volume
+semantics and grouping decisions.
 
 `scan_carrier_archive(path, carrier_ext, archive_magics, file_size, tail_window, prefix_window, full_scan_max, deep_scan)`
 searches for archive magic bytes appended to supported carrier formats: JPEG,
@@ -104,3 +111,19 @@ Return value:
     "truncated": False,
 }
 ```
+
+The module also exposes lightweight structure inspectors used by the detection
+pipeline:
+
+- `inspect_zip_local_header`
+- `inspect_zip_eocd_structure`
+- `inspect_seven_zip_structure`
+- `inspect_rar_structure`
+- `inspect_tar_header_structure`
+- `inspect_compression_stream_structure`
+- `inspect_archive_container_structure`
+- `inspect_pe_overlay_structure`
+
+These functions preserve the Python result shapes and are called through
+Python fallbacks, so the application can still run if the extension is missing
+or a native inspector raises unexpectedly.

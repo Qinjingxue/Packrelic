@@ -229,6 +229,22 @@ function Get-MaturinCommand {
     throw "maturin executable not found. Install maturin or make it available in PATH."
 }
 
+function Get-CMakeCommand {
+    param([string]$VenvScripts)
+
+    $venvCMake = Join-Path $VenvScripts "cmake.exe"
+    if (Test-Path -LiteralPath $venvCMake) {
+        return $venvCMake
+    }
+
+    $globalCMake = Get-Command "cmake" -ErrorAction SilentlyContinue
+    if ($globalCMake) {
+        return $globalCMake.Source
+    }
+
+    throw "cmake executable not found. Install CMake or make it available in PATH."
+}
+
 function Ensure-Maturin {
     param(
         [Parameter(Mandatory = $true)]
@@ -245,12 +261,63 @@ function Ensure-Maturin {
     return Get-MaturinCommand -VenvScripts $VenvScripts
 }
 
+function Ensure-CMake {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonPath,
+        [Parameter(Mandatory = $true)]
+        [string]$VenvScripts
+    )
+
+    try {
+        Invoke-Native -FilePath $PythonPath -Arguments @("-m", "pip", "install", "cmake>=3.25") | Out-Host
+    } catch {
+        Write-Warning "CMake install failed. Falling back to already-available cmake executable."
+    }
+    return Get-CMakeCommand -VenvScripts $VenvScripts
+}
+
+function Build-SevenZipWrapper {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CMakeCommand,
+        [Parameter(Mandatory = $true)]
+        [string]$WrapperRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$BuildDir,
+        [Parameter(Mandatory = $true)]
+        [string]$ToolsRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$SevenZipDllPath
+    )
+
+    Write-Step "Building 7z.dll C++ wrapper"
+    Assert-PathExists -LiteralPath (Join-Path $WrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
+    Assert-PathExists -LiteralPath $SevenZipDllPath -Description "Bundled 7z.dll"
+    Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $WrapperRoot, "-B", $BuildDir)
+    Invoke-Native -FilePath $CMakeCommand -Arguments @("--build", $BuildDir, "--config", "Release")
+    Invoke-Native -FilePath "ctest" -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
+
+    $wrapperDll = Join-Path $BuildDir "Release\sevenzip_password_tester_capi.dll"
+    Assert-PathExists -LiteralPath $wrapperDll -Description "Built 7z wrapper DLL"
+    Copy-Item -LiteralPath $wrapperDll -Destination (Join-Path $ToolsRoot "sevenzip_password_tester_capi.dll") -Force
+}
+
 function Test-NativeImport {
     param([string]$PythonPath)
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "import smart_unpacker_native as n; assert n.native_available(); assert n.scanner_version(); assert callable(n.scan_directory_entries); assert callable(n.scan_carrier_archive); assert callable(n.scan_magics_anywhere); assert callable(n.scan_zip_central_directory_names)"
+        "import smart_unpacker_native as n; assert n.native_available(); assert n.scanner_version(); assert callable(n.scan_directory_entries); assert callable(n.list_regular_files_in_directory); assert callable(n.scan_carrier_archive); assert callable(n.scan_magics_anywhere); assert callable(n.scan_zip_central_directory_names); assert callable(n.inspect_zip_eocd_structure); assert callable(n.inspect_pe_overlay_structure)"
+    )
+}
+
+function Test-SevenZipWrapper {
+    param([string]$PythonPath)
+
+    Invoke-Native -FilePath $PythonPath -Arguments @(
+        "-c",
+        "from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
     )
 }
 
@@ -333,9 +400,12 @@ $requirementsPath = Join-Path $repoRoot "requirements.txt"
 $buildRequirementsPath = Join-Path $repoRoot "requirements-build.txt"
 $nativeCrateRoot = Join-Path $repoRoot "native\smart_unpacker_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
+$sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_password_tester"
+$sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot "build"
 $buildRoot = Join-Path $repoRoot "build"
 $nativeWheelRoot = Join-Path $buildRoot "native-wheels-dev"
 $toolsRoot = Join-Path $repoRoot "tools"
+$sevenZipDllPath = Join-Path $toolsRoot "7z.dll"
 $sevenZipLicensePath = Join-Path $repoRoot "licenses\7zip-license.txt"
 
 Assert-PathExists -LiteralPath $requirementsPath -Description "requirements.txt"
@@ -359,7 +429,7 @@ Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgr
 Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $requirementsPath -RequiredModules @("psutil", "send2trash") -Label "Runtime dependency"
 Install-PackageOrValidate -PythonPath $venvPython -PackageName "pytest" -ModuleName "pytest" -Label "Test dependency"
 if ($IncludeBuildDeps) {
-    Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $buildRequirementsPath -RequiredModules @("PyInstaller") -Label "Build dependency"
+    Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $buildRequirementsPath -RequiredModules @("PyInstaller", "cmake") -Label "Build dependency"
 }
 
 $env:Path = "$venvScripts;$env:Path"
@@ -381,6 +451,9 @@ Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--forc
 Test-NativeImport -PythonPath $venvPython
 
 Ensure-Bundled7ZipAssets -ToolsRoot $toolsRoot -LicenseDestinationPath $sevenZipLicensePath
+$cmakeCommand = Ensure-CMake -PythonPath $venvPython -VenvScripts $venvScripts
+Build-SevenZipWrapper -CMakeCommand $cmakeCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath
+Test-SevenZipWrapper -PythonPath $venvPython
 
 Write-Step "Verifying local source execution"
 Invoke-Native -FilePath $venvPython -Arguments @("sunpack_cli.py", "--help")

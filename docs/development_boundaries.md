@@ -67,6 +67,7 @@ passwords
 filesystem / relations / rename
   -> contracts
   -> 标准库
+  -> smart_unpacker_native 的窄文件系统 helper
 
 contracts
   -> 标准库
@@ -388,12 +389,14 @@ detection/scene/
 - 识别多分卷归档的主文件和成员。
 - 为 detection 或 extraction 提供候选组。
 - 保持和规则打分、CLI 输出无关。
+- 可以使用 `smart_unpacker_native.list_regular_files_in_directory` 加速目录文件枚举。
 
 不应该做：
 
 - 不决定 should_extract。
 - 不执行解压。
 - 不清理文件。
+- 不把分卷命名规则、head/member 选择或 fuzzy volume 语义搬到 Rust，除非先有清晰的公开契约和回归测试。
 
 ## `extraction`
 
@@ -542,6 +545,22 @@ postprocess/internal/
 - 输出目录策略。它属于 `extraction`。
 - 清理策略。它属于 `postprocess`。
 - 扫描归档候选。它属于 `detection` 或 `coordinator` 调度。
+
+## `native`
+
+`native` 放项目自带原生组件。原生层只承接明确的性能热点或外部 ABI 适配，不拥有业务决策。
+
+当前组件：
+
+- `native/smart_unpacker_native`：Rust/PyO3 扩展，负责跨平台热点，例如目录扫描、magic 搜索、轻量格式结构解析、PE overlay 解析和关系分组中的单目录文件枚举。
+- `native/sevenzip_password_tester`：Windows C++ wrapper，负责通过 `7z.dll` 实现 archive probe、archive test 和密码数组尝试。
+
+边界：
+
+- Python 层仍是事实形状、规则语义、分卷关系语义和任务调度的权威实现。
+- Rust helper 应保持小而纯，不直接读取配置、不产生最终 decision。
+- C++ 7z wrapper 只封装 7-Zip COM/ABI 细节，不依赖 detection、extraction 或 CLI 业务对象。
+- 最终解压仍通过 `7z.exe x`，不要让 wrapper 和解压调度强耦合。
 
 ## 新功能放置指南
 

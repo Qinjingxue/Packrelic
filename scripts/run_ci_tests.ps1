@@ -55,9 +55,15 @@ function Get-PythonCommand {
     throw "Python interpreter not found in PATH."
 }
 
-$python = Get-PythonCommand
+$venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
+$python = if (Test-Path -LiteralPath $venvPython) { $venvPython } else { Get-PythonCommand }
 $env:PYTHONPATH = $repoRoot
 
+Invoke-TestStep -Label "Native extension smoke test" -Command @(
+    $python,
+    "-c",
+    "import smart_unpacker_native as n; assert n.native_available(); assert callable(n.inspect_pe_overlay_structure); from smart_unpacker.extraction.internal.native_password_tester import NativePasswordTester; assert NativePasswordTester().available()"
+)
 Invoke-TestStep -Label "Pytest suite" -Command @($python, "-m", "pytest", "-q")
 Invoke-TestStep -Label "CLI passwords smoke test" -Command @($python, "sunpack_cli.py", "passwords", "--json")
 Invoke-TestStep -Label "CLI config validation smoke test" -Command @($python, "sunpack_cli.py", "config", "validate", "--json")
