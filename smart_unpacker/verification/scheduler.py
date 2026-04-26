@@ -13,6 +13,8 @@ DEFAULT_VERIFICATION_CONFIG = {
     "initial_score": 100,
     "pass_threshold": 70,
     "fail_fast_threshold": 40,
+    "max_retries": 0,
+    "cleanup_failed_output": True,
     "methods": [],
 }
 
@@ -40,4 +42,3 @@ class VerificationScheduler:
         merged = dict(DEFAULT_VERIFICATION_CONFIG)
         merged.update(config or {})
         return merged
-

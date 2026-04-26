@@ -1,9 +1,10 @@
 import concurrent.futures
+import inspect
 import time
 from typing import Any, Callable
 
-from smart_unpacker.extraction.internal.scheduling.concurrency import ConcurrencyScheduler
-from smart_unpacker.extraction.internal.scheduling.resource_model import (
+from smart_unpacker.coordinator.scheduling.concurrency import ConcurrencyScheduler
+from smart_unpacker.coordinator.scheduling.resource_model import (
     ResourceDemand,
     demand_from_value,
     estimate_task_work_bytes,
@@ -18,6 +19,7 @@ class TaskExecutor:
 
     def execute_all(self, tasks: list[Any], worker_func: Callable[[Any], Any]) -> list[Any]:
         results = []
+        pass_scheduler = self._worker_accepts_scheduler(worker_func)
 
         self.scheduler.update_pending_task_estimate(len(tasks), 0)
         self.scheduler.start()
@@ -27,7 +29,7 @@ class TaskExecutor:
             active_workers_at_start = self.scheduler.active_workers_snapshot()
             success = False
             try:
-                result = worker_func(task)
+                result = worker_func(task, self.scheduler) if pass_scheduler else worker_func(task)
                 success = self._worker_result_success(result)
                 return result
             finally:
@@ -146,3 +148,10 @@ class TaskExecutor:
         if success is not None:
             return bool(success)
         return True
+
+    def _worker_accepts_scheduler(self, worker_func: Callable[[Any], Any]) -> bool:
+        try:
+            parameters = inspect.signature(worker_func).parameters
+        except (TypeError, ValueError):
+            return False
+        return len(parameters) >= 2

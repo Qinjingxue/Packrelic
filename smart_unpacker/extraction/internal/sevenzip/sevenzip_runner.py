@@ -1,22 +1,21 @@
 import subprocess
 import time
+from typing import Any
 
 import psutil
 
 from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.extraction.internal.scheduling.concurrency import ConcurrencyScheduler
-from smart_unpacker.extraction.internal.scheduling.resource_model import task_profile_key
 
 
 class SevenZipRunner:
-    def __init__(self, scheduler_config: dict):
-        self.scheduler_config = scheduler_config
+    def __init__(self, process_config: dict):
+        self.process_config = process_config
 
     def run_extract_command(
         self,
         cmd: list[str],
         startupinfo,
-        runtime_scheduler: ConcurrencyScheduler | None,
+        runtime_scheduler: Any,
         task: ArchiveTask,
     ) -> subprocess.CompletedProcess:
         if runtime_scheduler is None:
@@ -47,13 +46,13 @@ class SevenZipRunner:
     def communicate_observed_process(
         self,
         process: subprocess.Popen,
-        runtime_scheduler: ConcurrencyScheduler,
+        runtime_scheduler: Any,
         task: ArchiveTask,
     ) -> tuple[str, str]:
-        interval = max(0.1, float(self.scheduler_config.get("process_sample_interval_ms", 500) or 500) / 1000.0)
-        max_task_seconds = max(0.0, float(self.scheduler_config.get("max_extract_task_seconds", 0) or 0))
-        no_progress_timeout = max(0.0, float(self.scheduler_config.get("process_no_progress_timeout_seconds", 0) or 0))
-        profile_key = task_profile_key(task)
+        interval = max(0.1, float(self.process_config.get("process_sample_interval_ms", 500) or 500) / 1000.0)
+        max_task_seconds = max(0.0, float(self.process_config.get("max_extract_task_seconds", 0) or 0))
+        no_progress_timeout = max(0.0, float(self.process_config.get("process_no_progress_timeout_seconds", 0) or 0))
+        profile_key = self._task_profile_key(task)
         ps_process = None
         last_io_bytes = 0
         started_at = time.monotonic()
@@ -118,3 +117,11 @@ class SevenZipRunner:
             stdout, stderr = "", ""
         process.returncode = returncode
         return stdout or "", f"{stderr or ''}\n{message}".strip()
+
+    def _task_profile_key(self, task: ArchiveTask) -> str:
+        fact_bag = getattr(task, "fact_bag", None)
+        if fact_bag is not None and hasattr(fact_bag, "get"):
+            profile_key = fact_bag.get("resource.profile_key")
+            if profile_key:
+                return str(profile_key)
+        return "unknown"

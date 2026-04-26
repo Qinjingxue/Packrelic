@@ -8,7 +8,7 @@
 2. `coordinator` 只编排流程，不实现领域算法。
 3. `app` 只负责 CLI 交互、参数解析和输出适配，不绕过领域模块。
 4. `detection` 只判断候选是否应被解压，不执行解压、清理或 CLI 输出。
-5. `extraction` 是解压黑盒，对外通过 `ExtractionScheduler` 暴露能力。
+5. `extraction` 是单归档解压黑盒，对外通过 `ExtractionScheduler` 暴露单任务检查、输出目录和解压能力。
 6. `passwords` 是密码能力黑盒，对外通过 `smart_unpacker.passwords` 暴露候选密码、密码尝试和归档密码会话能力。
 7. `postprocess` 是后处理黑盒，对外通过 `PostProcessActions` 暴露能力。
 8. `verification` 是解压结果校验黑盒，对外通过 `VerificationScheduler` 暴露能力。
@@ -103,7 +103,8 @@ contracts
 | 检测 | `detection.ArchiveTaskProvider` | 将 detection 结果转换为解压任务。 |
 | 检测 | `detection.NestedOutputScanPolicy` | 判断解压输出目录是否值得进入下一轮检测。 |
 | 检测 | `detection.validate_detection_contracts` | 校验检测插件和配置契约。 |
-| 解压 | `extraction.scheduler.ExtractionScheduler` | 解压调度、默认输出目录、调度配置。 |
+| 解压 | `extraction.scheduler.ExtractionScheduler` | 单归档 preflight、默认输出目录和解压执行。 |
+| 调度 | `coordinator.scheduling` | 批量并发调度、资源 token、profile 校准和任务执行器。 |
 | 密码 | `smart_unpacker.passwords` | 密码文件读取、候选密码管理、归档密码尝试和 archive -> password 会话。 |
 | 后处理 | `postprocess.actions.PostProcessActions` | 成功后清理和扁平化。 |
 | 校验 | `verification.VerificationScheduler` | 按配置流水线对解压结果进行评分式校验。 |
@@ -135,7 +136,7 @@ contracts
 
 典型边界：
 
-- 需要 scheduler profile 的展示数据时，走 `ExtractionScheduler.scheduler_profile_config()`。
+- 需要 scheduler profile 的展示数据时，走 `coordinator.scheduling.build_scheduler_profile_config()`。
 - 需要 facts 字典时，走 `FactBag.to_dict()`。
 - 需要读取密码文件时，走 `smart_unpacker.passwords.read_password_file()`。
 
@@ -200,6 +201,8 @@ contracts
 - `inspector.py`：inspect 命令的编排，只读 detection facts 和 decision。
 - `task_scan.py`：调用 detection 的 `ArchiveTaskProvider`，不持有候选识别规则。
 - `extraction_batch.py`：批量解压流程编排。
+- `resource_preflight.py`：解压前资源画像探测，把 wrapper 的 resource analysis 转成调度 facts。
+- `scheduling/`：并发调度、资源 token、机器探测、profile 缓存和执行器。
 - `output_scan.py`：递归输出扫描策略的兼容门面；实际策略在 detection。
 - `space_guard.py`：决定什么时候触发清理；实际清理由 `PostProcessActions` 执行。
 - `recursion.py`：递归轮次策略。
@@ -212,6 +215,8 @@ contracts
 - 把一个阶段的输出传给下一个阶段。
 - 管理递归轮次、运行上下文和失败任务汇总。
 - 调用领域公开入口。
+- 负责批量任务的并发调度、资源 token 分配、运行反馈和 best-fit 选择。
+- 在批量 worker 内串接 extraction、verification retry 和失败日志。
 
 不应该做：
 
@@ -219,6 +224,7 @@ contracts
 - 不自己判断文件是不是压缩包，应调用 `DetectionScheduler`。
 - 不自己计算默认输出目录，应调用 `ExtractionScheduler.default_output_dir_for_task()`。
 - 不自己执行 7-Zip，应调用 `ExtractionScheduler`。
+- 不把单归档解压细节搬进 coordinator。
 - 不直接删除归档文件，应调用 `PostProcessActions.cleanup_archive_file()` 或 `apply()`。
 - 不读取 `FactBag._facts`。
 - 不导入 `detection.pipeline.*` 的具体规则来做判断。
@@ -409,7 +415,7 @@ detection/scene/
 
 ## `extraction`
 
-`extraction` 是解压黑盒。
+`extraction` 是单归档解压黑盒。
 
 公开入口：
 
@@ -420,12 +426,16 @@ detection/scene/
 
 ```text
 extraction/internal/
-  concurrency.py
-  errors.py
-  executor.py
-  metadata.py
-  output_paths.py
-  split_stager.py
+  sevenzip/
+    metadata.py
+    sevenzip_runner.py
+  workflow/
+    errors.py
+    output_paths.py
+    preflight.py
+    retry_policy.py
+    single_archive_extractor.py
+    split_entry.py
 ```
 
 应该做：
@@ -437,20 +447,24 @@ extraction/internal/
 - 计算默认输出目录。
 - 执行 7-Zip 解压。
 - 分类解压错误。
-- 管理并发调度。
+- 做单归档 preflight，包括结构健康检查和是否需要密码。
 
 不应该做：
 
 - 不扫描目标目录寻找候选。
 - 不判断候选是否应该解压。
+- 不做批量并发调度、资源 token 分配或 profile 校准。
+- 不做 resource analysis 到调度 token 的转换。
+- 不做解压成功后的 verification retry 决策。
 - 不做成功后的归档清理或扁平化。
 - 不依赖 CLI。
 
 外部调用规则：
 
-- 需要解压多个任务，调用 `ExtractionScheduler.extract_tasks()` 或 `extract_all()`。
+- 需要解压多个任务，调用 coordinator 的 `ExtractionBatchRunner` 或 `PipelineRunner`。
+- 需要解压单个任务，调用 `ExtractionScheduler.extract()`。
+- 需要单个任务 preflight，调用 `ExtractionScheduler.inspect()`。
 - 需要单个任务输出目录，调用 `ExtractionScheduler.default_output_dir_for_task()`。
-- 需要 scheduler profile 展示配置，调用 `ExtractionScheduler.scheduler_profile_config()`。
 - 不从外部导入 `extraction.internal.*`。
 
 ## `passwords`
@@ -551,6 +565,7 @@ verification/
 - 每个 method 返回分数变化、issue 和 hard fail 信号。
 - 每执行一个 method 后检查 fail-fast 阈值。
 - 产出 `VerificationResult`，由 coordinator 决定是否进入 postprocess。
+- 不通过时只描述失败和分数；是否清理输出、是否重试，由 coordinator worker 根据配置决定。
 
 不应该做：
 
@@ -566,6 +581,8 @@ verification/
 - `verification.pass_threshold` 是最终通过阈值。
 - `verification.fail_fast_threshold` 是流水线中途失败阈值。
 - `verification.methods` 是有序 method 配置列表，顺序即执行顺序。
+- `verification.max_retries` 是 coordinator 在校验失败后重新解压的次数，`0` 表示不重试。
+- `verification.cleanup_failed_output` 控制 coordinator 在校验失败重试前是否清理解压输出目录。
 
 ## `rename`
 
@@ -703,10 +720,10 @@ verification/
 以下写法通常表示边界正在坏掉：
 
 ```python
-from smart_unpacker.extraction.internal.concurrency import ...
+from smart_unpacker.extraction.internal.workflow.single_archive_extractor import ...
 ```
 
-外部模块不应依赖 extraction internal。用 `ExtractionScheduler` 暴露能力。
+外部模块不应依赖 extraction internal。单归档解压用 `ExtractionScheduler`，批量调度用 `coordinator`。
 
 ```python
 facts = dict(bag._facts)

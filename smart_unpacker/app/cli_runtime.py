@@ -6,7 +6,7 @@ from smart_unpacker.app.cli_constants import EXIT_USAGE
 from smart_unpacker.app.cli_types import CliCommandResult, CliPasswordSummary
 from smart_unpacker.config.schema import normalize_config_value
 from smart_unpacker.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config
-from smart_unpacker.extraction.scheduler import ExtractionScheduler
+from smart_unpacker.coordinator.scheduling import build_scheduler_profile_config
 from smart_unpacker.passwords import dedupe_passwords, get_builtin_passwords, PasswordStore, read_password_file
 
 
@@ -25,7 +25,7 @@ def build_effective_config(config: dict) -> dict[str, Any]:
         },
         "min_inspection_size_bytes": size_minimum,
         "scheduler_profile": config.get("performance", {}).get("scheduler_profile"),
-        "scheduler": ExtractionScheduler.scheduler_profile_config(
+        "scheduler": build_scheduler_profile_config(
             config.get("performance", {}).get("scheduler_profile", "auto")
         ),
         "detection": {

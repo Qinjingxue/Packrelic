@@ -38,8 +38,7 @@ class PipelineRunner:
             builtin_passwords=config.get("builtin_passwords", []),
             ensure_space=self.ensure_space,
             max_retries=config.get("max_retries", 3),
-            scheduler_profile=performance_config.get("scheduler_profile", "auto"),
-            scheduler_overrides=performance_config,
+            process_config=performance_config,
         )
         self.output_scan_policy = NestedOutputScanPolicy(config)
         
@@ -56,6 +55,7 @@ class PipelineRunner:
             self.extractor,
             self.output_scan_policy,
             self.rename_scheduler,
+            config,
         )
 
     def text(self, en: str, zh: str) -> str:

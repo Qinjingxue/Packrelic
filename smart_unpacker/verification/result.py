@@ -22,6 +22,17 @@ class VerificationStepResult:
 
 
 @dataclass(frozen=True)
+class VerificationStepRecord:
+    method: str
+    status: str
+    score_before: int
+    score_delta: int
+    score_after: int
+    hard_fail: bool = False
+    issues: list[VerificationIssue] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class VerificationResult:
     ok: bool
     status: str
@@ -30,6 +41,7 @@ class VerificationResult:
     fail_fast_threshold: int
     methods_run: list[str] = field(default_factory=list)
     issues: list[VerificationIssue] = field(default_factory=list)
+    steps: list[VerificationStepRecord] = field(default_factory=list)
 
     @property
     def failures(self) -> list[VerificationIssue]:
@@ -38,4 +50,3 @@ class VerificationResult:
     @property
     def warnings(self) -> list[VerificationIssue]:
         return [issue for issue in self.issues if not issue.code.startswith("fail")]
-

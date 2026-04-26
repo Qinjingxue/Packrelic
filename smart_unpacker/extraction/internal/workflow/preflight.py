@@ -2,14 +2,10 @@ from dataclasses import dataclass
 
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.support.sevenzip_native import (
-    STATUS_BACKEND_UNAVAILABLE,
-    STATUS_UNSUPPORTED,
-    cached_analyze_archive_resources,
     cached_check_archive_health,
     get_native_password_tester,
 )
 from smart_unpacker.extraction.internal.workflow.errors import has_archive_damage_signals, has_definite_wrong_password
-from smart_unpacker.extraction.internal.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 from smart_unpacker.extraction.result import ExtractionResult
 
 
@@ -58,17 +54,6 @@ class PreExtractInspector:
             else:
                 task.fact_bag.set("resource.password_required", False)
 
-            if health.status not in {STATUS_BACKEND_UNAVAILABLE, STATUS_UNSUPPORTED}:
-                analysis = cached_analyze_archive_resources(staged.archive, password=password, part_paths=staged.run_parts)
-                self._record_analysis(task, analysis)
-                demand = estimate_resource_demand(analysis)
-                task.fact_bag.set("resource.tokens", demand.as_dict())
-                task.fact_bag.set("resource.token_cost", demand.scalar_cost)
-                task.fact_bag.set("resource.profile_key", build_resource_profile_key(analysis))
-            else:
-                task.fact_bag.set("resource.tokens", {"cpu": 1, "io": 1, "memory": 1})
-                task.fact_bag.set("resource.token_cost", 1)
-                task.fact_bag.set("resource.profile_key", "unknown")
         finally:
             self.rename_scheduler.cleanup_normalized_split_group(staged)
 
@@ -108,24 +93,4 @@ class PreExtractInspector:
             "operation_result": health.operation_result,
             "archive_type": health.archive_type,
             "message": health.message,
-        })
-
-    def _record_analysis(self, task: ArchiveTask, analysis) -> None:
-        task.fact_bag.set("resource.analysis", {
-            "status": analysis.status,
-            "is_archive": analysis.is_archive,
-            "is_encrypted": analysis.is_encrypted,
-            "is_broken": analysis.is_broken,
-            "solid": analysis.solid,
-            "item_count": analysis.item_count,
-            "file_count": analysis.file_count,
-            "dir_count": analysis.dir_count,
-            "archive_size": analysis.archive_size,
-            "total_unpacked_size": analysis.total_unpacked_size,
-            "total_packed_size": analysis.total_packed_size,
-            "largest_item_size": analysis.largest_item_size,
-            "largest_dictionary_size": analysis.largest_dictionary_size,
-            "archive_type": analysis.archive_type,
-            "dominant_method": analysis.dominant_method,
-            "message": analysis.message,
         })

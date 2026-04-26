@@ -1,6 +1,6 @@
 from smart_unpacker.verification.evidence import VerificationEvidence
 from smart_unpacker.verification.registry import get_verification_method
-from smart_unpacker.verification.result import VerificationIssue, VerificationResult
+from smart_unpacker.verification.result import VerificationIssue, VerificationResult, VerificationStepRecord
 
 
 class VerificationPipeline:
@@ -15,6 +15,7 @@ class VerificationPipeline:
         score = self.initial_score
         issues: list[VerificationIssue] = []
         methods_run: list[str] = []
+        steps: list[VerificationStepRecord] = []
 
         if not self.methods:
             return VerificationResult(
@@ -41,14 +42,24 @@ class VerificationPipeline:
                 continue
 
             step = method.verify(evidence, method_config)
+            score_before = score
             score += int(step.score_delta or 0)
             methods_run.append(step.method or method_name)
             issues.extend(step.issues)
+            steps.append(VerificationStepRecord(
+                method=step.method or method_name,
+                status=step.status,
+                score_before=score_before,
+                score_delta=int(step.score_delta or 0),
+                score_after=score,
+                hard_fail=step.hard_fail,
+                issues=list(step.issues),
+            ))
 
             if step.hard_fail:
-                return self._failed(score, methods_run, issues, status="failed")
+                return self._failed(score, methods_run, issues, steps, status="failed")
             if score < self.fail_fast_threshold:
-                return self._failed(score, methods_run, issues, status="failed_fast")
+                return self._failed(score, methods_run, issues, steps, status="failed_fast")
 
         if score >= self.pass_threshold:
             return VerificationResult(
@@ -59,14 +70,16 @@ class VerificationPipeline:
                 fail_fast_threshold=self.fail_fast_threshold,
                 methods_run=methods_run,
                 issues=issues,
+                steps=steps,
             )
-        return self._failed(score, methods_run, issues, status="failed")
+        return self._failed(score, methods_run, issues, steps, status="failed")
 
     def _failed(
         self,
         score: int,
         methods_run: list[str],
         issues: list[VerificationIssue],
+        steps: list[VerificationStepRecord],
         status: str,
     ) -> VerificationResult:
         return VerificationResult(
@@ -77,5 +90,5 @@ class VerificationPipeline:
             fail_fast_threshold=self.fail_fast_threshold,
             methods_run=methods_run,
             issues=issues,
+            steps=steps,
         )
-

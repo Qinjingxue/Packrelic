@@ -149,7 +149,7 @@ python sunpack_cli.py passwords [options]
 
 密码合并顺序为：命令行密码、最近成功密码、内置密码。重复项会去重。
 
-`passwords` 命令只展示本次命令参数和内置密码合并后的列表；最近成功密码是在一次 `extract` 运行过程中由解压调度器维护的运行态列表。
+`passwords` 命令只展示本次命令参数和内置密码合并后的列表；最近成功密码是在一次 `extract` 运行过程中由 `passwords` 层维护的运行态列表。
 
 示例：
 

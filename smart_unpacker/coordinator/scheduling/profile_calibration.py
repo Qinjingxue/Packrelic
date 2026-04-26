@@ -1,12 +1,12 @@
 from collections import defaultdict, deque
 
-from smart_unpacker.extraction.internal.scheduling.profile_cache import (
+from smart_unpacker.coordinator.scheduling.profile_cache import (
     clean_profile_adjustment,
     load_profile_adjustments,
     resolve_profile_calibration_cache_path,
     save_profile_adjustments,
 )
-from smart_unpacker.extraction.internal.scheduling.resource_model import ResourceDemand, TaskRunFeedback, demand_from_value
+from smart_unpacker.coordinator.scheduling.resource_model import ResourceDemand, TaskRunFeedback, demand_from_value
 
 
 class SchedulerFeedback:

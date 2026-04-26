@@ -1,10 +1,9 @@
 import os
 import shutil
 import subprocess
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
-from smart_unpacker.extraction.internal.scheduling.concurrency import ConcurrencyScheduler
 from smart_unpacker.extraction.internal.workflow.errors import classify_extract_error
 from smart_unpacker.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from smart_unpacker.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
@@ -40,7 +39,7 @@ class SingleArchiveExtractor:
         task: ArchiveTask,
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
-        runtime_scheduler: ConcurrencyScheduler | None = None,
+        runtime_scheduler: Any = None,
     ) -> ExtractionResult:
         archive = task.main_path
         split_info = split_info or task.split_info

@@ -8,6 +8,8 @@ DEFAULT_VERIFICATION_CONFIG = {
     "initial_score": 100,
     "pass_threshold": 70,
     "fail_fast_threshold": 40,
+    "max_retries": 0,
+    "cleanup_failed_output": True,
     "methods": [],
 }
 
@@ -23,6 +25,8 @@ def normalize_verification_config(value: Any) -> dict[str, Any]:
     config["initial_score"] = _int_field(config, "initial_score")
     config["pass_threshold"] = _int_field(config, "pass_threshold")
     config["fail_fast_threshold"] = _int_field(config, "fail_fast_threshold")
+    config["max_retries"] = max(0, _int_field(config, "max_retries"))
+    config["cleanup_failed_output"] = bool(config.get("cleanup_failed_output", True))
     if config["fail_fast_threshold"] > config["pass_threshold"]:
         raise ValueError("verification.fail_fast_threshold must be <= verification.pass_threshold")
     config["methods"] = _normalize_methods(config.get("methods"))

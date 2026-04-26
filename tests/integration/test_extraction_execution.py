@@ -5,9 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from smart_unpacker.extraction.internal.scheduling.concurrency import ConcurrencyScheduler
+from smart_unpacker.coordinator.scheduling.concurrency import ConcurrencyScheduler
 from smart_unpacker.coordinator.output_scan import OutputScanPolicy
 from smart_unpacker.config.schema import normalize_config
+from smart_unpacker.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
@@ -196,9 +197,10 @@ class ExtractionExecutionTests(unittest.TestCase):
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
             scheduler = ConcurrencyScheduler({}, current_limit=1, max_workers=1)
+            runner = SevenZipRunner(extractor.process_config)
 
             with patch("smart_unpacker.extraction.internal.sevenzip.sevenzip_runner.subprocess.Popen", side_effect=OSError("blocked")):
-                result = extractor._run_extract_command(
+                result = runner.run_extract_command(
                     ["7z", "x", str(archive_path)],
                     startupinfo=None,
                     runtime_scheduler=scheduler,
@@ -213,11 +215,12 @@ class ExtractionExecutionTests(unittest.TestCase):
             archive_path = Path(tmp) / "sample.zip"
             archive_path.write_bytes(b"zip")
             extractor = ExtractionScheduler(max_retries=1)
-            extractor.scheduler_config["max_extract_task_seconds"] = 0.01
-            extractor.scheduler_config["process_sample_interval_ms"] = 10
+            extractor.process_config["max_extract_task_seconds"] = 0.01
+            extractor.process_config["process_sample_interval_ms"] = 10
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
             scheduler = ConcurrencyScheduler({}, current_limit=1, max_workers=1)
+            runner = SevenZipRunner(extractor.process_config)
 
             class HangingProcess:
                 pid = -1
@@ -235,7 +238,7 @@ class ExtractionExecutionTests(unittest.TestCase):
                     self.killed = True
 
             process = HangingProcess()
-            stdout, stderr = extractor._communicate_observed_process(process, scheduler, task)
+            stdout, stderr = runner.communicate_observed_process(process, scheduler, task)
 
             self.assertEqual(process.returncode, -101)
             self.assertEqual(stdout, "")
@@ -246,12 +249,13 @@ class ExtractionExecutionTests(unittest.TestCase):
             archive_path = Path(tmp) / "sample.zip"
             archive_path.write_bytes(b"zip")
             extractor = ExtractionScheduler(max_retries=1)
-            extractor.scheduler_config["max_extract_task_seconds"] = 0
-            extractor.scheduler_config["process_no_progress_timeout_seconds"] = 0.01
-            extractor.scheduler_config["process_sample_interval_ms"] = 10
+            extractor.process_config["max_extract_task_seconds"] = 0
+            extractor.process_config["process_no_progress_timeout_seconds"] = 0.01
+            extractor.process_config["process_sample_interval_ms"] = 10
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
             scheduler = ConcurrencyScheduler({}, current_limit=1, max_workers=1)
+            runner = SevenZipRunner(extractor.process_config)
 
             class HangingProcess:
                 pid = -1
@@ -269,7 +273,7 @@ class ExtractionExecutionTests(unittest.TestCase):
                     self.killed = True
 
             process = HangingProcess()
-            stdout, stderr = extractor._communicate_observed_process(process, scheduler, task)
+            stdout, stderr = runner.communicate_observed_process(process, scheduler, task)
 
             self.assertEqual(process.returncode, -102)
             self.assertEqual(stdout, "")

@@ -19,8 +19,10 @@ def test_pipeline_runner_passes_performance_scheduler_overrides():
 
     runner = PipelineRunner(config)
 
-    assert runner.extractor.scheduler_config["max_extract_task_seconds"] == 1800
-    assert runner.extractor.scheduler_config["process_no_progress_timeout_seconds"] == 180
+    assert runner.extractor.process_config["max_extract_task_seconds"] == 1800
+    assert runner.extractor.process_config["process_no_progress_timeout_seconds"] == 180
+    assert runner.batch_runner.scheduler_config["max_extract_task_seconds"] == 1800
+    assert runner.batch_runner.scheduler_config["process_no_progress_timeout_seconds"] == 180
 
 
 def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path, monkeypatch):
@@ -42,7 +44,10 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
 
     runner = PipelineRunner(config)
 
-    def fake_extract(task, out_dir):
+    monkeypatch.setattr(runner.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
+    monkeypatch.setattr(runner.batch_runner.resource_inspector, "inspect", lambda task: task)
+
+    def fake_extract(task, out_dir, runtime_scheduler=None):
         out_path = tmp_path / "payload" / "inside.txt"
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text("hello", encoding="utf-8")
@@ -100,19 +105,14 @@ def test_batch_skips_stale_nested_output_tasks_in_same_round(tmp_path, monkeypat
         bag = FactBag()
         return ArchiveTask(fact_bag=bag, score=10, main_path=str(path), all_parts=[str(path)])
 
-    def fake_extract(task, out_dir):
+    monkeypatch.setattr(runner.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
+    monkeypatch.setattr(runner.batch_runner.resource_inspector, "inspect", lambda task: task)
+
+    def fake_extract(task, out_dir, runtime_scheduler=None):
         extracted.append(task.main_path)
         return ExtractionResult(success=True, archive=task.main_path, out_dir=out_dir, all_parts=task.all_parts)
 
     monkeypatch.setattr(runner.extractor, "extract", fake_extract)
-    monkeypatch.setattr(
-        runner.extractor,
-        "extract_all",
-        lambda tasks, output_dir_resolver=None: [
-            (task, fake_extract(task, output_dir_resolver(task)))
-            for task in tasks
-        ],
-    )
     runner.batch_runner.execute([task_for(archive), task_for(nested)])
 
     assert extracted == [str(archive)]

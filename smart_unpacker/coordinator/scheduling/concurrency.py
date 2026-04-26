@@ -4,15 +4,15 @@ import time
 
 import psutil
 
-from smart_unpacker.extraction.internal.scheduling.machine_probe import detect_max_workers, resolve_max_workers
-from smart_unpacker.extraction.internal.scheduling.profile_calibration import SchedulerFeedback
-from smart_unpacker.extraction.internal.scheduling.resource_model import (
+from smart_unpacker.coordinator.scheduling.machine_probe import detect_max_workers, resolve_max_workers
+from smart_unpacker.coordinator.scheduling.profile_calibration import SchedulerFeedback
+from smart_unpacker.coordinator.scheduling.resource_model import (
     ResourceDemand,
     TaskRunFeedback,
     build_resource_budget,
     demand_from_value,
 )
-from smart_unpacker.extraction.internal.scheduling.scheduler_profiles import (
+from smart_unpacker.coordinator.scheduling.scheduler_profiles import (
     SCHEDULER_PROFILES,
     build_scheduler_profile_config,
     select_auto_scheduler_profile,
