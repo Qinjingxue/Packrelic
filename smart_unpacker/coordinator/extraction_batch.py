@@ -1,5 +1,4 @@
 import os
-from collections import defaultdict
 from typing import List
 
 from smart_unpacker.coordinator.context import RunContext
@@ -33,7 +32,10 @@ class ExtractionBatchRunner:
             return []
 
         self.prepare_tasks(tasks)
-        output_dir_resolver = self._build_output_dir_resolver(tasks)
+        output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
+            tasks,
+            self.extractor.default_output_dir_for_task,
+        )
         tasks = self._skip_tasks_inside_batch_outputs(tasks, output_dir_resolver)
         results = self.extractor.extract_all(tasks, output_dir_resolver)
         output_dirs = []
@@ -67,43 +69,6 @@ class ExtractionBatchRunner:
             if not inside_another_output:
                 filtered.append(task)
         return filtered
-
-    def _build_output_dir_resolver(self, tasks: List[ArchiveTask]):
-        default_dirs = {id(task): self.extractor.default_output_dir_for_task(task) for task in tasks}
-        by_output = defaultdict(list)
-        for task in tasks:
-            output_dir = default_dirs[id(task)]
-            by_output[os.path.normcase(os.path.abspath(output_dir))].append(task)
-
-        resolved_dirs = dict(default_dirs)
-        reserved = {
-            os.path.normcase(os.path.abspath(output_dir))
-            for output_dir in default_dirs.values()
-            if output_dir
-        }
-        for duplicate_tasks in by_output.values():
-            if len(duplicate_tasks) <= 1:
-                continue
-            for task in duplicate_tasks:
-                resolved_dirs[id(task)] = self._disambiguated_output_dir(
-                    default_dirs[id(task)],
-                    task,
-                    reserved,
-                )
-
-        return lambda task: resolved_dirs[id(task)]
-
-    def _disambiguated_output_dir(self, default_dir: str, task: ArchiveTask, reserved: set[str]) -> str:
-        archive_ext = os.path.splitext(task.main_path)[1].lstrip(".").lower() or "archive"
-        parent = os.path.dirname(default_dir)
-        base = os.path.basename(default_dir)
-        candidate = os.path.join(parent, f"{base}_{archive_ext}")
-        index = 2
-        while os.path.normcase(os.path.abspath(candidate)) in reserved or os.path.isfile(candidate):
-            candidate = os.path.join(parent, f"{base}_{archive_ext}_{index}")
-            index += 1
-        reserved.add(os.path.normcase(os.path.abspath(candidate)))
-        return candidate
 
     def collect_result(self, task: ArchiveTask, res) -> str | None:
         path = task.main_path

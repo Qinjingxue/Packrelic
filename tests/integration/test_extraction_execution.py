@@ -35,13 +35,48 @@ class FakeMetadataScanner:
 
 class FakeStager:
     def stage(self, archive, all_parts, startupinfo=None):
-        return SimpleNamespace(archive=archive, all_parts=list(all_parts))
+        parts = list(all_parts)
+        return SimpleNamespace(archive=archive, run_parts=parts, cleanup_parts=parts)
 
     def cleanup(self, staged):
         return None
 
 
 class ExtractionExecutionTests(unittest.TestCase):
+    def test_extractor_success_reports_cleanup_parts_not_candidate_run_parts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "sample.7z.001"
+            candidate_path = Path(tmp) / "sample"
+            archive_path.write_bytes(b"7z")
+            candidate_path.write_bytes(b"candidate")
+            out_dir = Path(tmp) / "sample_out"
+
+            class CandidateStager:
+                def stage(self, archive, all_parts, startupinfo=None):
+                    return SimpleNamespace(
+                        archive=archive,
+                        run_parts=[str(archive_path), str(candidate_path)],
+                        cleanup_parts=[str(archive_path)],
+                    )
+
+                def cleanup(self, staged):
+                    return None
+
+            extractor = ExtractionScheduler(max_retries=1)
+            extractor.password_resolver = FakePasswordResolver()
+            extractor.metadata_scanner = FakeMetadataScanner()
+            extractor.split_stager = CandidateStager()
+
+            bag = FactBag()
+            task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
+
+            succeeded = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch("smart_unpacker.extraction.scheduler.subprocess.run", return_value=succeeded):
+                result = extractor.extract(task, str(out_dir))
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.all_parts, [str(archive_path)])
+
     def test_extractor_retries_after_disk_space_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive_path = Path(tmp) / "sample.zip"

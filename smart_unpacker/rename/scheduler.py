@@ -1,6 +1,7 @@
 import os
 import re
-from typing import Dict, List, Set
+from collections import defaultdict
+from typing import Callable, Dict, List, Set
 
 from smart_unpacker.contracts.tasks import ArchiveTask, RenameInstruction
 
@@ -8,6 +9,35 @@ from smart_unpacker.contracts.tasks import ArchiveTask, RenameInstruction
 class RenameScheduler:
     def apply_renames(self, tasks: List[ArchiveTask]) -> Dict[str, str]:
         return self.execute(self.plan(tasks))
+
+    def build_output_dir_resolver(
+        self,
+        tasks: List[ArchiveTask],
+        default_output_dir_for_task: Callable[[ArchiveTask], str],
+    ) -> Callable[[ArchiveTask], str]:
+        default_dirs = {id(task): default_output_dir_for_task(task) for task in tasks}
+        by_output = defaultdict(list)
+        for task in tasks:
+            output_dir = default_dirs[id(task)]
+            by_output[os.path.normcase(os.path.abspath(output_dir))].append(task)
+
+        resolved_dirs = dict(default_dirs)
+        reserved = {
+            os.path.normcase(os.path.abspath(output_dir))
+            for output_dir in default_dirs.values()
+            if output_dir
+        }
+        for duplicate_tasks in by_output.values():
+            if len(duplicate_tasks) <= 1:
+                continue
+            for task in duplicate_tasks:
+                resolved_dirs[id(task)] = self._disambiguated_output_dir(
+                    default_dirs[id(task)],
+                    task,
+                    reserved,
+                )
+
+        return lambda task: resolved_dirs[id(task)]
 
     def plan(self, tasks: List[ArchiveTask]) -> List[RenameInstruction]:
         instructions = []
@@ -180,3 +210,15 @@ class RenameScheduler:
                     print(f"[ERROR] Failed to rename file: {source_name} ({exc})")
             else:
                 processed_set.add(old_path)
+
+    def _disambiguated_output_dir(self, default_dir: str, task: ArchiveTask, reserved: set[str]) -> str:
+        archive_ext = os.path.splitext(task.main_path)[1].lstrip(".").lower() or "archive"
+        parent = os.path.dirname(default_dir)
+        base = os.path.basename(default_dir)
+        candidate = os.path.join(parent, f"{base}_{archive_ext}")
+        index = 2
+        while os.path.normcase(os.path.abspath(candidate)) in reserved or os.path.isfile(candidate):
+            candidate = os.path.join(parent, f"{base}_{archive_ext}_{index}")
+            index += 1
+        reserved.add(os.path.normcase(os.path.abspath(candidate)))
+        return candidate

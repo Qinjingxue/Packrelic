@@ -115,7 +115,8 @@ class ExtractionScheduler:
 
             staged = self.split_stager.stage(archive, all_parts, startupinfo=startupinfo)
             run_archive = staged.archive
-            run_parts = staged.all_parts
+            run_parts = staged.run_parts if hasattr(staged, "run_parts") else staged.all_parts
+            cleanup_parts = getattr(staged, "cleanup_parts", run_parts)
             run_result = None
             test_result = None
             err = ""
@@ -161,7 +162,7 @@ class ExtractionScheduler:
                             success=True,
                             archive=archive,
                             out_dir=out_dir,
-                            all_parts=run_parts,
+                            all_parts=cleanup_parts,
                             password_used=correct_pwd,
                             selected_codepage=selected_codepage,
                         )

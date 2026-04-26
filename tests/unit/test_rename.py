@@ -50,3 +50,23 @@ def test_rename_planner_keeps_embedded_carrier_extension(tmp_path):
     instructions = RenameScheduler().plan([ArchiveTask(fact_bag=bag, score=10, main_path=str(carrier), all_parts=[str(carrier)])])
 
     assert instructions == []
+
+
+def test_output_dir_resolver_disambiguates_duplicate_task_outputs(tmp_path):
+    seven_zip = tmp_path / "collision.7z"
+    zip_file = tmp_path / "collision.zip"
+    existing_output = tmp_path / "collision_7z"
+    seven_zip.touch()
+    zip_file.touch()
+    existing_output.write_text("existing file", encoding="utf-8")
+
+    first = ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(seven_zip), logical_name="collision")
+    second = ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(zip_file), logical_name="collision")
+
+    def default_output_dir(task):
+        return str(tmp_path / task.logical_name)
+
+    resolver = RenameScheduler().build_output_dir_resolver([first, second], default_output_dir)
+
+    assert resolver(first) == str(tmp_path / "collision_7z_2")
+    assert resolver(second) == str(tmp_path / "collision_zip")
