@@ -96,11 +96,36 @@ class RuleManager:
         surviving = list(fact_bags)
 
         for rule in self._prepare_rules("precheck"):
-            fact_configs = {fact_name: rule.config for fact_name in rule.instance.required_facts}
-            self.ensure_pool_facts(surviving, rule.instance.required_facts, fact_configs)
+            requirements = self._rule_fact_requirements(rule)
+            prerequisite_facts: set[str] = set()
+            for requirement in requirements:
+                prerequisite_facts.update(requirement.prerequisite_facts)
+            if prerequisite_facts:
+                self.ensure_pool_facts(surviving, prerequisite_facts)
+
+            active_by_bag: dict[FactBag, set[str]] = {}
+            active_groups: dict[frozenset[str], list[FactBag]] = {}
+            for bag in surviving:
+                active_facts = {
+                    requirement.fact_name
+                    for requirement in requirements
+                    if requirement.matches(bag, self._effective_fact_config(requirement.fact_name, rule.config))
+                }
+                active_by_bag[bag] = active_facts
+                if active_facts:
+                    active_groups.setdefault(frozenset(active_facts), []).append(bag)
+            for active_facts, active_bags in active_groups.items():
+                fact_configs = {
+                    fact_name: self._effective_fact_config(fact_name, rule.config)
+                    for fact_name in active_facts
+                }
+                self.ensure_pool_facts(active_bags, set(active_facts), fact_configs)
 
             next_surviving: List[FactBag] = []
             for bag in surviving:
+                if requirements and not active_by_bag.get(bag):
+                    next_surviving.append(bag)
+                    continue
                 effect = rule.instance.evaluate(bag, rule.config)
                 if effect.decision == "reject":
                     decisions[bag] = RuleDecision(

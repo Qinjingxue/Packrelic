@@ -57,6 +57,42 @@ def test_empty_scoring_fact_requirements_keep_required_facts_unconditional(tmp_p
     assert counts["file.magic_bytes"] == 1
 
 
+def test_zip_eocd_structure_is_collected_only_for_zip_start_magic(tmp_path):
+    plain = tmp_path / "plain.bin"
+    plain.write_bytes(b"not a zip" * 32)
+    zip_like = tmp_path / "zip-like.bin"
+    zip_like.write_bytes(b"PK\x03\x04" + b"x" * 64)
+    config = _config([
+        {"name": "zip_structure_identity", "enabled": True},
+    ])
+
+    plain_bag = FactBag()
+    zip_bag = FactBag()
+    DetectionScheduler(config).evaluate(plain_bag, FactProvider(str(plain)))
+    DetectionScheduler(config).evaluate(zip_bag, FactProvider(str(zip_like)))
+
+    assert plain_bag.has("zip.eocd_structure") is False
+    assert zip_bag.has("zip.eocd_structure") is True
+
+
+def test_zip_precheck_does_not_collect_eocd_without_zip_start_magic(tmp_path):
+    target = tmp_path / "plain.bin"
+    target.write_bytes(b"not a zip" * 32)
+    config = with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
+    }, precheck=[
+        {"name": "zip_structure_accept", "enabled": True},
+    ], scoring=[
+        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 0, "extensions": []}]},
+    ])
+
+    bag = FactBag()
+    decision = DetectionScheduler(config).evaluate(bag, FactProvider(str(target)))
+
+    assert decision.should_extract is False
+    assert bag.has("zip.eocd_structure") is False
+
+
 def test_embedded_payload_identity_ignores_exe_loose_scan_after_collecting_inputs(tmp_path, monkeypatch):
     target = tmp_path / "setup.exe"
     target.write_bytes(b"MZ" + b"x" * 256 + b"7z\xbc\xaf\x27\x1c" + b"x" * 64)

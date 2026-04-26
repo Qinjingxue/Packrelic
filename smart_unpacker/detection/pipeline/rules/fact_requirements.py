@@ -68,6 +68,18 @@ class PathExtensionInConfig:
 
 
 @dataclass(frozen=True)
+class MagicBytesStartsWith:
+    prefixes: tuple[bytes, ...]
+    required_facts: set[str] = field(default_factory=lambda: {"file.magic_bytes"})
+
+    def matches(self, facts: FactBag, config: dict[str, Any]) -> bool:
+        magic = facts.get("file.magic_bytes") or b""
+        if not isinstance(magic, (bytes, bytearray)):
+            return False
+        return any(bytes(magic).startswith(prefix) for prefix in self.prefixes)
+
+
+@dataclass(frozen=True)
 class FactRequirement:
     fact_name: str
     condition: FactCondition | None = None

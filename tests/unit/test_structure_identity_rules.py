@@ -61,7 +61,7 @@ def test_zip_structure_accept_precheck_short_circuits_scoring(tmp_path):
     assert bag.get("file.detected_ext") == ".zip"
 
 
-def test_zip_eocd_structure_rule_sends_leading_stub_zip_to_confirmation_band(tmp_path):
+def test_zip_eocd_structure_rule_skips_leading_stub_zip_without_zip_start_magic(tmp_path):
     plain_zip = tmp_path / "plain.zip"
     target = tmp_path / "stubbed.exe"
     with zipfile.ZipFile(plain_zip, "w") as archive:
@@ -72,13 +72,15 @@ def test_zip_eocd_structure_rule_sends_leading_stub_zip_to_confirmation_band(tmp
     assert structure["plausible"] is True
     assert structure["archive_offset"] > 0
 
+    bag = FactBag()
     decision = DetectionScheduler(_config([
         {"name": "zip_structure_identity", "enabled": True},
-    ])).evaluate(FactBag(), FactProvider(str(target)))
+    ])).evaluate(bag, FactProvider(str(target)))
 
     assert decision.should_extract is False
-    assert decision.decision == "maybe_archive"
-    assert decision.total_score == 4
+    assert decision.decision == "not_archive"
+    assert decision.total_score == 0
+    assert bag.has("zip.eocd_structure") is False
 
 
 def test_zip_structure_accept_does_not_accept_leading_stub_zip(tmp_path):
@@ -88,17 +90,19 @@ def test_zip_structure_accept_does_not_accept_leading_stub_zip(tmp_path):
         archive.writestr("hello.txt", "hello")
     target.write_bytes(b"MZ" + b"x" * 64 + plain_zip.read_bytes())
 
+    bag = FactBag()
     decision = DetectionScheduler(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
     }, precheck=[
         {"name": "zip_structure_accept", "enabled": True},
     ], scoring=[
         {"name": "zip_structure_identity", "enabled": True},
-    ])).evaluate(FactBag(), FactProvider(str(target)))
+    ])).evaluate(bag, FactProvider(str(target)))
 
     assert decision.should_extract is False
     assert decision.decision_stage == "scoring"
-    assert decision.total_score == 4
+    assert decision.total_score == 0
+    assert bag.has("zip.eocd_structure") is False
 
 
 def test_zip_eocd_structure_rejects_bad_central_directory_local_header_link(tmp_path):

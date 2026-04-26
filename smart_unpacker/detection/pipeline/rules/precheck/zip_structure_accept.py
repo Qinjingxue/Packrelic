@@ -3,12 +3,17 @@ from typing import Any, Dict
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.rules import RuleEffect
 from smart_unpacker.detection.pipeline.rules.base import RuleBase
+from smart_unpacker.detection.pipeline.rules.fact_requirements import FactRequirement, MagicBytesStartsWith
 from smart_unpacker.detection.pipeline.rules.registry import register_rule
+
+
+ZIP_START_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 
 @register_rule(name="zip_structure_accept", layer="precheck")
 class ZipStructureAcceptRule(RuleBase):
     required_facts = {"zip.eocd_structure"}
+    fact_requirements = [FactRequirement("zip.eocd_structure", MagicBytesStartsWith(ZIP_START_MAGICS))]
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}
     config_schema = {
         "accept_empty_zip": {

@@ -161,7 +161,7 @@ def process_my_archive_structure(context):
 | 规则 | 层 | 作用 |
 | --- | --- | --- |
 | `scene_protect` | `precheck` | 保护游戏、程序等运行目录中的资源归档。 |
-| `zip_structure_accept` | `precheck` | 对 EOCD、central directory entry walk 和 local header 回指可信的 ZIP 结构直接接受。 |
+| `zip_structure_accept` | `precheck` | 文件起始魔数命中 ZIP 后，对 EOCD、central directory entry walk 和 local header 回指可信的 ZIP 结构直接接受。 |
 | `tar_structure_accept` | `precheck` | 对 ustar header checksum 和 entry walk 可信的 TAR 结构直接接受。 |
 | `seven_zip_structure_accept` | `precheck` | 对 start header、next header CRC 和 next header NID 均可信的 7z 结构直接接受。 |
 | `rar_structure_accept` | `precheck` | 对 main header CRC 与后续 block/header walk 均可信的 RAR4/RAR5 结构直接接受。 |
@@ -169,7 +169,7 @@ def process_my_archive_structure(context):
 | `embedded_payload_identity` | `scoring` | 消费 `embedded_archive.analysis` 和 `pe.overlay_structure`，按普通载体或 PE overlay 中的归档载荷证据加分。 |
 | `seven_zip_structure_identity` | `scoring` | 消费 `7z.structure`，按 7z magic、start header、next header CRC/NID 证据加分。 |
 | `rar_structure_identity` | `scoring` | 消费 `rar.structure`，按 RAR magic、main header CRC、second block/header walk 证据加分。 |
-| `zip_structure_identity` | `scoring` | 消费 `zip.local_header` 和 `zip.eocd_structure`，按 ZIP magic、local header、EOCD/CD、CD entry walk 证据加分。 |
+| `zip_structure_identity` | `scoring` | 消费 `zip.local_header`，并在 ZIP 起始魔数命中后消费 `zip.eocd_structure`，按 ZIP magic、local header、EOCD/CD、CD entry walk 证据加分。 |
 | `tar_structure_identity` | `scoring` | 消费 `tar.header_structure`，按 TAR header checksum、ustar marker 和 entry walk 证据加分。 |
 | `archive_container_identity` | `scoring` | 消费 `archive.container_structure`，按 CAB、ARJ、CPIO 结构证据加分。 |
 | `compression_stream_identity` | `scoring` | 消费 `compression.stream_structure`，按 gzip、bzip2、xz、zstd 结构证据加分。 |

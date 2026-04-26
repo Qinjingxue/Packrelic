@@ -3,6 +3,7 @@ from typing import Any, Dict
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.rules import RuleEffect
 from smart_unpacker.detection.pipeline.rules.base import RuleBase
+from smart_unpacker.detection.pipeline.rules.fact_requirements import FactRequirement, MagicBytesStartsWith
 from smart_unpacker.detection.pipeline.rules.registry import register_rule
 
 
@@ -12,12 +13,16 @@ DEFAULT_ZIP_EMPTY_EOCD_SCORE = 4
 DEFAULT_ZIP_MAGIC_SCORE = 2
 DEFAULT_ZIP_LOCAL_HEADER_SCORE = 4
 DEFAULT_ZIP_CD_WALK_SCORE = 7
+ZIP_START_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 
 @register_rule(name="zip_structure_identity", layer="scoring")
 class ZipStructureIdentityScoreRule(RuleBase):
     required_facts = {"zip.local_header", "zip.eocd_structure"}
-    fact_requirements = []
+    fact_requirements = [
+        FactRequirement("zip.local_header"),
+        FactRequirement("zip.eocd_structure", MagicBytesStartsWith(ZIP_START_MAGICS)),
+    ]
     produced_facts = {"file.detected_ext", "file.probe_detected_archive", "file.probe_offset"}
     config_schema = {
         "eocd_score": {
