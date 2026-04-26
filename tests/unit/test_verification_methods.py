@@ -231,3 +231,81 @@ def test_archive_test_crc_hard_fails_when_archive_crc_test_fails(tmp_path, monke
 
     assert verification.ok is False
     assert verification.issues[0].code == "fail.archive_crc_test_failed"
+
+
+def test_sample_readability_passes_when_rust_sample_is_readable(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    task = _task(tmp_path)
+    result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
+
+    monkeypatch.setattr(
+        "smart_unpacker.verification.methods.sample_readability._sample_directory_readability",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "total_files": 2,
+            "sampled_files": 2,
+            "readable_files": 2,
+            "unreadable_files": 0,
+            "empty_files": 0,
+            "errors": [],
+        },
+    )
+
+    verification = _scheduler([{"name": "sample_readability"}]).verify(task, result)
+
+    assert verification.ok is True
+    assert verification.status == "passed"
+
+
+def test_sample_readability_hard_fails_when_all_samples_unreadable(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    task = _task(tmp_path)
+    result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
+
+    monkeypatch.setattr(
+        "smart_unpacker.verification.methods.sample_readability._sample_directory_readability",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "total_files": 2,
+            "sampled_files": 2,
+            "readable_files": 0,
+            "unreadable_files": 2,
+            "empty_files": 0,
+            "errors": [{"path": "a.bin", "message": "denied"}],
+        },
+    )
+
+    verification = _scheduler([{"name": "sample_readability"}]).verify(task, result)
+
+    assert verification.ok is False
+    assert verification.status == "failed"
+    assert verification.issues[0].code == "fail.sample_unreadable"
+
+
+def test_sample_readability_warns_for_empty_samples(tmp_path, monkeypatch):
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    task = _task(tmp_path)
+    result = ExtractionResult(success=True, archive=task.main_path, out_dir=str(out_dir), all_parts=task.all_parts)
+
+    monkeypatch.setattr(
+        "smart_unpacker.verification.methods.sample_readability._sample_directory_readability",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "total_files": 2,
+            "sampled_files": 2,
+            "readable_files": 2,
+            "unreadable_files": 0,
+            "empty_files": 2,
+            "errors": [],
+        },
+    )
+
+    verification = _scheduler([{"name": "sample_readability"}]).verify(task, result)
+
+    assert verification.ok is True
+    assert verification.status == "passed"
+    assert verification.steps[0].status == "warning"
+    assert verification.issues[0].code == "warning.sample_all_empty"

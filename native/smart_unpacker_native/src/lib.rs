@@ -50,6 +50,7 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(directory_scan::scan_directory_entries, m)?)?;
     m.add_function(wrap_pyfunction!(directory_scan::list_regular_files_in_directory, m)?)?;
     m.add_function(wrap_pyfunction!(file_crc::compute_directory_crc_manifest, m)?)?;
+    m.add_function(wrap_pyfunction!(file_crc::sample_directory_readability, m)?)?;
     m.add_function(wrap_pyfunction!(format_structure::inspect_zip_local_header, m)?)?;
     m.add_function(wrap_pyfunction!(format_structure::inspect_zip_eocd_structure, m)?)?;
     m.add_function(wrap_pyfunction!(format_structure::inspect_seven_zip_structure, m)?)?;
