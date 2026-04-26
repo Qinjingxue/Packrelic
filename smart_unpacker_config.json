@@ -72,6 +72,15 @@
           "name": "scene_protect",
           "enabled": true,
           "protect_weak_matches": true
+        },
+        {
+          "name": "zip_structure_accept",
+          "enabled": true,
+          "accept_empty_zip": true
+        },
+        {
+          "name": "tar_structure_accept",
+          "enabled": true
         }
       ],
       "scoring": [

@@ -37,6 +37,27 @@ def test_zip_eocd_structure_rule_identifies_zip_without_magic_rule(tmp_path):
     assert "zip_structure_identity" in decision.matched_rules
 
 
+def test_zip_structure_accept_precheck_short_circuits_scoring(tmp_path):
+    target = tmp_path / "payload.bin"
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("hello.txt", "hello")
+
+    bag = FactBag()
+    decision = DetectionScheduler(with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
+    }, precheck=[
+        {"name": "zip_structure_accept", "enabled": True},
+    ], scoring=[
+        {"name": "zip_structure_identity", "enabled": True},
+    ])).evaluate(bag, FactProvider(str(target)))
+
+    assert decision.should_extract is True
+    assert decision.decision_stage == "precheck"
+    assert decision.total_score == 0
+    assert decision.matched_rules == ["zip_structure_accept"]
+    assert bag.get("file.detected_ext") == ".zip"
+
+
 def test_zip_eocd_structure_rule_sends_leading_stub_zip_to_confirmation_band(tmp_path):
     plain_zip = tmp_path / "plain.zip"
     target = tmp_path / "stubbed.exe"
@@ -54,6 +75,26 @@ def test_zip_eocd_structure_rule_sends_leading_stub_zip_to_confirmation_band(tmp
 
     assert decision.should_extract is False
     assert decision.decision == "maybe_archive"
+    assert decision.total_score == 4
+
+
+def test_zip_structure_accept_does_not_accept_leading_stub_zip(tmp_path):
+    plain_zip = tmp_path / "plain.zip"
+    target = tmp_path / "stubbed.exe"
+    with zipfile.ZipFile(plain_zip, "w") as archive:
+        archive.writestr("hello.txt", "hello")
+    target.write_bytes(b"MZ" + b"x" * 64 + plain_zip.read_bytes())
+
+    decision = DetectionScheduler(with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
+    }, precheck=[
+        {"name": "zip_structure_accept", "enabled": True},
+    ], scoring=[
+        {"name": "zip_structure_identity", "enabled": True},
+    ])).evaluate(FactBag(), FactProvider(str(target)))
+
+    assert decision.should_extract is False
+    assert decision.decision_stage == "scoring"
     assert decision.total_score == 4
 
 
@@ -78,6 +119,30 @@ def test_tar_structure_rule_identifies_ustar_checksum(tmp_path):
     assert decision.total_score == 6
     assert bag.get("file.detected_ext") == ".tar"
     assert "tar_structure_identity" in decision.matched_rules
+
+
+def test_tar_structure_accept_precheck_short_circuits_scoring(tmp_path):
+    target = tmp_path / "payload.data"
+    with tarfile.open(target, "w") as archive:
+        payload = b"hello"
+        info = tarfile.TarInfo("hello.txt")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    bag = FactBag()
+    decision = DetectionScheduler(with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
+    }, precheck=[
+        {"name": "tar_structure_accept", "enabled": True},
+    ], scoring=[
+        {"name": "tar_structure_identity", "enabled": True},
+    ])).evaluate(bag, FactProvider(str(target)))
+
+    assert decision.should_extract is True
+    assert decision.decision_stage == "precheck"
+    assert decision.total_score == 0
+    assert decision.matched_rules == ["tar_structure_accept"]
+    assert bag.get("file.detected_ext") == ".tar"
 
 
 def test_tar_structure_rejects_bad_checksum(tmp_path):

@@ -2,8 +2,29 @@ from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.rules import ConfirmationEffect, RuleEffect
 from smart_unpacker.detection.pipeline.rules.base import RuleBase
 from smart_unpacker.detection import DetectionScheduler
+from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
+from smart_unpacker.detection.pipeline.processors.registry import register_processor
 from smart_unpacker.detection.pipeline.rules.registry import register_rule
 from tests.helpers.detection_config import with_detection_pipeline
+
+
+SHARED_PROCESSOR_CALLS = {"count": 0}
+
+
+@register_processor(
+    "pool_shared_reuse_test",
+    input_facts={"file.path"},
+    output_facts={"pool.shared_reuse"},
+    schemas={
+        "pool.shared_reuse": {
+            "type": "bool",
+            "description": "Test fact used to verify precheck to scoring fact reuse.",
+        },
+    },
+)
+def process_pool_shared_reuse(context: FactProcessorContext):
+    SHARED_PROCESSOR_CALLS["count"] += 1
+    return True
 
 
 @register_rule(name="pool_blacklist_test", layer="precheck")
@@ -34,6 +55,14 @@ class PoolAcceptTestRule(RuleBase):
         return RuleEffect.pass_()
 
 
+@register_rule(name="pool_shared_precheck_test", layer="precheck")
+class PoolSharedPrecheckTestRule(RuleBase):
+    required_facts = {"pool.shared_reuse"}
+
+    def evaluate(self, facts, config):
+        return RuleEffect.pass_()
+
+
 @register_rule(name="pool_score_a_test", layer="scoring")
 class PoolScoreATestRule(RuleBase):
     required_facts = {"score.a"}
@@ -48,6 +77,14 @@ class PoolScoreBTestRule(RuleBase):
 
     def evaluate(self, facts, config):
         return RuleEffect.add_score(2, "score b")
+
+
+@register_rule(name="pool_shared_score_test", layer="scoring")
+class PoolSharedScoreTestRule(RuleBase):
+    required_facts = {"pool.shared_reuse"}
+
+    def evaluate(self, facts, config):
+        return RuleEffect.add_score(1, "shared score")
 
 
 @register_rule(name="pool_confirmation_test", layer="confirmation")
@@ -146,6 +183,23 @@ def test_precheck_accept_short_circuits_before_scoring(monkeypatch):
     assert decisions[accept].decision_stage == "precheck"
     assert decisions[accept].matched_rules == ["pool_accept_test"]
     assert decisions[keep].decision_stage == "scoring"
+
+
+def test_precheck_collected_fact_is_reused_by_scoring():
+    SHARED_PROCESSOR_CALLS["count"] = 0
+    config = with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 1, "maybe_archive_threshold": 1},
+    }, precheck=[
+        {"name": "pool_shared_precheck_test", "enabled": True},
+    ], scoring=[
+        {"name": "pool_shared_score_test", "enabled": True},
+    ])
+
+    bag = _bag("reuse")
+    decision = DetectionScheduler(config).evaluate_pool([bag])[bag]
+
+    assert decision.should_extract is True
+    assert SHARED_PROCESSOR_CALLS["count"] == 1
 
 
 def test_confirmation_runs_only_for_maybe_score_window(monkeypatch):
