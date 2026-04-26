@@ -37,6 +37,22 @@ def test_config_validate_rejects_legacy_config_switch_values():
     assert any("directory_scan_mode must" in error for error in result["errors"])
 
 
+def test_config_validate_checks_verification_methods_are_registered():
+    payload = _payload()
+    payload["verification"] = {
+        "methods": [
+            {"name": "output_presence", "enabled": True},
+            {"name": "missing_verification_method", "enabled": False},
+        ],
+    }
+
+    result = validate_config_payload(payload)
+
+    assert not result["ok"]
+    assert "output_presence" in result["available_verification_methods"]
+    assert any("Unknown verification method" in error for error in result["errors"])
+
+
 def test_scheduler_profile_override_expands_scheduler_config():
     class Args:
         scheduler_profile = "aggressive"

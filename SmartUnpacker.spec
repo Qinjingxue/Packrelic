@@ -17,6 +17,7 @@ for package in (
     "smart_unpacker.detection.pipeline.rules.precheck",
     "smart_unpacker.detection.pipeline.rules.scoring",
     "smart_unpacker.detection.pipeline.rules.confirmation",
+    "smart_unpacker.verification.methods",
 ):
     hiddenimports.extend(collect_submodules(package))
 

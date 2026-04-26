@@ -460,6 +460,7 @@ Write-Step "Running packaged smoke tests"
 Invoke-Native -FilePath $distExePath -Arguments @("--help")
 Invoke-Native -FilePath $distExePath -Arguments @("passwords", "--json")
 Invoke-Native -FilePath $distExePath -Arguments @("inspect", (Join-Path $repoRoot "tests"), "--json")
+Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")
 
 Write-Step "Creating distributable zip archive"
 if (Test-Path -LiteralPath $releaseZipPath) {
