@@ -6,7 +6,7 @@ from smart_unpacker.detection.scene.definitions import RECOMMENDED_SCENE_RULES_P
 from smart_unpacker.detection.scene.markers import collect_scene_markers_from_snapshot
 from smart_unpacker.contracts.filesystem import DirectorySnapshot
 from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
-from smart_unpacker.support.external_command_cache import cached_value, directory_identity, stable_fingerprint
+from smart_unpacker.support.global_cache_manager import cached_value, directory_identity, stable_fingerprint
 
 
 def detect_scene_context_for_directory(

@@ -3,7 +3,7 @@ import os
 from smart_unpacker.detection.pipeline.facts.registry import register_batch_fact, register_fact
 from smart_unpacker.detection.scene.definitions import scene_rules
 from smart_unpacker.detection.scene.markers import collect_scene_markers_from_directory, collect_scene_markers_from_snapshot
-from smart_unpacker.support.external_command_cache import cached_value, directory_identity, stable_fingerprint
+from smart_unpacker.support.global_cache_manager import cached_value, directory_identity, stable_fingerprint
 
 
 @register_fact(

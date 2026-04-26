@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from smart_unpacker.support.resources import candidate_resource_roots, get_7z_dll_path
-from smart_unpacker.support.external_command_cache import cached_value, file_identity
+from smart_unpacker.support.global_cache_manager import cached_value, file_identity
 
 
 STATUS_OK = 0

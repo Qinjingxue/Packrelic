@@ -4,7 +4,7 @@ from smart_unpacker_native import inspect_pe_overlay_structure as _native_inspec
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
-from smart_unpacker.support.external_command_cache import cached_value, file_identity
+from smart_unpacker.support.global_cache_manager import cached_value, file_identity
 
 
 def inspect_pe_overlay_structure(path: str, file_size: int | None = None, magic_bytes: bytes | None = None) -> dict[str, Any]:

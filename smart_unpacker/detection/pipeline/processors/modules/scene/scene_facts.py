@@ -5,7 +5,7 @@ from smart_unpacker.detection.pipeline.processors.context import FactProcessorCo
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 from smart_unpacker.detection.scene.context import context_from_marker_candidates
 from smart_unpacker.detection.scene.definitions import scene_rules
-from smart_unpacker.support.external_command_cache import cached_value, file_identity, stable_fingerprint
+from smart_unpacker.support.global_cache_manager import cached_value, file_identity, stable_fingerprint
 
 
 def _scene_rules(config: dict[str, Any] | None) -> list[dict[str, Any]]:

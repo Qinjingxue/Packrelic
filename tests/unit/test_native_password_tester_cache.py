@@ -1,5 +1,5 @@
 from smart_unpacker.support import sevenzip_native as native
-from smart_unpacker.support.external_command_cache import clear_cache_namespace
+from smart_unpacker.support.global_cache_manager import clear_cache_namespace
 
 
 def _clear_native_7z_caches():

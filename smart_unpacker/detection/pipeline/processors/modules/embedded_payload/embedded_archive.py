@@ -8,7 +8,7 @@ from smart_unpacker_native import scan_magics_anywhere as _NATIVE_SCAN_MAGICS_AN
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
-from smart_unpacker.support.external_command_cache import cached_value, file_identity, stable_fingerprint
+from smart_unpacker.support.global_cache_manager import cached_value, file_identity, stable_fingerprint
 
 
 DEFAULT_LOOSE_SCAN_MIN_PREFIX = 32
