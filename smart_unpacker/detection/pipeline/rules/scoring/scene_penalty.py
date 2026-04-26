@@ -5,6 +5,7 @@ from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.rules import RuleEffect
 from smart_unpacker.detection.pipeline.rules.base import RuleBase
 from smart_unpacker.detection.pipeline.rules.registry import register_rule
+from smart_unpacker.support.extensions import normalize_exts
 from smart_unpacker.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
 
 
@@ -74,18 +75,9 @@ class ScenePenaltyRule(RuleBase):
         },
     }
 
-    def _normalized_exts(self, values) -> set[str]:
-        normalized = set()
-        for value in values or []:
-            if not isinstance(value, str) or not value.strip():
-                continue
-            ext = value.strip().lower()
-            normalized.add(ext if ext.startswith(".") else f".{ext}")
-        return normalized
-
     def _is_resource_ext(self, ext: str, config: Dict[str, Any]) -> bool:
-        semantic_exts = self._normalized_exts(config.get("semantic_resource_exts"))
-        resource_exts = self._normalized_exts(config.get("likely_resource_exts"))
+        semantic_exts = normalize_exts(config.get("semantic_resource_exts"))
+        resource_exts = normalize_exts(config.get("likely_resource_exts"))
         return ext in semantic_exts or ext in resource_exts
 
     def evaluate(self, facts: FactBag, config: Dict[str, Any]) -> RuleEffect:

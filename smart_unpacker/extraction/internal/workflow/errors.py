@@ -2,73 +2,15 @@ import os
 import subprocess
 from typing import Optional
 
+from smart_unpacker.support.archive_error_signals import (
+    has_archive_damage_signals,
+    has_definite_wrong_password,
+    has_transient_system_signals,
+    looks_like_split_archive_name,
+    normalize_error_text,
+)
 
-def _norm(err_text: str) -> str:
-    return (err_text or "").lower()
-
-
-def has_definite_wrong_password(err_text: str) -> bool:
-    err_lower = (err_text or "").lower()
-    return (
-        "cannot open encrypted archive. wrong password?" in err_lower
-        or "error: wrong password :" in err_lower
-        or "wrong password?" in err_lower
-        or "wrong password" in err_lower
-        or "enter password" in err_lower
-        or "password is incorrect" in err_lower
-        or "incorrect password" in err_lower
-    )
-
-
-def has_archive_damage_signals(err_text: str) -> bool:
-    err_lower = _norm(err_text)
-    return any(
-        marker in err_lower
-        for marker in (
-            "unexpected end of archive",
-            "unexpected end of data",
-            "missing volume",
-            "crc failed",
-            "data error in encrypted file",
-            "headers error",
-            "data error",
-            "can not open the file as archive",
-            "cannot open the file as",
-            "could not be opened by supported handlers",
-            "is not archive",
-            "archive is corrupted",
-            "checksum error",
-            "unsupported compression method",
-            "unsupported method",
-        )
-    )
-
-
-def has_transient_system_signals(err_text: str) -> bool:
-    err_lower = _norm(err_text)
-    return any(
-        marker in err_lower
-        for marker in (
-            "no space",
-            "write error",
-            "disk full",
-            "not enough space",
-            "sharing violation",
-            "access denied",
-            "permission denied",
-            "being used by another process",
-            "process cannot access the file",
-            "cannot create output directory",
-            "device is not ready",
-            "i/o error",
-            "io error",
-            "resource temporarily unavailable",
-            "too many open files",
-            "7z process failed to start",
-            "7z process timed out",
-            "7z process made no observable progress",
-        )
-    )
+_norm = normalize_error_text
 
 
 def should_retry_extract_failure(
@@ -107,7 +49,7 @@ def classify_extract_error(
 ) -> str:
     error_msg = "未知原因"
     archive_name = os.path.basename(archive or "").lower()
-    is_split_archive = is_split_archive or _looks_like_split_archive_name(archive_name)
+    is_split_archive = is_split_archive or looks_like_split_archive_name(archive_name)
     err_lower = _norm(err_text)
 
     if "missing volume" in err_lower:
@@ -156,14 +98,3 @@ def classify_extract_error(
 
     return error_msg
 
-
-def _looks_like_split_archive_name(archive_name: str) -> bool:
-    if not archive_name:
-        return False
-    import re
-
-    return bool(
-        re.search(r"\.part\d+\.rar(?:\.[^.]+)?$", archive_name, re.IGNORECASE)
-        or re.search(r"\.(7z|zip|rar)\.\d{3}(?:\.[^.]+)?$", archive_name, re.IGNORECASE)
-        or re.search(r"\.\d{3}(?:\.[^.]+)?$", archive_name, re.IGNORECASE)
-    )

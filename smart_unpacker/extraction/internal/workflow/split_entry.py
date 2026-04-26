@@ -3,6 +3,7 @@ from typing import Optional
 
 from smart_unpacker.contracts.tasks import SplitArchiveInfo
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
+from smart_unpacker.support.path_keys import path_key
 
 
 class SplitEntryResolver:
@@ -32,7 +33,7 @@ class SplitEntryResolver:
                 all_parts = self._dedupe_paths(all_parts + sibling_parts)
                 entry = self.relations.select_first_volume(all_parts)
 
-        if entry and os.path.normcase(os.path.normpath(entry)) != os.path.normcase(os.path.normpath(archive)):
+        if entry and path_key(entry) != path_key(archive):
             print(f"[SPLIT] 使用分卷入口: {entry}")
             split_info = SplitArchiveInfo(
                 is_split=True,
@@ -63,7 +64,7 @@ class SplitEntryResolver:
         for path in paths:
             if not path:
                 continue
-            key = os.path.normcase(os.path.normpath(path))
+            key = path_key(path)
             if key in seen:
                 continue
             seen.add(key)

@@ -8,6 +8,7 @@ from smart_unpacker_native import list_regular_files_in_directory as _native_lis
 
 from smart_unpacker.contracts.filesystem import DirectorySnapshot, FileEntry
 from smart_unpacker.relations.internal.models import CandidateGroup, DirectoryFileIndex, FileRelation
+from smart_unpacker.support.path_keys import case_key, normalized_path, path_key
 
 
 SPLIT_FIRST_PATTERNS = [
@@ -64,7 +65,7 @@ class RelationsGroupBuilder:
     def _build_directory_index(self, entries: List[FileEntry]) -> DirectoryFileIndex:
         lower_names = {entry.path.name.lower() for entry in entries}
         by_norm_path = {
-            os.path.normcase(os.path.normpath(str(entry.path))): entry
+            path_key(entry.path): entry
             for entry in entries
         }
         by_lower_name: Dict[str, List[FileEntry]] = defaultdict(list)
@@ -212,7 +213,7 @@ class RelationsGroupBuilder:
             return ""
 
         for path in paths:
-            parsed = self.parse_numbered_volume(os.path.normpath(path))
+            parsed = self.parse_numbered_volume(normalized_path(path))
             if parsed and parsed["number"] == 1:
                 return path
 
@@ -226,7 +227,7 @@ class RelationsGroupBuilder:
     def should_scan_split_siblings(self, archive: str, is_split: bool = False, is_sfx_stub: bool = False) -> bool:
         if is_split or is_sfx_stub:
             return True
-        parsed = self.parse_numbered_volume(os.path.normpath(archive))
+        parsed = self.parse_numbered_volume(normalized_path(archive))
         if parsed and parsed["number"] == 1:
             return True
         return os.path.splitext(archive)[1].lower() in {".exe", ".rar"}
@@ -280,7 +281,7 @@ class RelationsGroupBuilder:
         return False
 
     def split_sort_key(self, path: str) -> tuple[int, int, str]:
-        parsed = self.parse_numbered_volume(os.path.normpath(path))
+        parsed = self.parse_numbered_volume(normalized_path(path))
         if parsed:
             return (0, parsed["number"], path.lower())
 
@@ -309,19 +310,19 @@ class RelationsGroupBuilder:
     ):
         directory = os.path.dirname(archive)
         logical_base = archive_prefix if style == "rar_part" else os.path.splitext(archive_prefix)[0]
-        known = {os.path.normcase(os.path.normpath(path)) for path in all_parts}
+        known = {path_key(path) for path in all_parts}
         candidates = []
 
         for path in all_parts:
-            norm_path = os.path.normpath(path)
+            norm_path = normalized_path(path)
             if self.parse_numbered_volume(norm_path):
                 continue
             if self._looks_like_misnamed_volume(norm_path, archive_prefix, logical_base, style):
                 candidates.append(norm_path)
 
         for entry in self._iter_misnamed_volume_files(directory, archive_prefix, logical_base, style, directory_index):
-            path = os.path.normpath(str(entry.path))
-            norm_key = os.path.normcase(os.path.normpath(path))
+            path = normalized_path(entry.path)
+            norm_key = path_key(path)
             if norm_key in known:
                 continue
             if self._looks_like_misnamed_volume(path, archive_prefix, logical_base, style):
@@ -369,7 +370,7 @@ class RelationsGroupBuilder:
         candidates: List[FileEntry] = []
         for name in candidate_names:
             for entry in directory_index.by_lower_name.get(name, []):
-                key = os.path.normcase(os.path.normpath(str(entry.path)))
+                key = path_key(entry.path)
                 if key not in seen:
                     seen.add(key)
                     candidates.append(entry)
@@ -379,7 +380,7 @@ class RelationsGroupBuilder:
                 name = entry.path.name.lower()
                 if logical_name not in name or ".part" not in name or ".rar." not in name:
                     continue
-                key = os.path.normcase(os.path.normpath(str(entry.path)))
+                key = path_key(entry.path)
                 if key not in seen:
                     seen.add(key)
                     candidates.append(entry)
@@ -391,7 +392,7 @@ class RelationsGroupBuilder:
         all_parts: List[str],
         directory_index: DirectoryFileIndex | None = None,
     ) -> List[str]:
-        parsed_main = self.parse_numbered_volume(os.path.normpath(archive))
+        parsed_main = self.parse_numbered_volume(normalized_path(archive))
         if not parsed_main or parsed_main["number"] != 1:
             return list(all_parts)
         archive_prefix = parsed_main["prefix"]
@@ -529,7 +530,7 @@ class RelationsGroupBuilder:
         directory_index: DirectoryFileIndex | None = None,
     ):
         directory = os.path.dirname(archive)
-        archive_key = os.path.normcase(os.path.normpath(archive))
+        archive_key = path_key(archive)
         archive_entry = directory_index.by_norm_path.get(archive_key) if directory_index is not None else None
         if archive_entry is not None and archive_entry.size is not None and archive_entry.mtime_ns is not None:
             main_size = max(archive_entry.size, 1)
@@ -551,13 +552,13 @@ class RelationsGroupBuilder:
         if min_size > main_size:
             return []
         for entry in entries:
-            path = os.path.normpath(str(entry.path))
-            norm_key = os.path.normcase(os.path.normpath(path))
+            path = normalized_path(entry.path)
+            norm_key = path_key(path)
             if norm_key in known:
                 continue
 
             parsed = self.parse_numbered_volume(path)
-            if parsed and parsed["style"] == style and os.path.normcase(parsed["prefix"]) == os.path.normcase(archive_prefix):
+            if parsed and parsed["style"] == style and case_key(parsed["prefix"]) == case_key(archive_prefix):
                 continue
 
             if entry.size is None or entry.mtime_ns is None:

@@ -1,4 +1,3 @@
-import os
 from typing import Any
 
 from smart_unpacker.detection.scene.context import context_from_markers
@@ -7,6 +6,7 @@ from smart_unpacker.detection.scene.markers import collect_scene_markers_from_sn
 from smart_unpacker.contracts.filesystem import DirectorySnapshot
 from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
 from smart_unpacker.support.global_cache_manager import cached_value, directory_identity, stable_fingerprint
+from smart_unpacker.support.path_keys import normalized_path
 
 
 def detect_scene_context_for_directory(
@@ -15,7 +15,7 @@ def detect_scene_context_for_directory(
     snapshot: DirectorySnapshot | None = None,
 ) -> dict[str, Any]:
     effective_rules = rules or RECOMMENDED_SCENE_RULES_PAYLOAD
-    norm_target = os.path.normpath(target_dir)
+    norm_target = normalized_path(target_dir)
     key = (directory_identity(norm_target), stable_fingerprint(effective_rules))
     return cached_value(
         "scene_context_for_directory",

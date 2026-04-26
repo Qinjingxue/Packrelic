@@ -1,11 +1,11 @@
 import os
-import unicodedata
 from typing import Any
 
 from smart_unpacker.verification.evidence import VerificationEvidence
 from smart_unpacker.verification.methods._output_stats import output_stats_for_evidence
 from smart_unpacker.verification.registry import register_verification_method
 from smart_unpacker.verification.result import VerificationIssue, VerificationStepResult
+from smart_unpacker.support.path_names import clean_relative_archive_path, normalize_match_name, normalize_match_path
 
 
 NAME_FIELDS = (
@@ -31,12 +31,12 @@ class ExpectedNamePresenceMethod:
         if not stats.exists or not stats.is_dir or not stats.relative_paths:
             return VerificationStepResult(method=self.name, status="skipped")
 
-        output_paths = {_normalize_path(path) for path in stats.relative_paths}
-        output_basenames = {_normalize_name(os.path.basename(path)) for path in stats.relative_paths}
+        output_paths = {normalize_match_path(path) for path in stats.relative_paths}
+        output_basenames = {normalize_match_name(os.path.basename(path)) for path in stats.relative_paths}
         missing = []
         for expected in expected_names:
-            normalized_path = _normalize_path(expected)
-            basename = _normalize_name(os.path.basename(normalized_path))
+            normalized_path = normalize_match_path(expected)
+            basename = normalize_match_name(os.path.basename(normalized_path))
             if normalized_path in output_paths or basename in output_basenames:
                 continue
             missing.append(expected)
@@ -93,10 +93,10 @@ class ExpectedNamePresenceMethod:
         names = []
         seen = set()
         for candidate in candidates:
-            cleaned = _clean_expected_name(candidate)
+            cleaned = clean_relative_archive_path(candidate)
             if not cleaned:
                 continue
-            key = _normalize_path(cleaned)
+            key = normalize_match_path(cleaned)
             if key in seen:
                 continue
             seen.add(key)
@@ -133,24 +133,3 @@ def _iter_name_values(value: Any):
         for item in value:
             yield from _iter_name_values(item)
 
-
-def _clean_expected_name(value: Any) -> str:
-    text = str(value or "").replace("\\", "/").strip().strip("/")
-    if not text:
-        return ""
-    parts = [part for part in text.split("/") if part not in {"", ".", ".."}]
-    if not parts:
-        return ""
-    return "/".join(parts)
-
-
-def _normalize_path(value: str) -> str:
-    return "/".join(
-        _normalize_name(part)
-        for part in str(value or "").replace("\\", "/").split("/")
-        if part
-    )
-
-
-def _normalize_name(value: str) -> str:
-    return unicodedata.normalize("NFC", str(value or "")).casefold()

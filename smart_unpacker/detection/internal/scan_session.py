@@ -1,4 +1,3 @@
-import os
 from typing import List
 
 from smart_unpacker.contracts.detection import FactBag
@@ -7,6 +6,7 @@ from smart_unpacker.detection.internal.target_groups import relation_group_to_fa
 from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 from smart_unpacker.relations.scheduler import CandidateGroup, RelationsScheduler
+from smart_unpacker.support.path_keys import path_key
 
 
 class DetectionScanSession:
@@ -55,7 +55,7 @@ class DetectionScanSession:
         return self._relation_helpers.get_logical_name(filename, is_archive=True)
 
     def _directory_key(self, directory: str) -> str:
-        return os.path.normcase(os.path.normpath(directory))
+        return path_key(directory)
 
     def _snapshot_key(self, directory: str, max_depth: int | None) -> str:
         return f"{self._directory_key(directory)}::{max_depth}"

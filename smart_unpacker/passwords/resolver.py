@@ -1,8 +1,8 @@
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.passwords.archive_tester import ArchivePasswordTester
-from smart_unpacker.passwords.internal.error_signals import has_archive_damage_signals, has_definite_wrong_password
 from smart_unpacker.passwords.result import PasswordResolution
 from smart_unpacker.passwords.session import PasswordSession
+from smart_unpacker.support.archive_error_signals import has_archive_damage_signals, has_definite_wrong_password
 
 
 class PasswordResolver:

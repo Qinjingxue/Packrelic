@@ -17,6 +17,7 @@ from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
 from smart_unpacker.rename.scheduler import RenameScheduler
 from smart_unpacker.verification import VerificationResult, VerificationScheduler
+from smart_unpacker.support.path_keys import absolute_path_key
 
 
 @dataclass
@@ -164,11 +165,11 @@ class ExtractionBatchRunner:
         for task in tasks:
             output_dir = output_dir_resolver(task)
             if output_dir:
-                output_roots.append((task, os.path.normcase(os.path.abspath(output_dir))))
+                output_roots.append((task, absolute_path_key(output_dir)))
 
         filtered = []
         for task in tasks:
-            task_path = os.path.normcase(os.path.abspath(task.main_path))
+            task_path = absolute_path_key(task.main_path)
             inside_another_output = False
             for owner, output_root in output_roots:
                 if owner is task:

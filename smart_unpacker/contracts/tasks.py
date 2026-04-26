@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Optional, List
 from smart_unpacker.contracts.detection import FactBag
+from smart_unpacker.support.path_keys import normalized_path, path_key
 
 
 @dataclass
@@ -89,15 +90,13 @@ class ArchiveTask:
         if not path_map:
             return
 
-        import os
-
         normalized_map = {
-            os.path.normcase(os.path.normpath(old)): os.path.normpath(new)
+            path_key(old): normalized_path(new)
             for old, new in path_map.items()
         }
 
         def mapped(path: str) -> str:
-            return normalized_map.get(os.path.normcase(os.path.normpath(path)), path)
+            return normalized_map.get(path_key(path), path)
 
         self.main_path = mapped(self.main_path)
         self.all_parts = [mapped(path) for path in self.all_parts]

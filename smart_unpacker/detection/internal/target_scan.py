@@ -4,6 +4,7 @@ from typing import List
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.detection.internal.scan_session import DetectionScanSession
 from smart_unpacker.relations.scheduler import RelationsScheduler
+from smart_unpacker.support.path_keys import normalized_path, path_key, safe_relative_path
 
 
 RELATIONS = RelationsScheduler()
@@ -15,25 +16,15 @@ def _bag_paths(bag: FactBag) -> list[str]:
     if main:
         paths.append(main)
     paths.extend(bag.get("file.split_members", []) or [])
-    return [os.path.normcase(os.path.normpath(path)) for path in paths if path]
+    return [path_key(path) for path in paths if path]
 
 def _bag_key(bag: FactBag) -> str:
     path = bag.get("file.path", "")
     if not bag.get("relation.is_split_related"):
-        return os.path.normcase(os.path.normpath(path))
-    parent = os.path.dirname(os.path.normpath(path)) if path else ""
+        return path_key(path)
+    parent = os.path.dirname(normalized_path(path)) if path else ""
     logical_name = bag.get("file.logical_name") or os.path.basename(path)
-    return os.path.normcase(os.path.join(parent, logical_name.lower()))
-
-
-def _safe_relpath(path: str, start: str) -> str | None:
-    try:
-        rel = os.path.relpath(os.path.normpath(path), os.path.normpath(start))
-    except ValueError:
-        return None
-    if rel == "." or rel.startswith(".."):
-        return None
-    return rel
+    return path_key(os.path.join(parent, logical_name.lower()))
 
 
 def _add_unique(target: List[FactBag], seen_keys: set[str], bags: List[FactBag]):
@@ -60,7 +51,7 @@ def build_fact_bags_for_targets(
     selected_files: list[str] = []
 
     for raw_path in target_paths:
-        path = os.path.normpath(raw_path)
+        path = normalized_path(raw_path)
         if os.path.isdir(path):
             selected_dirs.append(path)
         elif os.path.isfile(path):
@@ -73,13 +64,13 @@ def build_fact_bags_for_targets(
         _add_unique(fact_bags, seen_keys, session.fact_bags_for_directory(directory))
 
     for file_path in selected_files:
-        if any(_safe_relpath(file_path, directory) is not None for directory in selected_dirs):
+        if any(safe_relative_path(file_path, directory) is not None for directory in selected_dirs):
             continue
 
         parent = os.path.dirname(file_path) or os.getcwd()
         parent_bags = session.fact_bags_for_directory(parent)
 
-        selected_key = os.path.normcase(os.path.normpath(file_path))
+        selected_key = path_key(file_path)
         matched = [
             bag for bag in parent_bags
             if selected_key in _bag_paths(bag)

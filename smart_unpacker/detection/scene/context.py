@@ -1,5 +1,6 @@
-import os
 from typing import Any
+
+from smart_unpacker.support.path_keys import normalized_path
 
 
 def context_from_marker_candidates(candidates: list[dict[str, Any]], rules: list[dict[str, Any]]) -> dict[str, Any]:
@@ -40,7 +41,7 @@ def context_from_markers(target_dir: str, markers: set[str], rules: list[dict[st
                 break
 
     return {
-        "target_dir": os.path.normpath(target_dir),
+        "target_dir": normalized_path(target_dir),
         "scene_type": matched_rule["scene_type"] if matched_rule else "generic",
         "match_strength": match_strength,
         "markers": sorted(markers),

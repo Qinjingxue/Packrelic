@@ -7,6 +7,8 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from smart_unpacker.support.path_keys import path_key
+
 
 DEFAULT_CACHE_CAPACITY = 512
 
@@ -57,7 +59,7 @@ GLOBAL_CACHE = CacheManager()
 
 
 def file_identity(path: str) -> tuple[str, int, int]:
-    norm_path = os.path.normcase(os.path.normpath(path or ""))
+    norm_path = path_key(path)
     try:
         stat = os.stat(norm_path)
     except OSError:
@@ -66,7 +68,7 @@ def file_identity(path: str) -> tuple[str, int, int]:
 
 
 def directory_identity(path: str) -> tuple[str, int, tuple]:
-    norm_path = os.path.normcase(os.path.normpath(path or ""))
+    norm_path = path_key(path)
     try:
         entries = []
         for entry in os.scandir(norm_path):

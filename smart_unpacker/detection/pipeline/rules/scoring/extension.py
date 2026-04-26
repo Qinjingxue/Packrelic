@@ -4,25 +4,7 @@ from smart_unpacker.contracts.rules import RuleEffect
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.detection.pipeline.rules.registry import register_rule
 from smart_unpacker.detection.pipeline.rules.base import RuleBase
-
-
-def normalize_extension_score_groups(values) -> dict[str, int]:
-    if not isinstance(values, list):
-        return {}
-    normalized = {}
-    for group in values:
-        if not isinstance(group, dict):
-            continue
-        try:
-            score = int(group.get("score"))
-        except (TypeError, ValueError):
-            continue
-        for ext in group.get("extensions") or []:
-            if not isinstance(ext, str) or not ext.strip():
-                continue
-            normalized_ext = ext.strip().lower()
-            normalized[normalized_ext if normalized_ext.startswith(".") else f".{normalized_ext}"] = score
-    return normalized
+from smart_unpacker.support.extensions import normalize_extension_score_groups
 
 @register_rule(name="extension", layer="scoring")
 class ExtensionScoreRule(RuleBase):

@@ -5,6 +5,7 @@ from typing import Callable, Dict, List, Set
 
 from smart_unpacker.contracts.tasks import ArchiveTask, RenameInstruction
 from smart_unpacker.rename.internal.volume_normalizer import SplitVolumeNormalizer, StagedSplit
+from smart_unpacker.support.path_keys import absolute_path_key, normalized_path
 
 
 class RenameScheduler:
@@ -40,11 +41,11 @@ class RenameScheduler:
         by_output = defaultdict(list)
         for task in tasks:
             output_dir = default_dirs[id(task)]
-            by_output[os.path.normcase(os.path.abspath(output_dir))].append(task)
+            by_output[absolute_path_key(output_dir)].append(task)
 
         resolved_dirs = dict(default_dirs)
         reserved = {
-            os.path.normcase(os.path.abspath(output_dir))
+            absolute_path_key(output_dir)
             for output_dir in default_dirs.values()
             if output_dir
         }
@@ -187,7 +188,7 @@ class RenameScheduler:
 
         for filename in files:
             if re.match(pattern, filename, re.IGNORECASE):
-                old_path = os.path.normpath(os.path.join(root, filename))
+                old_path = normalized_path(os.path.join(root, filename))
                 if old_path in processed_set:
                     continue
 
@@ -197,7 +198,7 @@ class RenameScheduler:
                 else:
                     new_name = normalized_name if not new_ext_suffix else normalized_name + new_ext_suffix
 
-                new_path = os.path.normpath(os.path.join(root, new_name))
+                new_path = normalized_path(os.path.join(root, new_name))
                 if not os.path.exists(new_path) or old_path.lower() == new_path.lower():
                     if old_path.lower() != new_path.lower():
                         print(f"[RENAME] Fixing series: {filename} -> {new_name}")
@@ -215,11 +216,11 @@ class RenameScheduler:
         source_name = instruction.source
         target_name = instruction.target
 
-        old_path = os.path.normpath(os.path.join(root, source_name))
+        old_path = normalized_path(os.path.join(root, source_name))
         if old_path in processed_set:
             return
 
-        new_path = os.path.normpath(os.path.join(root, target_name))
+        new_path = normalized_path(os.path.join(root, target_name))
         if not os.path.exists(new_path) or old_path.lower() == new_path.lower():
             if old_path.lower() != new_path.lower():
                 print(f"[RENAME] Fixing extension: {source_name} -> {target_name}")
@@ -238,8 +239,8 @@ class RenameScheduler:
         base = os.path.basename(default_dir)
         candidate = os.path.join(parent, f"{base}_{archive_ext}")
         index = 2
-        while os.path.normcase(os.path.abspath(candidate)) in reserved or os.path.isfile(candidate):
+        while absolute_path_key(candidate) in reserved or os.path.isfile(candidate):
             candidate = os.path.join(parent, f"{base}_{archive_ext}_{index}")
             index += 1
-        reserved.add(os.path.normcase(os.path.abspath(candidate)))
+        reserved.add(absolute_path_key(candidate))
         return candidate

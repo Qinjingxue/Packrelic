@@ -8,6 +8,7 @@ from smart_unpacker.detection.scene.directory_context import (
     is_strong_scene_context,
 )
 from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
+from smart_unpacker.support.extensions import normalize_extension_score_groups, normalize_exts
 
 
 class NestedOutputScanPolicy:
@@ -54,14 +55,11 @@ class NestedOutputScanPolicy:
             embedded_config = self._rule_config("scoring", "embedded_payload_identity")
 
         extension_config = self._rule_config("scoring", "extension")
-        standard_exts = set(self._normalize_extension_score_groups(extension_config.get("extension_score_groups", [])))
+        standard_exts = set(normalize_extension_score_groups(extension_config.get("extension_score_groups", [])))
         standard_exts.add(".exe")
 
-        carrier_exts = self._configured_extension_set(embedded_config.get("carrier_exts"), [])
-        ambiguous_exts = self._configured_extension_set(
-            embedded_config.get("ambiguous_resource_exts"),
-            [],
-        )
+        carrier_exts = normalize_exts(embedded_config.get("carrier_exts"))
+        ambiguous_exts = normalize_exts(embedded_config.get("ambiguous_resource_exts"))
 
         if ext in standard_exts:
             return True
@@ -80,34 +78,6 @@ class NestedOutputScanPolicy:
             if isinstance(rule, dict) and rule.get("name") == name:
                 return rule
         return {}
-
-    def _normalize_extension_score_groups(self, values) -> dict[str, int]:
-        if not isinstance(values, list):
-            return {}
-        normalized = {}
-        for group in values:
-            if not isinstance(group, dict):
-                continue
-            try:
-                score = int(group.get("score"))
-            except (TypeError, ValueError):
-                continue
-            for ext in group.get("extensions") or []:
-                if not isinstance(ext, str) or not ext.strip():
-                    continue
-                normalized_ext = ext.strip().lower()
-                normalized[normalized_ext if normalized_ext.startswith(".") else f".{normalized_ext}"] = score
-        return normalized
-
-    def _configured_extension_set(self, values, fallback) -> set[str]:
-        normalized = set()
-        source = values if isinstance(values, list) else fallback
-        for value in source:
-            if not isinstance(value, str) or not value.strip():
-                continue
-            ext = value.strip().lower()
-            normalized.add(ext if ext.startswith(".") else f".{ext}")
-        return normalized
 
     def _size_at_least(self, path: str, size: int | None, minimum_bytes: int) -> bool:
         if size is not None:

@@ -8,7 +8,9 @@ from smart_unpacker_native import scan_magics_anywhere as _NATIVE_SCAN_MAGICS_AN
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
+from smart_unpacker.support.config_values import bool_value, non_negative_int, optional_positive_int, positive_int
 from smart_unpacker.support.global_cache_manager import cached_value, file_identity, stable_fingerprint
+from smart_unpacker.support.extensions import normalize_exts
 
 
 DEFAULT_LOOSE_SCAN_MIN_PREFIX = 32
@@ -40,38 +42,28 @@ def _empty_result() -> dict[str, Any]:
     }
 
 
-def _normalize_exts(values) -> set[str]:
-    normalized = set()
-    for value in values or []:
-        if not isinstance(value, str) or not value.strip():
-            continue
-        ext = value.strip().lower()
-        normalized.add(ext if ext.startswith(".") else f".{ext}")
-    return normalized
-
-
 def _find_tail_after_markers_layered(
     path: str,
     markers: tuple[bytes, ...],
     file_size: int,
     config: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    tail_window = _positive_int_config(
+    tail_window = positive_int(
         config,
         "carrier_scan_tail_window_bytes",
         DEFAULT_CARRIER_SCAN_TAIL_WINDOW_BYTES,
     )
-    prefix_window = _non_negative_int_config(
+    prefix_window = non_negative_int(
         config,
         "carrier_scan_prefix_window_bytes",
         DEFAULT_CARRIER_SCAN_PREFIX_WINDOW_BYTES,
     )
-    full_scan_max = _non_negative_int_config(
+    full_scan_max = non_negative_int(
         config,
         "carrier_scan_full_scan_max_bytes",
         DEFAULT_CARRIER_SCAN_FULL_SCAN_MAX_BYTES,
     )
-    deep_scan = _bool_config(config, "carrier_scan_deep_scan", DEFAULT_CARRIER_SCAN_DEEP_SCAN)
+    deep_scan = bool_value(config, "carrier_scan_deep_scan", DEFAULT_CARRIER_SCAN_DEEP_SCAN)
 
     tail_start = max(0, file_size - tail_window)
     should_full_scan = deep_scan or (full_scan_max > 0 and file_size <= full_scan_max)
@@ -199,35 +191,6 @@ def _native_stream_find_tail_magics_anywhere(
     return hits
 
 
-def _positive_int_config(config: Dict[str, Any], key: str, default: int) -> int:
-    try:
-        value = int(config.get(key, default))
-    except (TypeError, ValueError):
-        return default
-    return value if value > 0 else default
-
-
-def _required_positive_int_config(config: Dict[str, Any], key: str) -> int | None:
-    try:
-        value = int(config.get(key))
-    except (TypeError, ValueError):
-        return None
-    return value if value > 0 else None
-
-
-def _non_negative_int_config(config: Dict[str, Any], key: str, default: int) -> int:
-    try:
-        value = int(config.get(key, default))
-    except (TypeError, ValueError):
-        return default
-    return value if value >= 0 else default
-
-
-def _bool_config(config: Dict[str, Any], key: str, default: bool) -> bool:
-    value = config.get(key, default)
-    return value if isinstance(value, bool) else default
-
-
 def _find_after_carrier(path: str, ext: str, file_size: int, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return _native_find_after_carrier(path, ext, file_size, config)
 
@@ -236,22 +199,22 @@ def _native_find_after_carrier(path: str, ext: str, file_size: int, config: Dict
     if ext not in {".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp"}:
         return None
 
-    tail_window = _positive_int_config(
+    tail_window = positive_int(
         config,
         "carrier_scan_tail_window_bytes",
         DEFAULT_CARRIER_SCAN_TAIL_WINDOW_BYTES,
     )
-    prefix_window = _non_negative_int_config(
+    prefix_window = non_negative_int(
         config,
         "carrier_scan_prefix_window_bytes",
         DEFAULT_CARRIER_SCAN_PREFIX_WINDOW_BYTES,
     )
-    full_scan_max = _non_negative_int_config(
+    full_scan_max = non_negative_int(
         config,
         "carrier_scan_full_scan_max_bytes",
         DEFAULT_CARRIER_SCAN_FULL_SCAN_MAX_BYTES,
     )
-    deep_scan = _bool_config(config, "carrier_scan_deep_scan", DEFAULT_CARRIER_SCAN_DEEP_SCAN)
+    deep_scan = bool_value(config, "carrier_scan_deep_scan", DEFAULT_CARRIER_SCAN_DEEP_SCAN)
     result = _NATIVE_SCAN_CARRIER_ARCHIVE(
         path,
         ext,
@@ -283,22 +246,22 @@ def _native_find_after_carrier(path: str, ext: str, file_size: int, config: Dict
 
 
 def _find_by_loose_scan(path: str, file_size: int, config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    min_prefix = _non_negative_int_config(config, "loose_scan_min_prefix", DEFAULT_LOOSE_SCAN_MIN_PREFIX)
-    min_tail_bytes = _required_positive_int_config(config, "loose_scan_min_tail_bytes")
+    min_prefix = non_negative_int(config, "loose_scan_min_prefix", DEFAULT_LOOSE_SCAN_MIN_PREFIX)
+    min_tail_bytes = optional_positive_int(config, "loose_scan_min_tail_bytes")
     if min_tail_bytes is None:
         return None
-    max_hits = _positive_int_config(config, "loose_scan_max_hits", DEFAULT_LOOSE_SCAN_MAX_HITS)
-    tail_window = _positive_int_config(
+    max_hits = positive_int(config, "loose_scan_max_hits", DEFAULT_LOOSE_SCAN_MAX_HITS)
+    tail_window = positive_int(
         config,
         "loose_scan_tail_window_bytes",
         DEFAULT_LOOSE_SCAN_TAIL_WINDOW_BYTES,
     )
-    full_scan_max = _positive_int_config(
+    full_scan_max = positive_int(
         config,
         "loose_scan_full_scan_max_bytes",
         DEFAULT_LOOSE_SCAN_FULL_SCAN_MAX_BYTES,
     )
-    deep_scan = _bool_config(config, "loose_scan_deep_scan", DEFAULT_LOOSE_SCAN_DEEP_SCAN)
+    deep_scan = bool_value(config, "loose_scan_deep_scan", DEFAULT_LOOSE_SCAN_DEEP_SCAN)
     if file_size <= min_prefix + min_tail_bytes:
         return None
 
@@ -352,8 +315,8 @@ def analyze_embedded_archive(path: str, file_size: int, config: Dict[str, Any]) 
 
 def _analyze_embedded_archive_uncached(path: str, file_size: int, config: Dict[str, Any]) -> dict[str, Any]:
     ext = os.path.splitext(path)[1].lower()
-    carrier_exts = _normalize_exts(config.get("carrier_exts"))
-    ambiguous_exts = _normalize_exts(config.get("ambiguous_resource_exts"))
+    carrier_exts = normalize_exts(config.get("carrier_exts"))
+    ambiguous_exts = normalize_exts(config.get("ambiguous_resource_exts"))
     if ext not in carrier_exts and ext not in ambiguous_exts:
         return _empty_result()
 

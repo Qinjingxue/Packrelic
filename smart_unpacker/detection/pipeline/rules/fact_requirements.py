@@ -3,16 +3,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from smart_unpacker.contracts.detection import FactBag
-
-
-def normalize_exts(values) -> set[str]:
-    normalized = set()
-    for value in values or []:
-        if not isinstance(value, str) or not value.strip():
-            continue
-        ext = value.strip().lower()
-        normalized.add(ext if ext.startswith(".") else f".{ext}")
-    return normalized
+from smart_unpacker.support.extensions import normalize_exts
 
 
 def _extension_values_key(values) -> tuple[str, ...]:

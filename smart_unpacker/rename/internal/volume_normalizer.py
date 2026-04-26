@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from smart_unpacker.support.sevenzip_native import get_native_password_tester
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
+from smart_unpacker.support.path_keys import case_key, normalized_path
 
 
 @dataclass
@@ -52,7 +53,7 @@ class SplitVolumeNormalizer:
 
     def normalize(self, archive: str, all_parts: List[str], startupinfo=None) -> StagedSplit:
         confirmed_parts = list(dict.fromkeys(all_parts))
-        parsed_main = self._relations.parse_numbered_volume(os.path.normpath(archive))
+        parsed_main = self._relations.parse_numbered_volume(normalized_path(archive))
         if not parsed_main or parsed_main["number"] != 1:
             return StagedSplit(archive=archive, run_parts=confirmed_parts, cleanup_parts=confirmed_parts)
 
@@ -61,9 +62,9 @@ class SplitVolumeNormalizer:
         width = parsed_main["width"]
         numbered_parts = {}
         for path in all_parts:
-            parsed = self._relations.parse_numbered_volume(os.path.normpath(path))
-            if parsed and parsed["style"] == style and os.path.normcase(parsed["prefix"]) == os.path.normcase(archive_prefix):
-                numbered_parts[parsed["number"]] = os.path.normpath(path)
+            parsed = self._relations.parse_numbered_volume(normalized_path(path))
+            if parsed and parsed["style"] == style and case_key(parsed["prefix"]) == case_key(archive_prefix):
+                numbered_parts[parsed["number"]] = normalized_path(path)
 
         candidates = self._collect_misnamed_volume_candidates(archive, all_parts, archive_prefix, style)
         if not candidates:

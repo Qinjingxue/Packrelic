@@ -1,5 +1,4 @@
 import os
-import unicodedata
 from typing import Any
 
 from smart_unpacker.support.sevenzip_native import (
@@ -10,6 +9,7 @@ from smart_unpacker.support.sevenzip_native import (
     STATUS_WRONG_PASSWORD,
     cached_read_archive_crc_manifest,
 )
+from smart_unpacker.support.path_names import clean_relative_archive_path, normalize_match_name, normalize_match_path
 from smart_unpacker.verification.evidence import VerificationEvidence
 from smart_unpacker.verification.registry import register_verification_method
 from smart_unpacker.verification.result import VerificationIssue, VerificationStepResult
@@ -90,10 +90,10 @@ class ArchiveTestCrcMethod:
         missing = []
         checked = 0
         for item in archive_files:
-            expected_path = _clean_path(item.get("path"))
-            output_item = output_by_path.get(_normalize_path(expected_path))
+            expected_path = clean_relative_archive_path(item.get("path"))
+            output_item = output_by_path.get(normalize_match_path(expected_path))
             if output_item is None:
-                output_item = output_by_name.get(_normalize_name(os.path.basename(expected_path)))
+                output_item = output_by_name.get(normalize_match_name(os.path.basename(expected_path)))
             if output_item is None:
                 missing.append(expected_path)
                 continue
@@ -200,9 +200,9 @@ def _index_output_files(files: list[dict]) -> tuple[dict[str, dict], dict[str, d
     for item in files:
         if not isinstance(item, dict):
             continue
-        path = _clean_path(item.get("path"))
-        by_path[_normalize_path(path)] = item
-        name = _normalize_name(os.path.basename(path))
+        path = clean_relative_archive_path(item.get("path"))
+        by_path[normalize_match_path(path)] = item
+        name = normalize_match_name(os.path.basename(path))
         if name in by_name:
             duplicate_names.add(name)
         else:
@@ -210,24 +210,6 @@ def _index_output_files(files: list[dict]) -> tuple[dict[str, dict], dict[str, d
     for name in duplicate_names:
         by_name.pop(name, None)
     return by_path, by_name
-
-
-def _clean_path(value: Any) -> str:
-    text = str(value or "").replace("\\", "/").strip().strip("/")
-    parts = [part for part in text.split("/") if part not in {"", ".", ".."}]
-    return "/".join(parts)
-
-
-def _normalize_path(value: str) -> str:
-    return "/".join(
-        _normalize_name(part)
-        for part in _clean_path(value).split("/")
-        if part
-    )
-
-
-def _normalize_name(value: str) -> str:
-    return unicodedata.normalize("NFC", str(value or "")).casefold()
 
 
 def _as_u32(value: Any) -> int:

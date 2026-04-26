@@ -5,8 +5,8 @@ from smart_unpacker.support.sevenzip_native import (
     cached_check_archive_health,
     cached_test_archive,
 )
-from smart_unpacker.extraction.internal.workflow.errors import has_archive_damage_signals, has_definite_wrong_password
 from smart_unpacker.extraction.result import ExtractionResult
+from smart_unpacker.support.archive_error_signals import has_archive_damage_signals, has_definite_wrong_password
 
 
 @dataclass(frozen=True)

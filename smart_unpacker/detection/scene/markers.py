@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatch
 
 from smart_unpacker.contracts.filesystem import DirectorySnapshot
+from smart_unpacker.support.path_keys import path_key, relative_os_path
 
 
 @dataclass
@@ -117,12 +118,12 @@ def collect_scene_markers_from_directory(directory: str, rules: list[dict]) -> s
 
 
 def _snapshot_index(snapshot: DirectorySnapshot) -> SceneSnapshotIndex:
-    root_key = _path_key(snapshot.root_path)
+    root_key = path_key(snapshot.root_path)
     index = SceneSnapshotIndex(root_key=root_key)
     for entry in snapshot.entries:
-        path_key = _path_key(entry.path)
-        parent_key = _path_key(entry.path.parent)
-        index.path_keys.add(path_key)
+        entry_path_key = path_key(entry.path)
+        parent_key = path_key(entry.path.parent)
+        index.path_keys.add(entry_path_key)
         if entry.is_dir:
             index.child_dirs_by_parent.setdefault(parent_key, set()).add(entry.path.name.lower())
             if parent_key == root_key:
@@ -133,21 +134,17 @@ def _snapshot_index(snapshot: DirectorySnapshot) -> SceneSnapshotIndex:
 
 
 def _snapshot_has_relative_path(index: SceneSnapshotIndex, snapshot: DirectorySnapshot, rel_path: str) -> bool:
-    target = os.path.normcase(os.path.normpath(snapshot.root_path / _relative_path(rel_path)))
+    target = path_key(snapshot.root_path / _relative_path(rel_path))
     return target in index.path_keys
 
 
 def _snapshot_child_dirs(index: SceneSnapshotIndex, snapshot: DirectorySnapshot, child_name: str) -> set[str]:
-    child_key = _path_key(snapshot.root_path / child_name)
+    child_key = path_key(snapshot.root_path / child_name)
     return index.child_dirs_by_parent.get(child_key, set())
 
 
-def _path_key(path) -> str:
-    return os.path.normcase(os.path.normpath(path))
-
-
 def _relative_path(rel_path: str):
-    return os.path.join(*rel_path.split("/"))
+    return relative_os_path(rel_path)
 
 
 def _top_level_entries(directory: str) -> tuple[set[str], set[str]]:

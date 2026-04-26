@@ -4,6 +4,7 @@ from smart_unpacker.detection.pipeline.facts.registry import register_batch_fact
 from smart_unpacker.detection.scene.definitions import scene_rules
 from smart_unpacker.detection.scene.markers import collect_scene_markers_from_directory, collect_scene_markers_from_snapshot
 from smart_unpacker.support.global_cache_manager import cached_value, directory_identity, stable_fingerprint
+from smart_unpacker.support.path_keys import normalized_path, path_key
 
 
 @register_fact(
@@ -37,8 +38,8 @@ def collect_scene_directory_markers_batch(context):
         start_dir = os.path.dirname(os.path.abspath(base_path)) if os.path.isfile(base_path) else os.path.abspath(base_path)
         candidates = []
         for directory in candidate_directories(start_dir, max_depth):
-            normalized = os.path.normpath(directory)
-            cache_key = (os.path.normcase(normalized), rules_key)
+            normalized = normalized_path(directory)
+            cache_key = (path_key(normalized), rules_key)
             markers = directory_markers.get(cache_key)
             if markers is None:
                 markers = cached_scene_markers_for_directory(normalized, rules)
@@ -61,7 +62,7 @@ def _collect_scene_marker_candidates(directories: list[str], rules: list[dict]) 
     candidates = []
     for directory in directories:
         candidates.append({
-            "target_dir": os.path.normpath(directory),
+            "target_dir": normalized_path(directory),
             "markers": cached_scene_markers_for_directory(directory, rules),
         })
     return candidates
