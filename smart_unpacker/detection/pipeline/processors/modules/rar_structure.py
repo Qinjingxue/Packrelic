@@ -1,4 +1,5 @@
 import os
+import zlib
 from typing import Any
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
@@ -8,6 +9,9 @@ from smart_unpacker.detection.pipeline.processors.registry import register_proce
 RAR4_SIGNATURE = b"Rar!\x1a\x07\x00"
 RAR5_SIGNATURE = b"Rar!\x1a\x07\x01\x00"
 RAR4_KNOWN_BLOCK_TYPES = {0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7B}
+RAR4_MAIN_HEADER_TYPE = 0x73
+RAR5_MAIN_HEADER_TYPE = 1
+DEFAULT_MAX_FIRST_HEADER_CHECK_BYTES = 1024 * 1024
 
 
 def _empty_result(error: str = "") -> dict[str, Any]:
@@ -20,6 +24,9 @@ def _empty_result(error: str = "") -> dict[str, Any]:
         "first_header_offset": 0,
         "first_header_size": 0,
         "first_header_type": 0,
+        "header_crc_checked": False,
+        "header_crc_ok": False,
+        "strong_accept": False,
         "confidence": "none",
         "evidence": [],
     }
@@ -42,6 +49,7 @@ def _inspect_rar4(data: bytes, file_size: int) -> dict[str, Any]:
     if file_size < first_header_offset + 7 or len(data) < first_header_offset + 7:
         return _empty_result("rar4_first_header_too_small")
     header = data[first_header_offset:first_header_offset + 7]
+    header_crc = int.from_bytes(header[0:2], "little")
     header_type = header[2]
     header_size = int.from_bytes(header[5:7], "little")
     result = {
@@ -53,6 +61,9 @@ def _inspect_rar4(data: bytes, file_size: int) -> dict[str, Any]:
         "first_header_offset": first_header_offset,
         "first_header_size": header_size,
         "first_header_type": header_type,
+        "header_crc_checked": False,
+        "header_crc_ok": False,
+        "strong_accept": False,
         "confidence": "none",
         "evidence": ["rar4:signature"],
     }
@@ -65,6 +76,16 @@ def _inspect_rar4(data: bytes, file_size: int) -> dict[str, Any]:
     result["plausible"] = True
     result["confidence"] = "strong"
     result["evidence"].append("rar4:first_header")
+    if len(data) >= first_header_offset + header_size:
+        full_header = data[first_header_offset:first_header_offset + header_size]
+        result["header_crc_checked"] = True
+        result["header_crc_ok"] = (zlib.crc32(full_header[2:]) & 0xFFFF) == header_crc
+        if result["header_crc_ok"]:
+            result["evidence"].append("rar4:header_crc")
+        elif header_type == RAR4_MAIN_HEADER_TYPE:
+            result["error"] = "rar4_header_crc_mismatch"
+    if header_type == RAR4_MAIN_HEADER_TYPE and result["header_crc_ok"]:
+        result["strong_accept"] = True
     return result
 
 
@@ -82,6 +103,9 @@ def _inspect_rar5(data: bytes, file_size: int) -> dict[str, Any]:
         "first_header_offset": first_header_offset,
         "first_header_size": 0,
         "first_header_type": 0,
+        "header_crc_checked": False,
+        "header_crc_ok": False,
+        "strong_accept": False,
         "confidence": "none",
         "evidence": ["rar5:signature"],
     }
@@ -102,10 +126,25 @@ def _inspect_rar5(data: bytes, file_size: int) -> dict[str, Any]:
     result["plausible"] = True
     result["confidence"] = "strong"
     result["evidence"].append("rar5:first_header")
+    if len(data) >= first_header_offset + 4 + header_size:
+        stored_crc = int.from_bytes(data[first_header_offset:first_header_offset + 4], "little")
+        header_data = data[first_header_offset + 4:first_header_offset + 4 + header_size]
+        result["header_crc_checked"] = True
+        result["header_crc_ok"] = (zlib.crc32(header_data) & 0xFFFFFFFF) == stored_crc
+        if result["header_crc_ok"]:
+            result["evidence"].append("rar5:header_crc")
+        elif header_type == RAR5_MAIN_HEADER_TYPE:
+            result["error"] = "rar5_header_crc_mismatch"
+    if header_type == RAR5_MAIN_HEADER_TYPE and result["header_crc_ok"]:
+        result["strong_accept"] = True
     return result
 
 
-def inspect_rar_structure(path: str, magic_bytes: bytes | None = None) -> dict[str, Any]:
+def inspect_rar_structure(
+    path: str,
+    magic_bytes: bytes | None = None,
+    max_first_header_check_bytes: int = DEFAULT_MAX_FIRST_HEADER_CHECK_BYTES,
+) -> dict[str, Any]:
     try:
         file_size = os.path.getsize(path)
         with open(path, "rb") as handle:
@@ -113,6 +152,20 @@ def inspect_rar_structure(path: str, magic_bytes: bytes | None = None) -> dict[s
             if len(data) < 64:
                 handle.seek(0)
                 data = handle.read(64)
+            if data.startswith(RAR4_SIGNATURE) and len(data) >= len(RAR4_SIGNATURE) + 7:
+                header_size = int.from_bytes(data[len(RAR4_SIGNATURE) + 5:len(RAR4_SIGNATURE) + 7], "little")
+                read_size = min(file_size, len(RAR4_SIGNATURE) + header_size, max_first_header_check_bytes)
+                if len(data) < read_size:
+                    handle.seek(0)
+                    data = handle.read(read_size)
+            elif data.startswith(RAR5_SIGNATURE):
+                parsed_size = _read_vint(data, len(RAR5_SIGNATURE) + 4)
+                if parsed_size is not None:
+                    header_size, _after_size = parsed_size
+                    read_size = min(file_size, len(RAR5_SIGNATURE) + 4 + header_size, max_first_header_check_bytes)
+                    if len(data) < read_size:
+                        handle.seek(0)
+                        data = handle.read(read_size)
     except OSError as exc:
         return _empty_result(f"os_error:{exc}")
 
@@ -130,7 +183,7 @@ def inspect_rar_structure(path: str, magic_bytes: bytes | None = None) -> dict[s
     schemas={
         "rar.structure": {
             "type": "dict",
-            "description": "Lightweight RAR4/RAR5 signature and first-header structure check.",
+            "description": "RAR4/RAR5 signature, first-header structure, and optional header CRC check.",
         },
     },
 )
@@ -139,4 +192,5 @@ def process_rar_structure(context: FactProcessorContext) -> dict[str, Any]:
     return inspect_rar_structure(
         facts.get("file.path") or "",
         facts.get("file.magic_bytes") or b"",
+        int(context.fact_config.get("max_first_header_check_bytes", DEFAULT_MAX_FIRST_HEADER_CHECK_BYTES)),
     )

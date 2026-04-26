@@ -86,6 +86,16 @@
         {
           "name": "tar_structure_accept",
           "enabled": true
+        },
+        {
+          "name": "seven_zip_structure_accept",
+          "enabled": true,
+          "max_next_header_check_bytes": 1048576
+        },
+        {
+          "name": "rar_structure_accept",
+          "enabled": true,
+          "max_first_header_check_bytes": 1048576
         }
       ],
       "scoring": [
