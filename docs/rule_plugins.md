@@ -161,8 +161,14 @@ def process_archive_identity(context):
 | 规则 | 层 | 作用 |
 | --- | --- | --- |
 | `scene_protect` | `precheck` | 保护游戏、程序等运行目录中的资源归档。 |
+| `zip_structure_accept` | `precheck` | 对高置信 ZIP EOCD/central directory 结构直接接受。 |
+| `tar_structure_accept` | `precheck` | 对高置信 ustar header checksum 结构直接接受。 |
 | `extension` | `scoring` | 按扩展名组给候选加分。 |
 | `archive_identity` | `scoring` | 消费 `archive.identity`，根据真实内容证据加分并写入检测扩展名。 |
+| `zip_structure_identity` | `scoring` | 消费 `zip.eocd_structure`，按 ZIP EOCD/central directory 证据加分。 |
+| `tar_structure_identity` | `scoring` | 消费 `tar.header_structure`，按 TAR header checksum 证据加分。 |
+| `archive_container_identity` | `scoring` | 消费 `archive.container_structure`，按 CAB、ARJ、CPIO 结构证据加分。 |
+| `compression_stream_identity` | `scoring` | 消费 `compression.stream_structure`，按 gzip、bzip2、xz、zstd 结构证据加分。 |
 | `scene_penalty` | `scoring` | 对运行目录资源、弱保护路径和常见资源文件扣分。 |
 | `seven_zip_probe` | `confirmation` | 用 7-Zip 轻量探测可疑候选。 |
 | `seven_zip_validation` | `confirmation` | 用 7-Zip 测试候选是否可读、是否加密。 |

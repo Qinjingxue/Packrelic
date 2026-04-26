@@ -64,6 +64,8 @@
       {"name": "zip_structure", "enabled": true},
       {"name": "zip_eocd_structure", "enabled": true},
       {"name": "tar_header_structure", "enabled": true},
+      {"name": "compression_stream_structure", "enabled": true},
+      {"name": "archive_container_structure", "enabled": true},
       {"name": "archive_identity", "enabled": true}
     ],
     "rule_pipeline": {
@@ -90,7 +92,7 @@
           "extension_score_groups": [
             {
               "score": 5,
-              "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]
+              "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst", ".Z", ".tar", ".tgz", ".tbz", ".tbz2", ".txz", ".tzst", ".cab", ".arj", ".cpio", ".001"]
             }
           ]
         },
@@ -129,6 +131,16 @@
           "enabled": true,
           "tar_header_score": 5,
           "ustar_header_score": 6
+        },
+        {
+          "name": "archive_container_identity",
+          "enabled": true,
+          "container_score": 5
+        },
+        {
+          "name": "compression_stream_identity",
+          "enabled": true,
+          "stream_score": 5
         },
         {
           "name": "scene_penalty",

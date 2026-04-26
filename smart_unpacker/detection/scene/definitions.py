@@ -1,6 +1,13 @@
 from typing import Any, Dict, List
 
 
+COMMON_PROTECTED_ARCHIVE_EXTS = [
+    ".7z", ".rar", ".zip", ".gz", ".bz2", ".xz", ".zst", ".Z",
+    ".tar", ".tgz", ".tbz", ".tbz2", ".txz", ".tzst",
+    ".cab", ".arj", ".cpio", ".001", ".exe",
+]
+
+
 RECOMMENDED_SCENE_RULES_PAYLOAD: List[Dict[str, Any]] = [
     {
         "scene_type": "rpg_maker_game",
@@ -25,7 +32,7 @@ RECOMMENDED_SCENE_RULES_PAYLOAD: List[Dict[str, Any]] = [
             "www/movies", "www/save", "locales", "swiftshader",
         ],
         "protected_exact_paths": [],
-        "protected_archive_exts": [".7z", ".rar", ".zip", ".gz", ".bz2", ".xz", ".exe"],
+        "protected_archive_exts": list(COMMON_PROTECTED_ARCHIVE_EXTS),
         "runtime_exact_paths": ["game.exe", "package.json"],
     },
     {
@@ -48,7 +55,7 @@ RECOMMENDED_SCENE_RULES_PAYLOAD: List[Dict[str, Any]] = [
         ],
         "protected_prefixes": ["game", "renpy"],
         "protected_exact_paths": [],
-        "protected_archive_exts": [".rpa", ".zip", ".7z", ".rar", ".001", ".exe"],
+        "protected_archive_exts": [".rpa"] + list(COMMON_PROTECTED_ARCHIVE_EXTS),
         "runtime_exact_paths": ["game/options.rpy", "game/script.rpy", "game/script.rpyc"],
     },
     {
@@ -69,7 +76,7 @@ RECOMMENDED_SCENE_RULES_PAYLOAD: List[Dict[str, Any]] = [
         ],
         "protected_prefixes": ["packs", "dlc", "mods", "content", "patches"],
         "protected_exact_paths": ["data.pck"],
-        "protected_archive_exts": [".pck", ".zip"],
+        "protected_archive_exts": [".pck"] + list(COMMON_PROTECTED_ARCHIVE_EXTS),
         "runtime_exact_paths": ["project.godot"],
     },
     {
@@ -99,7 +106,7 @@ RECOMMENDED_SCENE_RULES_PAYLOAD: List[Dict[str, Any]] = [
         ],
         "protected_prefixes": ["package.nw"],
         "protected_exact_paths": ["package.nw"],
-        "protected_archive_exts": [".nw", ".zip", ".exe"],
+        "protected_archive_exts": [".nw"] + list(COMMON_PROTECTED_ARCHIVE_EXTS),
         "runtime_exact_paths": ["nw.exe"],
     },
     {
@@ -118,7 +125,7 @@ RECOMMENDED_SCENE_RULES_PAYLOAD: List[Dict[str, Any]] = [
         ],
         "protected_prefixes": ["resources", "resources/app", "resources/app.asar.unpacked"],
         "protected_exact_paths": ["resources/app.asar"],
-        "protected_archive_exts": [".asar", ".zip"],
+        "protected_archive_exts": [".asar"] + list(COMMON_PROTECTED_ARCHIVE_EXTS),
         "runtime_exact_paths": [],
     },
 ]

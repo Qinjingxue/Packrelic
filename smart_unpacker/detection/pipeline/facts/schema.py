@@ -182,6 +182,16 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.tar_header_structure",
         "description": "TAR header checksum and ustar marker structure check derived from the candidate file.",
     },
+    "compression.stream_structure": {
+        "type": "dict",
+        "producer": "processors.compression_stream_structure",
+        "description": "Lightweight gzip, bzip2, xz, or zstd stream structure check derived from the candidate file.",
+    },
+    "archive.container_structure": {
+        "type": "dict",
+        "producer": "processors.archive_container_structure",
+        "description": "Lightweight CAB, ARJ, or CPIO container structure check derived from the candidate file.",
+    },
 }
 
 
