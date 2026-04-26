@@ -207,6 +207,7 @@ def test_profile_calibration_raises_tokens_when_same_profile_regresses():
             "profile_calibration_window_size": 4,
             "profile_regression_ratio": 0.95,
             "profile_calibration_max_delta": 2,
+            "profile_calibration_min_parallel": 1,
         },
         current_limit=2,
         max_workers=6,
@@ -253,7 +254,7 @@ def test_profile_calibration_lowers_tokens_when_same_profile_improves():
     adjusted = scheduler.apply_profile_calibration({"cpu": 2, "io": 2, "memory": 1}, profile_key)
 
     assert adjusted.cpu == 1
-    assert adjusted.io == 1
+    assert adjusted.io == 2
     assert adjusted.memory == 1
 
 
@@ -332,6 +333,7 @@ def test_process_sample_updates_live_pressure_and_memory_profile_adjustment():
         {
             "initial_concurrency_limit": 2,
             "profile_calibration_max_delta": 2,
+            "profile_calibration_min_parallel": 1,
         },
         current_limit=2,
         max_workers=4,
@@ -392,6 +394,7 @@ def test_profile_calibration_persists_to_project_cache_path(tmp_path):
             "profile_calibration_cache_path": str(cache_path),
             "profile_calibration_window_size": 4,
             "profile_regression_ratio": 0.95,
+            "profile_calibration_min_parallel": 1,
         },
         current_limit=2,
         max_workers=6,
@@ -409,7 +412,7 @@ def test_profile_calibration_persists_to_project_cache_path(tmp_path):
     scheduler.stop()
 
     payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert payload["version"] == 1
+    assert payload["version"] == 3
     assert payload["profiles"][profile_key]["cpu"] == 1
     assert payload["profiles"][profile_key]["io"] == 1
 
@@ -417,6 +420,7 @@ def test_profile_calibration_persists_to_project_cache_path(tmp_path):
         {
             "initial_concurrency_limit": 2,
             "profile_calibration_cache_path": str(cache_path),
+            "profile_calibration_min_parallel": 1,
         },
         current_limit=2,
         max_workers=6,

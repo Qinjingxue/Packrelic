@@ -122,9 +122,10 @@ class ConcurrencyScheduler:
         self.throughput_regression_ratio = float(config.get("throughput_regression_ratio", 0.95) or 0.95)
         self.feedback_window: deque[TaskRunFeedback] = deque(maxlen=self.feedback_window_size)
         self.profile_window_size = max(4, int(config.get("profile_calibration_window_size", 4) or 4))
-        self.profile_regression_ratio = float(config.get("profile_regression_ratio", 0.95) or 0.95)
-        self.profile_improvement_ratio = float(config.get("profile_improvement_ratio", 1.05) or 1.05)
-        self.profile_calibration_max_delta = max(0, int(config.get("profile_calibration_max_delta", 2) or 2))
+        self.profile_regression_ratio = float(config.get("profile_regression_ratio", 0.80) or 0.80)
+        self.profile_improvement_ratio = float(config.get("profile_improvement_ratio", 1.20) or 1.20)
+        self.profile_calibration_max_delta = max(0, int(config.get("profile_calibration_max_delta", 1) or 1))
+        self.profile_calibration_min_parallel = max(1, int(config.get("profile_calibration_min_parallel", 2) or 2))
         self.profile_feedback_windows: dict[str, deque[TaskRunFeedback]] = defaultdict(
             lambda: deque(maxlen=self.profile_window_size)
         )
@@ -316,11 +317,21 @@ class ConcurrencyScheduler:
             return demand_value
         with self.cond:
             adjustment = self.profile_adjustments.get(profile_key, {})
-            return ResourceDemand(
+            calibrated = ResourceDemand(
                 cpu=max(1, demand_value.cpu + int(adjustment.get("cpu", 0))),
                 io=max(1, demand_value.io + int(adjustment.get("io", 0))),
                 memory=max(1, demand_value.memory + int(adjustment.get("memory", 0))),
             ).normalized()
+            if self.profile_calibration_min_parallel > 1 and any(
+                int(adjustment.get(key, 0)) > 0 for key in ("cpu", "io", "memory")
+            ):
+                min_parallel_cap = max(1, self.current_limit // self.profile_calibration_min_parallel)
+                calibrated = ResourceDemand(
+                    cpu=min(calibrated.cpu, max(demand_value.cpu, min_parallel_cap)),
+                    io=min(calibrated.io, max(demand_value.io, min_parallel_cap)),
+                    memory=min(calibrated.memory, max(demand_value.memory, min_parallel_cap)),
+                ).normalized()
+            return calibrated
 
     def acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None):
         demand_value = demand_from_value(demand or token_cost)
@@ -545,8 +556,12 @@ class ConcurrencyScheduler:
             adjustment["cpu"] = min(self.profile_calibration_max_delta, int(adjustment.get("cpu", 0)) + 1)
             adjustment["io"] = min(self.profile_calibration_max_delta, int(adjustment.get("io", 0)) + 1)
         elif recent_total > previous_total * self.profile_improvement_ratio:
-            adjustment["cpu"] = max(-1, int(adjustment.get("cpu", 0)) - 1)
-            adjustment["io"] = max(-1, int(adjustment.get("io", 0)) - 1)
+            average_cpu_demand = sum(item.demand.cpu for item in samples) / len(samples)
+            average_io_demand = sum(item.demand.io for item in samples) / len(samples)
+            if average_cpu_demand > 1:
+                adjustment["cpu"] = max(-1, int(adjustment.get("cpu", 0)) - 1)
+            if average_io_demand > 2:
+                adjustment["io"] = max(-1, int(adjustment.get("io", 0)) - 1)
         self._set_profile_adjustment_locked(profile_key, adjustment)
 
     def _estimated_total_throughput(self, samples: list[TaskRunFeedback]) -> float:
@@ -577,7 +592,9 @@ class ConcurrencyScheduler:
             payload = json.loads(self.profile_calibration_cache_path.read_text(encoding="utf-8"))
         except Exception:
             return {}
-        profiles = payload.get("profiles", {}) if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict) or payload.get("version") != 3:
+            return {}
+        profiles = payload.get("profiles", {})
         if not isinstance(profiles, dict):
             return {}
         loaded: dict[str, dict[str, int]] = {}
@@ -605,7 +622,7 @@ class ConcurrencyScheduler:
             profiles = dict(self.profile_adjustments)
             self.profile_adjustments_dirty = False
         payload = {
-            "version": 1,
+            "version": 3,
             "updated_at": int(time.time()),
             "profiles": profiles,
         }

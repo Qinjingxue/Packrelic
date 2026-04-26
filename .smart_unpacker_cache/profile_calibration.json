@@ -1,0 +1,11 @@
+{
+  "profiles": {
+    "rar|v6:m3:32m|nonsolid|dict<16m|size<256m|files<1k": {
+      "cpu": 0,
+      "io": 0,
+      "memory": 0
+    }
+  },
+  "updated_at": 1777218104,
+  "version": 3
+}
