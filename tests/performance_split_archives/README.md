@@ -31,9 +31,17 @@ By default the script is report-oriented and exits with 0 even if a scenario exp
 an unexpected observed result. Use `--strict` when you want expectation mismatches to
 return a non-zero exit code.
 
+`--profile acceptance` runs a small representative subset one case at a time.
+`--profile acceptance-batch` puts a broad representative matrix into one input
+directory and runs the pipeline once; this mixed-directory batch is included in
+`run_acceptance_tests.ps1`. The default `full` profile keeps the broad manual
+pressure matrix one case at a time.
+
 Limit the generated matrix when you only need a subset:
 
 ```powershell
+python tests\performance_split_archives\split_archive_pressure.py --profile acceptance --strict
+python tests\performance_split_archives\split_archive_pressure.py --profile acceptance-batch --strict --no-json
 python tests\performance_split_archives\split_archive_pressure.py --formats 7z,zip
 python tests\performance_split_archives\split_archive_pressure.py --formats rar --strict
 ```

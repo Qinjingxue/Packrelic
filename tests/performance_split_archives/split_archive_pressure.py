@@ -26,6 +26,12 @@ WRONG_PASSWORDS = ["wrong-password", "123456", "letmein"]
 PASSWORD_TRY_LIST = [*WRONG_PASSWORDS[:2], PASSWORD]
 PAYLOAD_SIZE = 180 * 1024
 FORMATS = ("7z", "zip", "rar")
+UNLISTED_PASSWORD = "pressure-secret-not-in-list"
+PASSWORD_VIEWS = [
+    ("no_password", [], "failure"),
+    ("wrong_passwords", list(WRONG_PASSWORDS), "failure"),
+    ("correct_after_wrong_passwords", list(PASSWORD_TRY_LIST), "success"),
+]
 
 
 @dataclass
@@ -40,7 +46,7 @@ class PressureCase:
     skip_reason: str | None = None
 
 
-def pressure_config(passwords: list[str] | None = None) -> dict:
+def pressure_config(passwords: list[str] | None = None, scheduler_profile: str = "single") -> dict:
     return normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "1",
@@ -51,7 +57,7 @@ def pressure_config(passwords: list[str] | None = None) -> dict:
         "user_passwords": passwords or [],
         "builtin_passwords": [],
         "max_retries": 1,
-        "performance": {"scheduler_profile": "single"},
+        "performance": {"scheduler_profile": scheduler_profile},
     }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
@@ -117,16 +123,12 @@ def build_password_case(
     variant: str,
     *,
     case_id: str | None = None,
+    views: list[tuple[str, list[str], str]] | None = None,
     **kwargs,
 ) -> list[PressureCase]:
     base_case_id = case_id or f"{archive_format}_{variant}_password".replace("-", "_")
-    views = [
-        ("no_password", [], "failure"),
-        ("wrong_passwords", list(WRONG_PASSWORDS), "failure"),
-        ("correct_after_wrong_passwords", list(PASSWORD_TRY_LIST), "success"),
-    ]
     cases: list[PressureCase] = []
-    for suffix, passwords, expected in views:
+    for suffix, passwords, expected in views or PASSWORD_VIEWS:
         view_variant = f"{variant}:{suffix}"
         try:
             case, build_seconds = create_case(
@@ -160,6 +162,16 @@ def build_password_case(
     return cases
 
 
+def build_correct_password_case(root: Path, archive_format: str, variant: str, **kwargs) -> list[PressureCase]:
+    return build_password_case(
+        root,
+        archive_format,
+        variant,
+        views=[PASSWORD_VIEWS[2]],
+        **kwargs,
+    )
+
+
 def build_format_cases(root: Path, archive_format: str) -> list[PressureCase]:
     cases: list[PressureCase] = []
 
@@ -187,7 +199,63 @@ def build_format_cases(root: Path, archive_format: str) -> list[PressureCase]:
     return cases
 
 
-def build_cases(root: Path, requested_formats: list[str]) -> list[PressureCase]:
+def build_acceptance_format_cases(root: Path, archive_format: str) -> list[PressureCase]:
+    cases: list[PressureCase] = []
+    if archive_format == "7z":
+        cases.append(build_or_skip(root, archive_format, "single_plain"))
+        cases.extend(build_correct_password_case(root, archive_format, "split_password", split=True))
+        cases.extend(build_correct_password_case(root, archive_format, "sfx_single_password", sfx=True))
+        cases.extend(build_correct_password_case(root, archive_format, "jpg_carrier_password", carrier="jpg"))
+        cases.append(build_or_skip(root, archive_format, "corrupt_single_header", expected="failure", corruption="header_damage"))
+        return cases
+    if archive_format == "zip":
+        cases.append(build_or_skip(root, archive_format, "split_plain", split=True))
+        cases.extend(build_correct_password_case(root, archive_format, "single_password"))
+        cases.append(build_or_skip(root, archive_format, "wrong_suffix_plain", disguise_ext=".wrongext"))
+        cases.append(build_or_skip(root, archive_format, "corrupt_single_tail", expected="failure", corruption="tail_damage"))
+        return cases
+    if archive_format == "rar":
+        cases.extend(build_correct_password_case(root, archive_format, "single_password"))
+        cases.extend(build_correct_password_case(root, archive_format, "sfx_split_password", split=True, sfx=True))
+        cases.append(build_or_skip(root, archive_format, "missing_split_member", expected="failure", split=True, split_issue="missing_last"))
+        return cases
+    raise ValueError(f"Unsupported archive format: {archive_format}")
+
+
+def build_acceptance_batch_format_cases(root: Path, archive_format: str) -> list[PressureCase]:
+    cases: list[PressureCase] = []
+    cases.append(build_or_skip(root, archive_format, "single_plain"))
+    cases.append(build_or_skip(root, archive_format, "single_password", passwords=PASSWORD_TRY_LIST, password=PASSWORD))
+    cases.append(build_or_skip(
+        root,
+        archive_format,
+        "single_password_unlisted",
+        passwords=PASSWORD_TRY_LIST,
+        expected="failure",
+        password=UNLISTED_PASSWORD,
+    ))
+
+    cases.append(build_or_skip(root, archive_format, "split_plain", split=True))
+    cases.append(build_or_skip(root, archive_format, "split_password", passwords=PASSWORD_TRY_LIST, password=PASSWORD, split=True))
+
+    cases.append(build_or_skip(root, archive_format, "sfx_single_plain", sfx=True))
+    cases.append(build_or_skip(root, archive_format, "sfx_single_password", passwords=PASSWORD_TRY_LIST, password=PASSWORD, sfx=True))
+
+    cases.append(build_or_skip(root, archive_format, "sfx_split_plain", split=True, sfx=True))
+    cases.append(build_or_skip(root, archive_format, "sfx_split_password", passwords=PASSWORD_TRY_LIST, password=PASSWORD, split=True, sfx=True))
+
+    cases.append(build_or_skip(root, archive_format, "jpg_carrier_plain", carrier="jpg"))
+    cases.append(build_or_skip(root, archive_format, "jpg_carrier_password", passwords=PASSWORD_TRY_LIST, password=PASSWORD, carrier="jpg"))
+
+    cases.append(build_or_skip(root, archive_format, "wrong_suffix_plain", disguise_ext=".wrongext"))
+    cases.append(build_or_skip(root, archive_format, "corrupt_single_header", expected="failure", corruption="header_damage"))
+    cases.append(build_or_skip(root, archive_format, "corrupt_single_tail", expected="failure", corruption="tail_damage"))
+    cases.append(build_or_skip(root, archive_format, "missing_split_member", expected="failure", split=True, split_issue="missing_last"))
+    cases.append(build_or_skip(root, archive_format, "corrupt_split_member", expected="failure", split=True, split_issue="corrupt_member"))
+    return cases
+
+
+def build_cases(root: Path, requested_formats: list[str], profile: str) -> list[PressureCase]:
     cases: list[PressureCase] = []
     for archive_format in requested_formats:
         if archive_format == "rar" and not get_optional_rar():
@@ -202,7 +270,12 @@ def build_cases(root: Path, requested_formats: list[str]) -> list[PressureCase]:
                 "RAR generator is not configured. Set SMART_UNPACKER_TEST_RAR or tests/test_tools.json rar_exe.",
             ))
             continue
-        cases.extend(build_format_cases(root, archive_format))
+        if profile == "acceptance":
+            cases.extend(build_acceptance_format_cases(root, archive_format))
+        elif profile == "acceptance-batch":
+            cases.extend(build_acceptance_batch_format_cases(root, archive_format))
+        else:
+            cases.extend(build_format_cases(root, archive_format))
     return cases
 
 
@@ -281,6 +354,126 @@ def run_case(pressure_case: PressureCase) -> dict:
     }
 
 
+def move_case_files_to_batch(pressure_case: PressureCase, batch_dir: Path):
+    case = pressure_case.case
+    if case is None:
+        return
+    original_entry_name = case.entry_path.name
+    moved_names: list[str] = []
+    for path in sorted(case.archive_dir.iterdir()):
+        if not path.is_file():
+            continue
+        destination = batch_dir / path.name
+        if destination.exists():
+            raise RuntimeError(f"Batch fixture file collision: {destination.name}")
+        shutil.move(str(path), str(destination))
+        moved_names.append(destination.name)
+    case.archive_dir = batch_dir
+    case.entry_path = batch_dir / original_entry_name
+    case.metadata["batch_files"] = moved_names
+
+
+def failure_reported_for_case(summary_failed_tasks: list[str], pressure_case: PressureCase) -> bool:
+    case = pressure_case.case
+    if case is None:
+        return False
+    candidates = set(case.metadata.get("batch_files") or [])
+    candidates.add(case.entry_path.name)
+    return any(any(candidate in failed_task for candidate in candidates) for failed_task in summary_failed_tasks)
+
+
+def failed_tasks_for_case(summary_failed_tasks: list[str], pressure_case: PressureCase) -> list[str]:
+    case = pressure_case.case
+    if case is None:
+        return []
+    candidates = set(case.metadata.get("batch_files") or [])
+    candidates.add(case.entry_path.name)
+    return [
+        failed_task
+        for failed_task in summary_failed_tasks
+        if any(candidate in failed_task for candidate in candidates)
+    ]
+
+
+def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
+    batch_dir = pressure_cases[0].case.archive_dir.parent / "acceptance_batch_input"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    for pressure_case in pressure_cases:
+        move_case_files_to_batch(pressure_case, batch_dir)
+
+    scan_config = pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")
+    started = time.perf_counter()
+    scan_results = ScanOrchestrator(scan_config).scan(str(batch_dir))
+    scan_seconds = time.perf_counter() - started
+
+    started = time.perf_counter()
+    summary = PipelineRunner(pressure_config(passwords=PASSWORD_TRY_LIST, scheduler_profile="auto")).run(str(batch_dir))
+    pipeline_seconds = time.perf_counter() - started
+
+    rows: list[dict] = []
+    expected_successes = sum(1 for pressure_case in pressure_cases if pressure_case.expected == "success")
+    expected_failures = sum(1 for pressure_case in pressure_cases if pressure_case.expected == "failure")
+    summary_observed = (
+        "success"
+        if summary.success_count == expected_successes and len(summary.failed_tasks) == expected_failures
+        else "failure"
+    )
+    batch_files = sorted(path.name for path in batch_dir.iterdir() if path.is_file())
+    rows.append({
+        "case": "batch:summary",
+        "format": "batch",
+        "variant": "acceptance-batch",
+        "expected": "success",
+        "observed": summary_observed,
+        "pipeline_status": f"{summary.success_count} success / {len(summary.failed_tasks)} failed",
+        "marker_extracted": summary_observed == "success",
+        "password_count": len(PASSWORD_TRY_LIST),
+        "build_ms": round(sum(pressure_case.build_seconds for pressure_case in pressure_cases) * 1000, 2),
+        "scan_ms": round(scan_seconds * 1000, 2),
+        "pipeline_ms": round(pipeline_seconds * 1000, 2),
+        "scan_results": len(scan_results),
+        "success_count": summary.success_count,
+        "failed_count": len(summary.failed_tasks),
+        "failed_tasks": list(summary.failed_tasks),
+        "skip_reason": None,
+        "files": batch_files,
+    })
+
+    for pressure_case in pressure_cases:
+        case = pressure_case.case
+        if case is None:
+            continue
+        extracted = marker_extracted(case)
+        failure_reported = failure_reported_for_case(list(summary.failed_tasks), pressure_case)
+        if extracted:
+            observed = "success"
+        elif failure_reported:
+            observed = "failure"
+        else:
+            observed = "missing"
+        case_failed_tasks = failed_tasks_for_case(list(summary.failed_tasks), pressure_case)
+        rows.append({
+            "case": pressure_case.name,
+            "format": pressure_case.archive_format,
+            "variant": pressure_case.variant,
+            "expected": pressure_case.expected,
+            "observed": observed,
+            "pipeline_status": "batch",
+            "marker_extracted": extracted,
+            "password_count": len(PASSWORD_TRY_LIST),
+            "build_ms": round(pressure_case.build_seconds * 1000, 2),
+            "scan_ms": round(scan_seconds * 1000, 2),
+            "pipeline_ms": round(pipeline_seconds * 1000, 2),
+            "scan_results": len(scan_results),
+            "success_count": summary.success_count,
+            "failed_count": len(summary.failed_tasks),
+            "failed_tasks": case_failed_tasks,
+            "skip_reason": pressure_case.skip_reason,
+            "files": list(case.metadata.get("batch_files") or [case.entry_path.name]),
+        })
+    return rows
+
+
 def print_table(rows: list[dict]):
     headers = [
         "case",
@@ -317,17 +510,32 @@ def parse_formats(value: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate and pressure-test broad real archive edge cases.")
     parser.add_argument("--strict", action="store_true", help="Return non-zero when expected and observed results differ.")
+    parser.add_argument("--no-json", action="store_true", help="Only print the table summary.")
     parser.add_argument("--formats", type=parse_formats, default=list(FORMATS), help="Comma-separated formats to cover: 7z,zip,rar.")
+    parser.add_argument(
+        "--profile",
+        choices=["full", "acceptance", "acceptance-batch"],
+        default="full",
+        help="Case matrix to run. Use acceptance-batch for a mixed-directory routine acceptance check.",
+    )
     args = parser.parse_args()
 
     require_7z()
     with tempfile.TemporaryDirectory(prefix="smart_unpacker_archive_pressure_") as temp:
         root = Path(temp)
-        cases = build_cases(root, args.formats)
-        rows = [run_case(pressure_case) for pressure_case in cases]
+        cases = build_cases(root, args.formats, args.profile)
+        if args.profile == "acceptance-batch":
+            skipped_cases = [pressure_case for pressure_case in cases if pressure_case.case is None]
+            runnable_cases = [pressure_case for pressure_case in cases if pressure_case.case is not None]
+            rows = [run_case(pressure_case) for pressure_case in skipped_cases]
+            if runnable_cases:
+                rows.extend(run_batch_cases(runnable_cases))
+        else:
+            rows = [run_case(pressure_case) for pressure_case in cases]
         print_table(rows)
-        print("\nJSON:")
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        if not args.no_json:
+            print("\nJSON:")
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
 
     failures = [
         row for row in rows
