@@ -4,7 +4,7 @@ from collections import defaultdict
 from typing import Callable, Dict, List, Set
 
 from smart_unpacker.contracts.tasks import ArchiveTask, RenameInstruction
-from smart_unpacker.rename.volume_normalizer import SplitVolumeNormalizer, StagedSplit
+from smart_unpacker.rename.internal.volume_normalizer import SplitVolumeNormalizer, StagedSplit
 
 
 class RenameScheduler:

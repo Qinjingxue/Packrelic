@@ -34,11 +34,11 @@ class FakeMetadataScanner:
 
 
 class FakeStager:
-    def normalize(self, archive, all_parts, startupinfo=None):
+    def normalize_archive_paths(self, archive, all_parts, startupinfo=None):
         parts = list(all_parts)
         return SimpleNamespace(archive=archive, run_parts=parts, cleanup_parts=parts)
 
-    def cleanup(self, staged):
+    def cleanup_normalized_split_group(self, staged):
         return None
 
 
@@ -52,20 +52,20 @@ class ExtractionExecutionTests(unittest.TestCase):
             out_dir = Path(tmp) / "sample_out"
 
             class CandidateStager:
-                def normalize(self, archive, all_parts, startupinfo=None):
+                def normalize_archive_paths(self, archive, all_parts, startupinfo=None):
                     return SimpleNamespace(
                         archive=archive,
                         run_parts=[str(archive_path), str(candidate_path)],
                         cleanup_parts=[str(archive_path)],
                     )
 
-                def cleanup(self, staged):
+                def cleanup_normalized_split_group(self, staged):
                     return None
 
             extractor = ExtractionScheduler(max_retries=1)
             extractor.password_resolver = FakePasswordResolver()
             extractor.metadata_scanner = FakeMetadataScanner()
-            extractor.volume_normalizer = CandidateStager()
+            extractor.rename_scheduler = CandidateStager()
 
             bag = FactBag()
             task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
@@ -92,7 +92,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             extractor = ExtractionScheduler(ensure_space=ensure_space, max_retries=2)
             extractor.password_resolver = FakePasswordResolver()
             extractor.metadata_scanner = FakeMetadataScanner()
-            extractor.volume_normalizer = FakeStager()
+            extractor.rename_scheduler = FakeStager()
 
             failed = SimpleNamespace(returncode=8, stdout="", stderr="write error")
             succeeded = SimpleNamespace(returncode=0, stdout="", stderr="")

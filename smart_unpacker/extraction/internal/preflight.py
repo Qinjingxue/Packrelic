@@ -19,12 +19,12 @@ class PreflightResult:
 
 
 class PreExtractInspector:
-    def __init__(self, password_resolver, volume_normalizer):
+    def __init__(self, password_resolver, rename_scheduler):
         self.password_resolver = password_resolver
-        self.volume_normalizer = volume_normalizer
+        self.rename_scheduler = rename_scheduler
 
     def inspect(self, task: ArchiveTask, output_dir: str) -> PreflightResult:
-        staged = self.volume_normalizer.normalize(task.main_path, list(task.all_parts or [task.main_path]))
+        staged = self.rename_scheduler.normalize_archive_paths(task.main_path, list(task.all_parts or [task.main_path]))
         try:
             health = cached_check_archive_health(staged.archive, part_paths=staged.run_parts)
             self._record_health(task, health)
@@ -64,7 +64,7 @@ class PreExtractInspector:
             else:
                 task.fact_bag.set("resource.token_cost", 1)
         finally:
-            self.volume_normalizer.cleanup(staged)
+            self.rename_scheduler.cleanup_normalized_split_group(staged)
 
         return PreflightResult(task=task)
 

@@ -13,7 +13,7 @@ from smart_unpacker.extraction.internal.password_resolution import PasswordResol
 from smart_unpacker.extraction.internal.preflight import PreExtractInspector
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
-from smart_unpacker.rename.volume_normalizer import SplitVolumeNormalizer
+from smart_unpacker.rename.scheduler import RenameScheduler
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 from smart_unpacker.passwords import PasswordStore
 from smart_unpacker.support.resources import get_7z_path
@@ -37,7 +37,7 @@ class ExtractionScheduler:
         self.password_resolver = PasswordResolver(self.password_tester)
         self.metadata_scanner = ArchiveMetadataScanner()
         self.seven_z_path = get_7z_path()
-        self.volume_normalizer = SplitVolumeNormalizer()
+        self.rename_scheduler = RenameScheduler()
         self._relations = RelationsGroupBuilder()
         self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)
@@ -66,7 +66,7 @@ class ExtractionScheduler:
         if not tasks:
             return []
         output_dir_resolver = output_dir_resolver or self.default_output_dir_for_task
-        inspector = PreExtractInspector(self.password_resolver, self.volume_normalizer)
+        inspector = PreExtractInspector(self.password_resolver, self.rename_scheduler)
         ready_tasks: list[ArchiveTask] = []
         skipped_results: list[tuple[ArchiveTask, ExtractionResult]] = []
         for task in tasks:
@@ -128,7 +128,7 @@ class ExtractionScheduler:
                 shutil.rmtree(out_dir, ignore_errors=True)
                 return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
 
-            staged = self.volume_normalizer.normalize(archive, all_parts, startupinfo=startupinfo)
+            staged = self.rename_scheduler.normalize_archive_paths(archive, all_parts, startupinfo=startupinfo)
             run_archive = staged.archive
             run_parts = staged.run_parts if hasattr(staged, "run_parts") else staged.all_parts
             cleanup_parts = getattr(staged, "cleanup_parts", run_parts)
@@ -184,7 +184,7 @@ class ExtractionScheduler:
 
                     err = f"{run_result.stdout}\n{run_result.stderr}".lower()
             finally:
-                self.volume_normalizer.cleanup(staged)
+                self.rename_scheduler.cleanup_normalized_split_group(staged)
 
             if run_result and ("no space" in err or "write error" in err or run_result.returncode == 8):
                 retry_count += 1

@@ -1,7 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from smart_unpacker.rename.volume_normalizer import SplitVolumeNormalizer
+from smart_unpacker.rename.internal.volume_normalizer import SplitVolumeNormalizer
 from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 
 
