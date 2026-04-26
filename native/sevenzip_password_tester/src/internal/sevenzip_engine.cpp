@@ -705,6 +705,32 @@ std::wstring split_volume_family(const std::vector<std::wstring>& part_paths) {
     return L"";
 }
 
+std::vector<unsigned char> rar_format_ids_for_signature(const std::wstring& archive_path) {
+    HANDLE handle = CreateFileW(archive_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        return {0xCC, 0x03};
+    }
+
+    unsigned char signature[8] = {};
+    DWORD read = 0;
+    const BOOL ok = ReadFile(handle, signature, sizeof(signature), &read, nullptr);
+    CloseHandle(handle);
+    if (!ok || read < 7) {
+        return {0xCC, 0x03};
+    }
+
+    const unsigned char rar4[] = {'R', 'a', 'r', '!', 0x1A, 0x07, 0x00};
+    const unsigned char rar5[] = {'R', 'a', 'r', '!', 0x1A, 0x07, 0x01, 0x00};
+    if (read >= sizeof(rar5) && std::equal(std::begin(rar5), std::end(rar5), signature)) {
+        return {0xCC};
+    }
+    if (std::equal(std::begin(rar4), std::end(rar4), signature)) {
+        return {0x03};
+    }
+    return {0xCC, 0x03};
+}
+
 std::vector<GUID> candidate_formats(const std::wstring& archive_path, const std::vector<std::wstring>& part_paths = {}) {
     const std::wstring ext = lower_extension(archive_path);
     std::wstring name = std::filesystem::path(archive_path).filename().wstring();
@@ -726,7 +752,7 @@ std::vector<GUID> candidate_formats(const std::wstring& archive_path, const std:
     } else if (ext == L".7z" || ext == L".001") {
         ids = {0x07};
     } else if (ext == L".rar" || ext == L".r00") {
-        ids = {0x03, 0xCC};
+        ids = rar_format_ids_for_signature(archive_path);
     } else {
         ids = {0x07, 0x01, 0x03, 0xCC};
     }
@@ -1187,125 +1213,6 @@ ResourceAnalysisResult analyze_archive_resources_internal(
     return result;
 }
 
-PreflightResourceResult preflight_archive_resources_internal(
-    CreateObjectFunc create_object,
-    const std::wstring& archive_path,
-    const std::wstring& password,
-    const std::vector<std::wstring>& part_paths
-) {
-    PreflightResourceResult result;
-    result.health.backend_available = true;
-    result.analysis.archive_size = archive_input_size(archive_path, part_paths);
-    bool any_format_created = false;
-    HRESULT last_hr = E_FAIL;
-    Int32 last_op_res = kOpOk;
-
-    for (const GUID& format : candidate_formats(archive_path, part_paths)) {
-        ComPtr<IInArchive> archive;
-        HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
-        if (hr != S_OK || !archive) {
-            last_hr = hr;
-            continue;
-        }
-        any_format_created = true;
-
-        bool stream_opened = false;
-        ComPtr<IInStream> stream = open_archive_stream(archive_path, part_paths, stream_opened);
-        if (!stream_opened) {
-            if (is_sfx_path(archive_path) && !sorted_data_volume_paths(part_paths).empty()) {
-                result.health.status = PasswordTestStatus::Damaged;
-                result.health.is_archive = true;
-                result.health.missing_volume = true;
-                result.health.message = "split self-extracting archive stub is missing";
-                result.analysis.status = PasswordTestStatus::Damaged;
-                result.analysis.is_archive = true;
-                result.analysis.damaged = true;
-                result.analysis.message = result.health.message;
-                return result;
-            }
-            result.health.status = PasswordTestStatus::Error;
-            result.health.message = "archive file could not be opened";
-            result.analysis.status = PasswordTestStatus::Error;
-            result.analysis.message = result.health.message;
-            return result;
-        }
-
-        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
-        hr = archive->Open(stream.get(), nullptr, open_callback.get());
-        if (hr != S_OK) {
-            last_hr = hr;
-            continue;
-        }
-
-        result.health.is_archive = true;
-        result.health.operation_result = kOpOk;
-        if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths)) {
-            archive->Close();
-            result.health.status = PasswordTestStatus::Damaged;
-            result.health.missing_volume = true;
-            result.health.message = "split archive is missing one or more volumes";
-            result.analysis.status = PasswordTestStatus::Damaged;
-            result.analysis.is_archive = true;
-            result.analysis.damaged = true;
-            result.analysis.message = result.health.message;
-            return result;
-        }
-
-        const bool analysis_ok = fill_resource_analysis_from_open_archive(archive.get(), result.analysis);
-        archive->Close();
-        if (!analysis_ok) {
-            result.health.status = result.analysis.status;
-            result.health.is_archive = result.analysis.is_archive;
-            result.health.encrypted = result.analysis.encrypted;
-            result.health.damaged = result.analysis.damaged;
-            result.health.message = result.analysis.message;
-            return result;
-        }
-
-        if (result.analysis.encrypted && password.empty()) {
-            result.health.status = PasswordTestStatus::WrongPassword;
-            result.health.encrypted = true;
-            result.health.wrong_password = true;
-            result.health.message = "archive is encrypted or password is wrong";
-            result.analysis_available = false;
-            return result;
-        }
-
-        result.health.status = PasswordTestStatus::Ok;
-        result.health.encrypted = result.analysis.encrypted;
-        result.health.message = "archive preflight resources analyzed";
-        result.analysis_available = true;
-        return result;
-    }
-
-    result.health.operation_result = last_op_res;
-    if (!any_format_created) {
-        result.health.status = PasswordTestStatus::Unsupported;
-        result.health.message = "7z.dll did not create a supported archive handler";
-    } else if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths) ||
-        (has_split_volume_evidence(archive_path, part_paths) && looks_missing_volume(archive_path, last_op_res))) {
-        result.health.status = PasswordTestStatus::Damaged;
-        result.health.is_archive = true;
-        result.health.missing_volume = true;
-        result.health.message = "split archive is missing one or more volumes";
-    } else if (looks_wrong_password(last_hr, last_op_res)) {
-        result.health.status = PasswordTestStatus::WrongPassword;
-        result.health.is_archive = true;
-        result.health.encrypted = true;
-        result.health.wrong_password = true;
-        result.health.message = "archive is encrypted or password is wrong";
-    } else {
-        result.health.status = PasswordTestStatus::Unsupported;
-        result.health.message = "archive could not be opened by supported handlers";
-    }
-    result.analysis.status = result.health.status;
-    result.analysis.is_archive = result.health.is_archive;
-    result.analysis.encrypted = result.health.encrypted;
-    result.analysis.damaged = result.health.damaged || result.health.missing_volume;
-    result.analysis.message = result.health.message;
-    return result;
-}
-
 CrcManifestResult read_archive_crc_manifest_internal(
     CreateObjectFunc create_object,
     const std::wstring& archive_path,
@@ -1590,38 +1497,6 @@ ResourceAnalysisResult analyze_archive_resources_with_parts(
 #endif
 }
 
-PreflightResourceResult preflight_archive_resources_with_parts(
-    const std::wstring& seven_zip_dll_path,
-    const std::wstring& archive_path,
-    const std::vector<std::wstring>& part_paths,
-    const std::wstring& password
-) {
-#ifdef _WIN32
-    ComModule module(seven_zip_dll_path);
-    auto create_object = module.create_object();
-    if (!create_object) {
-        PreflightResourceResult result;
-        result.health.status = PasswordTestStatus::BackendUnavailable;
-        result.health.message = "7z.dll could not be loaded";
-        result.analysis.status = PasswordTestStatus::BackendUnavailable;
-        result.analysis.message = result.health.message;
-        return result;
-    }
-    return preflight_archive_resources_internal(create_object, archive_path, password, part_paths);
-#else
-    (void)seven_zip_dll_path;
-    (void)archive_path;
-    (void)part_paths;
-    (void)password;
-    PreflightResourceResult result;
-    result.health.status = PasswordTestStatus::BackendUnavailable;
-    result.health.message = "native archive preflight resource analysis is only implemented on Windows";
-    result.analysis.status = PasswordTestStatus::BackendUnavailable;
-    result.analysis.message = result.health.message;
-    return result;
-#endif
-}
-
 CrcManifestResult read_archive_crc_manifest_with_parts(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
@@ -1809,3 +1684,4 @@ const char* status_name(PasswordTestStatus status) {
 }
 
 }  // namespace smart_unpacker::sevenzip
+

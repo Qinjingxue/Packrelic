@@ -104,50 +104,21 @@ def test_single_ready_task_uses_estimated_resource_profile(tmp_path, monkeypatch
     assert bag.get("resource.analysis")["message"] == "estimated single-task resource profile"
 
 
-def test_multiple_ready_tasks_use_combined_resource_preflight(tmp_path, monkeypatch):
+def test_multiple_ready_tasks_keep_precise_resource_analysis(tmp_path, monkeypatch):
     config = normalize_config(with_detection_pipeline({"recursive_extract": "1"}))
     extractor = ExtractionScheduler(max_retries=1)
     runner = ExtractionBatchRunner(RunContext(), extractor, NestedOutputScanPolicy(config), config=config)
-    analysis = SimpleNamespace(
-        ok=True,
-        dominant_method="Store",
-        archive_type="rar",
-        archive_size=100,
-        total_unpacked_size=100,
-        total_packed_size=100,
-        largest_dictionary_size=0,
-        file_count=1,
-        item_count=1,
-        dir_count=0,
-        largest_item_size=100,
-        solid=False,
-        status=0,
-        is_archive=True,
-        is_encrypted=False,
-        is_broken=False,
-        message="ok",
-    )
-    monkeypatch.setattr(
-        extractor,
-        "inspect_with_resource_analysis",
-        lambda *_args, **_kwargs: SimpleNamespace(skip_result=None, resource_analysis=analysis),
-    )
+    monkeypatch.setattr(extractor, "inspect", lambda *_args, **_kwargs: SimpleNamespace(skip_result=None))
 
     calls = 0
 
-    def fake_record_precise_analysis(task, resource_analysis):
+    def fake_resource_inspect(task):
         nonlocal calls
         calls += 1
-        task.fact_bag.set("resource.analysis", {"message": "combined"})
         task.fact_bag.set("resource.tokens", {"cpu": 1, "io": 1, "memory": 1})
         return task
 
-    monkeypatch.setattr(runner.resource_inspector, "record_precise_analysis", fake_record_precise_analysis)
-    monkeypatch.setattr(
-        runner.resource_inspector,
-        "inspect",
-        lambda _task: (_ for _ in ()).throw(AssertionError("combined preflight should provide resource analysis")),
-    )
+    monkeypatch.setattr(runner.resource_inspector, "inspect", fake_resource_inspect)
     monkeypatch.setattr(
         extractor,
         "extract",

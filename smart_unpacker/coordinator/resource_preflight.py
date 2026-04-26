@@ -35,11 +35,6 @@ class ResourcePreflightInspector:
             self.rename_scheduler.cleanup_normalized_split_group(staged)
         return task
 
-    def record_precise_analysis(self, task: ArchiveTask, analysis) -> ArchiveTask:
-        self._record_analysis(task, analysis)
-        self.record_resource_demand(task, analysis)
-        return task
-
     def record_resource_demand(self, task: ArchiveTask, analysis) -> None:
         demand = estimate_resource_demand(analysis)
         task.fact_bag.set("resource.tokens", demand.as_dict())
