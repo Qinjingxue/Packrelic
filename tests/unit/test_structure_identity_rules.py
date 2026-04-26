@@ -1,0 +1,96 @@
+import io
+import tarfile
+import zipfile
+
+from smart_unpacker.contracts.detection import FactBag
+from smart_unpacker.detection import DetectionScheduler
+from smart_unpacker.detection.pipeline.facts.provider import FactProvider
+from smart_unpacker.detection.pipeline.processors.modules.tar_header_structure import inspect_tar_header_structure
+from smart_unpacker.detection.pipeline.processors.modules.zip_eocd_structure import inspect_zip_eocd_structure
+from tests.helpers.detection_config import with_detection_pipeline
+
+
+def _config(scoring):
+    return with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
+    }, scoring=scoring)
+
+
+def test_zip_eocd_structure_rule_identifies_zip_without_magic_rule(tmp_path):
+    target = tmp_path / "payload.bin"
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("hello.txt", "hello")
+
+    structure = inspect_zip_eocd_structure(str(target))
+    assert structure["plausible"] is True
+    assert structure["central_directory_present"] is True
+    assert structure["archive_offset"] == 0
+
+    bag = FactBag()
+    decision = DetectionScheduler(_config([
+        {"name": "zip_structure_identity", "enabled": True},
+    ])).evaluate(bag, FactProvider(str(target)))
+
+    assert decision.should_extract is True
+    assert decision.total_score == 6
+    assert bag.get("file.detected_ext") == ".zip"
+    assert "zip_structure_identity" in decision.matched_rules
+
+
+def test_zip_eocd_structure_rule_sends_leading_stub_zip_to_confirmation_band(tmp_path):
+    plain_zip = tmp_path / "plain.zip"
+    target = tmp_path / "stubbed.exe"
+    with zipfile.ZipFile(plain_zip, "w") as archive:
+        archive.writestr("hello.txt", "hello")
+    target.write_bytes(b"MZ" + b"x" * 64 + plain_zip.read_bytes())
+
+    structure = inspect_zip_eocd_structure(str(target))
+    assert structure["plausible"] is True
+    assert structure["archive_offset"] > 0
+
+    decision = DetectionScheduler(_config([
+        {"name": "zip_structure_identity", "enabled": True},
+    ])).evaluate(FactBag(), FactProvider(str(target)))
+
+    assert decision.should_extract is False
+    assert decision.decision == "maybe_archive"
+    assert decision.total_score == 4
+
+
+def test_tar_structure_rule_identifies_ustar_checksum(tmp_path):
+    target = tmp_path / "payload.data"
+    with tarfile.open(target, "w") as archive:
+        payload = b"hello"
+        info = tarfile.TarInfo("hello.txt")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+
+    structure = inspect_tar_header_structure(str(target))
+    assert structure["plausible"] is True
+    assert structure["ustar_magic"] is True
+
+    bag = FactBag()
+    decision = DetectionScheduler(_config([
+        {"name": "tar_structure_identity", "enabled": True},
+    ])).evaluate(bag, FactProvider(str(target)))
+
+    assert decision.should_extract is True
+    assert decision.total_score == 6
+    assert bag.get("file.detected_ext") == ".tar"
+    assert "tar_structure_identity" in decision.matched_rules
+
+
+def test_tar_structure_rejects_bad_checksum(tmp_path):
+    target = tmp_path / "not.tar"
+    target.write_bytes(b"name".ljust(148, b"\x00") + b"0000000\x00" + b"x" * (512 - 156))
+
+    structure = inspect_tar_header_structure(str(target))
+    assert structure["plausible"] is False
+    assert structure["error"] == "checksum_mismatch"
+
+    decision = DetectionScheduler(_config([
+        {"name": "tar_structure_identity", "enabled": True},
+    ])).evaluate(FactBag(), FactProvider(str(target)))
+
+    assert decision.should_extract is False
+    assert decision.total_score == 0

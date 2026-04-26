@@ -172,6 +172,16 @@ FACT_SCHEMA: dict[str, dict[str, Any]] = {
         "producer": "processors.zip_structure",
         "description": "Reason why the embedded ZIP local header plausibility check failed, if any.",
     },
+    "zip.eocd_structure": {
+        "type": "dict",
+        "producer": "processors.zip_eocd_structure",
+        "description": "ZIP EOCD and central directory structure check derived from the candidate file.",
+    },
+    "tar.header_structure": {
+        "type": "dict",
+        "producer": "processors.tar_header_structure",
+        "description": "TAR header checksum and ustar marker structure check derived from the candidate file.",
+    },
 }
 
 

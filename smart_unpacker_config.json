@@ -62,6 +62,8 @@
       {"name": "seven_zip_probe", "enabled": true},
       {"name": "seven_zip_validation", "enabled": true},
       {"name": "zip_structure", "enabled": true},
+      {"name": "zip_eocd_structure", "enabled": true},
+      {"name": "tar_header_structure", "enabled": true},
       {"name": "archive_identity", "enabled": true}
     ],
     "rule_pipeline": {
@@ -105,6 +107,19 @@
           "carrier_scan_prefix_window_bytes": 8388608,
           "carrier_scan_full_scan_max_bytes": 0,
           "carrier_scan_deep_scan": false
+        },
+        {
+          "name": "zip_structure_identity",
+          "enabled": true,
+          "eocd_score": 6,
+          "embedded_eocd_score": 4,
+          "empty_eocd_score": 4
+        },
+        {
+          "name": "tar_structure_identity",
+          "enabled": true,
+          "tar_header_score": 5,
+          "ustar_header_score": 6
         },
         {
           "name": "scene_penalty",
