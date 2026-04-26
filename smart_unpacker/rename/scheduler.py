@@ -15,7 +15,7 @@ class RenameScheduler:
 
         for task in tasks:
             bag = task.fact_bag
-            path = task.main_path or bag.get("file.path")
+            path = task.main_path
             if not path:
                 continue
 

@@ -6,7 +6,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import List, Optional
 
-from smart_unpacker.relations.scheduler import RelationsScheduler
+from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 
 
 @dataclass
@@ -19,10 +19,10 @@ class StagedSplit:
 class SplitVolumeStager:
     def __init__(self, seven_z_path: str):
         self.seven_z_path = seven_z_path
-        self.relations = RelationsScheduler()
+        self._relations = RelationsGroupBuilder()
 
     def _parse_numbered_volume(self, path: str):
-        return self.relations.parse_numbered_volume(path)
+        return self._relations.parse_numbered_volume(path)
 
     def _format_numbered_volume(self, prefix: str, number: int, style: str, width: int) -> str:
         if style == "rar_part":
@@ -30,7 +30,7 @@ class SplitVolumeStager:
         return f"{prefix}.{number:03d}"
 
     def _collect_misnamed_volume_candidates(self, archive: str, all_parts: List[str], archive_prefix: str, style: str):
-        return self.relations.collect_misnamed_volume_candidates(archive, all_parts, archive_prefix, style)
+        return self._relations.collect_misnamed_volume_candidates(archive, all_parts, archive_prefix, style)
 
     def _link_or_copy(self, source: str, target: str):
         try:

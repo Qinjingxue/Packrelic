@@ -33,17 +33,11 @@ class ArchiveTask:
     split_info: SplitArchiveInfo = field(default_factory=SplitArchiveInfo)
 
     def __post_init__(self):
-        if self.all_parts is None:
-            self.all_parts = []
+        self.all_parts = list(self.all_parts or [])
         if not self.main_path:
-            self.main_path = self.fact_bag.get("file.path", "")
-        if not self.logical_name:
-            self.logical_name = self.fact_bag.get("file.logical_name", "")
+            raise ValueError("ArchiveTask.main_path is required")
         if not self.key:
-            self.key = self.fact_bag.get("file.key") or self.logical_name or self.main_path
-        if not self.all_parts and self.main_path:
-            members = list(self.fact_bag.get("file.split_members", []) or [])
-            self.all_parts = [self.main_path] + members
+            self.key = self.logical_name or self.main_path
         if self.split_info is None:
             self.split_info = SplitArchiveInfo()
         if not self.split_info.parts and self.all_parts:
@@ -53,18 +47,14 @@ class ArchiveTask:
 
     @classmethod
     def from_fact_bag(cls, fact_bag: FactBag, score: int) -> "ArchiveTask":
-        main_path = fact_bag.get("candidate.entry_path") or fact_bag.get("file.path", "")
-        members = list(fact_bag.get("file.split_members", []) or [])
-        logical_name = fact_bag.get("file.logical_name") or ""
-        if not logical_name and main_path:
-            import os
-            logical_name = os.path.splitext(os.path.basename(main_path))[0]
-        key = fact_bag.get("file.key") or logical_name or main_path
-        all_parts = [main_path] + members if main_path else members
+        main_path = fact_bag.get("candidate.entry_path") or ""
+        all_parts = list(fact_bag.get("candidate.member_paths") or [])
+        logical_name = fact_bag.get("candidate.logical_name") or ""
+        key = logical_name or main_path
         is_split = bool(
-            members
-            or fact_bag.get("relation.is_split_related")
-            or fact_bag.get("file.is_split_candidate")
+            fact_bag.get("relation.is_split_related")
+            or fact_bag.get("candidate.kind") == "split_archive"
+            or len(all_parts) > 1
         )
         is_sfx_stub = bool(
             fact_bag.get("relation.is_split_exe_companion")
@@ -74,7 +64,7 @@ class ArchiveTask:
             is_split=is_split or len(all_parts) > 1,
             is_sfx_stub=is_sfx_stub,
             parts=list(all_parts),
-            preferred_entry=fact_bag.get("relation.split_preferred_entry") or "",
+            preferred_entry="",
             source="detection" if is_split or is_sfx_stub else "",
         )
         return cls(
@@ -107,4 +97,6 @@ class ArchiveTask:
         if self.split_info.preferred_entry:
             self.split_info.preferred_entry = mapped(self.split_info.preferred_entry)
         self.fact_bag.set("file.path", self.main_path)
+        self.fact_bag.set("candidate.entry_path", self.main_path)
+        self.fact_bag.set("candidate.member_paths", list(self.all_parts))
         self.fact_bag.set("file.split_members", [path for path in self.all_parts if path != self.main_path])

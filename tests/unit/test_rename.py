@@ -21,8 +21,8 @@ def test_rename_planner_and_executor_apply_disguised_archive_extensions(tmp_path
     single_bag.set("file.detected_ext", ".zip")
 
     tasks = [
-        ArchiveTask(fact_bag=split_bag, score=10),
-        ArchiveTask(fact_bag=single_bag, score=10),
+        ArchiveTask(fact_bag=split_bag, score=10, main_path=str(split_first), all_parts=[str(split_first), str(split_second)]),
+        ArchiveTask(fact_bag=single_bag, score=10, main_path=str(fake_doc), all_parts=[str(fake_doc)]),
     ]
 
     scheduler = RenameScheduler()
@@ -47,6 +47,6 @@ def test_rename_planner_keeps_embedded_carrier_extension(tmp_path):
     bag.set("file.embedded_archive_found", True)
     bag.set("embedded_archive.analysis", {"found": True, "detected_ext": ".rar", "offset": 128})
 
-    instructions = RenameScheduler().plan([ArchiveTask(fact_bag=bag, score=10)])
+    instructions = RenameScheduler().plan([ArchiveTask(fact_bag=bag, score=10, main_path=str(carrier), all_parts=[str(carrier)])])
 
     assert instructions == []

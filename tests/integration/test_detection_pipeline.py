@@ -57,7 +57,9 @@ class DetectionPipelineTests(unittest.TestCase):
 
             bag = FactBag()
             bag.set("file.path", str(source))
-            bag.set("file.logical_name", "fake_doc")
+            bag.set("candidate.entry_path", str(source))
+            bag.set("candidate.member_paths", [str(source)])
+            bag.set("candidate.logical_name", "fake_doc")
             bag.set("file.detected_ext", ".zip")
             task = ArchiveTask.from_fact_bag(bag, score=10)
 

@@ -68,7 +68,6 @@ def test_directory_scanner_native_fast_path_wraps_file_entries(tmp_path, monkeyp
             "mtime_ns": 123,
         }]
 
-    monkeypatch.delenv("SMART_UNPACKER_DISABLE_NATIVE_DIRECTORY_SCAN", raising=False)
     monkeypatch.setattr("smart_unpacker.filesystem.directory_scanner._NATIVE_SCAN_DIRECTORY_ENTRIES", fake_native)
 
     snapshot = DirectoryScanner(str(tmp_path), config={
@@ -88,11 +87,8 @@ def test_directory_scanner_native_fast_path_wraps_file_entries(tmp_path, monkeyp
     assert snapshot.entries == [type(snapshot.entries[0])(path=target, is_dir=False, size=11, mtime_ns=123)]
 
 
-def test_directory_scanner_custom_filters_use_python_path(tmp_path, monkeypatch):
+def test_directory_scanner_custom_filters_fail_without_native_mapping(tmp_path):
     (tmp_path / "archive.zip").write_bytes(b"PK\x03\x04payload")
-
-    def unexpected_native(*_args, **_kwargs):
-        raise AssertionError("custom filters should not use native directory scan")
 
     class KeepAllFilter:
         name = "keep_all"
@@ -102,11 +98,9 @@ def test_directory_scanner_custom_filters_use_python_path(tmp_path, monkeypatch)
             from smart_unpacker.filesystem.filters.base import keep
             return keep()
 
-    monkeypatch.setattr("smart_unpacker.filesystem.directory_scanner._NATIVE_SCAN_DIRECTORY_ENTRIES", unexpected_native)
-
-    snapshot = DirectoryScanner(str(tmp_path), filters=[KeepAllFilter()]).scan()
-
-    assert {entry.path.name for entry in snapshot.entries} == {"archive.zip"}
+    import pytest
+    with pytest.raises(RuntimeError, match="Native directory scan requires"):
+        DirectoryScanner(str(tmp_path), filters=[KeepAllFilter()]).scan()
 
 
 def test_directory_scanner_explicit_max_depth_overrides_scan_mode(tmp_path):

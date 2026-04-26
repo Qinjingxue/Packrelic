@@ -6,8 +6,8 @@ from smart_unpacker.detection import DetectionScheduler
 @dataclass
 class ScanResult:
     logical_name: str
-    primary_path: str
-    members: List[str]
+    main_path: str
+    all_parts: List[str]
     should_extract: bool
     score: int
     stop_reason: str
@@ -27,16 +27,16 @@ class ScanOrchestrator:
         results = []
         for detection in self.detector.detect_targets(target_paths):
             bag = detection.fact_bag
-            primary_path = bag.get("file.path")
-            if not primary_path:
+            main_path = bag.get("candidate.entry_path")
+            if not main_path:
                 continue
             decision = detection.decision
             
             if decision.should_extract:
                 results.append(ScanResult(
-                    logical_name=bag.get("file.logical_name", ""),
-                    primary_path=primary_path,
-                    members=bag.get("file.split_members", []),
+                    logical_name=bag.get("candidate.logical_name", ""),
+                    main_path=main_path,
+                    all_parts=list(bag.get("candidate.member_paths") or []),
                     should_extract=decision.should_extract,
                     score=decision.total_score,
                     stop_reason=decision.stop_reason or "",

@@ -21,5 +21,5 @@ def test_scan_reports_misnamed_split_parts_consistently(tmp_path):
     results = ScanOrchestrator(config).scan(str(tmp_path))
 
     assert len(results) == 1
-    assert results[0].primary_path == str(first)
-    assert results[0].members == [str(normal_2), str(normal_3), str(fuzzy_4), str(fuzzy_5)]
+    assert results[0].main_path == str(first)
+    assert results[0].all_parts == [str(first), str(normal_2), str(normal_3), str(fuzzy_4), str(fuzzy_5)]

@@ -362,7 +362,7 @@ detection/scene/
 当前公开能力：
 
 - `DirectoryScanner.scan(path)` 生成 `DirectorySnapshot`。
-- 当 `smart_unpacker_native` 可用且使用内置过滤器时，`DirectoryScanner` 可以走原生目录遍历加速；原生层只返回基础条目元数据，Python 层仍负责 contract 构建、过滤器扩展和回退。
+- `DirectoryScanner` 使用 `smart_unpacker_native` 目录遍历；原生层只返回基础条目元数据，Python 层仍负责 contract 构建。过滤器必须能映射到原生层支持的参数，否则应显性失败。
 
 应该做：
 

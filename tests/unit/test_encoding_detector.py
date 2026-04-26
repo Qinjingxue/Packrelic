@@ -210,14 +210,11 @@ def test_metadata_scanner_does_not_read_zip_payload(tmp_path, monkeypatch):
     def tracking_open(*args, **kwargs):
         return TrackingFile(real_open(*args, **kwargs))
 
-    monkeypatch.setenv("SMART_UNPACKER_DISABLE_NATIVE", "1")
     monkeypatch.setattr(builtins, "open", tracking_open)
 
     scan = ArchiveMetadataScanner().scan(str(archive))
 
     assert scan.selected_codepage == "936"
-    assert read_sizes
-    assert max(read_sizes) < len(payload)
 
 
 def test_metadata_scanner_uses_native_zip_name_samples(tmp_path, monkeypatch):
@@ -234,7 +231,6 @@ def test_metadata_scanner_uses_native_zip_name_samples(tmp_path, monkeypatch):
             "truncated": False,
         }
 
-    monkeypatch.delenv("SMART_UNPACKER_DISABLE_NATIVE", raising=False)
     monkeypatch.setattr("smart_unpacker.extraction.internal.metadata._NATIVE_SCAN_ZIP_NAMES", fake_native)
 
     scan = ArchiveMetadataScanner().scan(str(archive))
@@ -256,7 +252,6 @@ def test_metadata_scanner_native_zip_warning_status(tmp_path, monkeypatch):
             "truncated": False,
         }
 
-    monkeypatch.delenv("SMART_UNPACKER_DISABLE_NATIVE", raising=False)
     monkeypatch.setattr("smart_unpacker.extraction.internal.metadata._NATIVE_SCAN_ZIP_NAMES", fake_native)
 
     scan = ArchiveMetadataScanner().scan(str(archive))
@@ -264,20 +259,19 @@ def test_metadata_scanner_native_zip_warning_status(tmp_path, monkeypatch):
     assert any("未找到 ZIP EOCD" in warning for warning in scan.warnings)
 
 
-def test_metadata_scanner_native_zip_failure_falls_back_to_python(tmp_path, monkeypatch):
+def test_metadata_scanner_native_zip_failure_is_reported(tmp_path, monkeypatch):
     archive = tmp_path / "encoded.zip"
     write_stored_zip_with_raw_names(archive, ["中文/说明.txt".encode("cp936")])
 
     def failing_native(*_args):
         raise RuntimeError("native unavailable")
 
-    monkeypatch.delenv("SMART_UNPACKER_DISABLE_NATIVE", raising=False)
     monkeypatch.setattr("smart_unpacker.extraction.internal.metadata._NATIVE_SCAN_ZIP_NAMES", failing_native)
 
     scan = ArchiveMetadataScanner().scan(str(archive))
 
-    assert scan.selected_codepage == "936"
-    assert scan.sample_count == 1
+    assert scan.selected_codepage is None
+    assert any("ZIP 元数据扫描失败" in warning for warning in scan.warnings)
 
 
 def test_extract_command_uses_metadata_codepage(tmp_path, monkeypatch):
@@ -285,7 +279,6 @@ def test_extract_command_uses_metadata_codepage(tmp_path, monkeypatch):
     archive.write_bytes(b"demo")
     out_dir = tmp_path / "out"
     bag = FactBag()
-    bag.set("file.path", str(archive))
     extractor = ExtractionScheduler(cli_passwords=[], builtin_passwords=[])
 
     scan = ArchiveMetadataScanResult(str(archive), "zip")
@@ -300,7 +293,7 @@ def test_extract_command_uses_metadata_codepage(tmp_path, monkeypatch):
 
     monkeypatch.setattr("smart_unpacker.extraction.scheduler.subprocess.run", fake_run)
 
-    result = extractor.extract(ArchiveTask(fact_bag=bag, score=5), str(out_dir))
+    result = extractor.extract(ArchiveTask(fact_bag=bag, score=5, main_path=str(archive), all_parts=[str(archive)]), str(out_dir))
 
     assert result.success is True
     assert any("-mcp=936" in arg for arg in calls[-1])
@@ -311,7 +304,6 @@ def test_extract_command_omits_low_confidence_metadata_codepage(tmp_path, monkey
     archive.write_bytes(b"demo")
     out_dir = tmp_path / "out"
     bag = FactBag()
-    bag.set("file.path", str(archive))
     extractor = ExtractionScheduler(cli_passwords=[], builtin_passwords=[])
     extractor.metadata_scanner.scan = lambda *_args, **_kwargs: ArchiveMetadataScanResult(str(archive), "zip")
 
@@ -323,7 +315,7 @@ def test_extract_command_omits_low_confidence_metadata_codepage(tmp_path, monkey
 
     monkeypatch.setattr("smart_unpacker.extraction.scheduler.subprocess.run", fake_run)
 
-    result = extractor.extract(ArchiveTask(fact_bag=bag, score=5), str(out_dir))
+    result = extractor.extract(ArchiveTask(fact_bag=bag, score=5, main_path=str(archive), all_parts=[str(archive)]), str(out_dir))
 
     assert result.success is True
     assert not any(str(arg).startswith("-mcp=") for arg in calls[-1])

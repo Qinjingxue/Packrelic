@@ -162,14 +162,12 @@ def _validation_state(facts: dict) -> tuple[bool, bool, bool]:
 def scan_result_to_item(res) -> dict[str, Any]:
     facts = _fact_dict(res)
     validation_ok, validation_skipped, validation_encrypted = _validation_state(facts)
-    main_path = getattr(res, "main_path", None) or getattr(res, "primary_path", "")
-    members = list(getattr(res, "all_parts", None) or [])
-    if not members:
-        members = [main_path] + list(getattr(res, "members", []) or []) if main_path else list(getattr(res, "members", []) or [])
+    main_path = res.main_path
+    all_parts = list(res.all_parts or [])
     return {
         "main_path": main_path,
-        "all_parts": members,
-        "decision": getattr(res, "decision", "archive"),
+        "all_parts": all_parts,
+        "decision": res.decision,
         "score": res.score,
         "scene_role": getattr(res, "scene_type", facts.get("scene.context", {}).get("scene_type") if isinstance(facts.get("scene.context"), dict) else None),
         "detected_ext": res.detected_ext,

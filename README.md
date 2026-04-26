@@ -151,9 +151,9 @@ python sunpack_cli.py config validate
 
 ## 原生扩展
 
-项目包含一个 Rust/PyO3 扩展 `smart_unpacker_native`，用于加速少量热点扫描，例如目录遍历过滤、嵌入式压缩包 magic 搜索、载体尾部/前缀扫描和 ZIP central directory 文件名扫描。Python 层仍负责配置、规则判断、7-Zip 调用和回退逻辑。
+项目包含一个 Rust/PyO3 扩展 `smart_unpacker_native`，用于执行热点扫描，例如目录遍历过滤、嵌入式压缩包 magic 搜索、载体尾部/前缀扫描和 ZIP central directory 文件名扫描。Python 层仍负责配置、规则判断和 7-Zip 调用。
 
-扩展源码位于 `native\smart_unpacker_native`。如果扩展不可用，相关 Python 模块会回退到纯 Python 实现；但开发脚本和 Windows 构建脚本会默认构建并验证该扩展。需要排查目录扫描问题时，可设置 `SMART_UNPACKER_DISABLE_NATIVE_DIRECTORY_SCAN=1` 临时禁用原生目录扫描。
+扩展源码位于 `native\smart_unpacker_native`。运行时要求该扩展可导入且相关接口可用；如果原生扩展缺失或返回异常，程序会显性失败，避免静默降级导致性能问题被掩盖。
 
 ## Windows 右键菜单
 

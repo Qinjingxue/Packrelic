@@ -81,8 +81,7 @@ def test_batch_skips_stale_nested_output_tasks_in_same_round(tmp_path, monkeypat
 
     def task_for(path):
         bag = FactBag()
-        bag.set("file.path", str(path))
-        return ArchiveTask.from_fact_bag(bag, score=10)
+        return ArchiveTask(fact_bag=bag, score=10, main_path=str(path), all_parts=[str(path)])
 
     def fake_extract(task, out_dir):
         extracted.append(task.main_path)

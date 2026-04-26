@@ -11,9 +11,8 @@ def test_extractor_failure_path_runs_through_concurrent_executor(tmp_path, monke
     out_dir = tmp_path / "extracted_fake"
 
     bag = FactBag()
-    bag.set("file.path", str(archive))
     bag.set("file.detected_ext", ".txt")
-    task = ArchiveTask(fact_bag=bag, score=10)
+    task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive), all_parts=[str(archive)])
 
     extractor = ExtractionScheduler(max_retries=1, max_workers=2)
     monkeypatch.setattr(extractor.metadata_scanner, "scan", lambda *_args, **_kwargs: None)

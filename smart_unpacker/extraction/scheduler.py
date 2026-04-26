@@ -14,6 +14,7 @@ from smart_unpacker.extraction.internal.password_resolution import PasswordResol
 from smart_unpacker.extraction.internal.split_stager import SplitVolumeStager
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
+from smart_unpacker.relations.internal.group_builder import RelationsGroupBuilder
 from smart_unpacker.support.resources import get_7z_path
 
 
@@ -35,6 +36,7 @@ class ExtractionScheduler:
         self.metadata_scanner = ArchiveMetadataScanner()
         self.seven_z_path = get_7z_path()
         self.split_stager = SplitVolumeStager(self.seven_z_path)
+        self._relations = RelationsGroupBuilder()
         self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)
         self.scheduler_config = build_scheduler_profile_config(scheduler_profile)
@@ -81,7 +83,7 @@ class ExtractionScheduler:
         out_dir: str,
         split_info: Optional[SplitArchiveInfo] = None,
     ) -> ExtractionResult:
-        archive = task.main_path or task.fact_bag.get("file.path")
+        archive = task.main_path
         split_info = split_info or task.split_info
         archive, all_parts, split_info = self._resolve_split_entry(
             archive,
@@ -257,11 +259,9 @@ class ExtractionScheduler:
         return os.path.splitext(archive)[1].lower() in {".exe", ".rar"}
 
     def _parse_numbered_volume(self, path: str):
-        relations = getattr(self.split_stager, "relations", None)
-        if relations is not None:
-            parsed = relations.parse_numbered_volume(path)
-            if parsed:
-                return parsed
+        parsed = self._relations.parse_numbered_volume(path)
+        if parsed:
+            return parsed
 
         match = re.search(r"^(?P<prefix>.+\.(?:7z|zip|rar))\.(?P<number>\d{3})$", path, re.IGNORECASE)
         if match:

@@ -1,23 +1,12 @@
 import os
 import re
-import struct
 import subprocess
-import time
 from typing import List, Optional, Tuple, Dict, Any
+
+from smart_unpacker_native import scan_zip_central_directory_names as _NATIVE_SCAN_ZIP_NAMES
 
 from smart_unpacker.support.resources import get_7z_path
 from smart_unpacker.support.external_command_cache import cached_readonly_command
-
-try:
-    from smart_unpacker_native import scan_zip_central_directory_names as _NATIVE_SCAN_ZIP_NAMES
-except ImportError:
-    _NATIVE_SCAN_ZIP_NAMES = None
-
-
-def _native_scan_disabled() -> bool:
-    value = os.environ.get("SMART_UNPACKER_DISABLE_NATIVE", "")
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
 
 class ArchiveMetadataScanResult:
     def __init__(self, archive_path: str, archive_type: str, reasons: List[str] = None):
@@ -30,15 +19,8 @@ class ArchiveMetadataScanResult:
         self.sample_count: int = 0
 
 class ArchiveMetadataScanner:
-    ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
-    ZIP_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x01\x02"
-    ZIP_UTF8_FLAG = 0x800
-    ZIP64_MARKER = 0xFFFFFFFF
-
-    MAX_ZIP_COMMENT_BYTES = 65535
     MAX_ZIP_SAMPLES = 2000
     MAX_FILENAME_BYTES = 1024 * 1024
-    MAX_SCAN_SECONDS = 2.0
     LIST_TIMEOUT_SECONDS = 5
 
     CODEPAGE_CANDIDATES = (
@@ -121,45 +103,37 @@ class ArchiveMetadataScanner:
             return result
 
     def _scan_zip_name_samples(self, archive_path: str) -> Tuple[List[bytes], int, bool, str]:
-        native_used, native_result = self._scan_zip_name_samples_native(archive_path)
-        if native_used:
-            return native_result
-        return self._scan_zip_name_samples_python(archive_path)
+        return self._scan_zip_name_samples_native(archive_path)
 
-    def _scan_zip_name_samples_native(self, archive_path: str) -> Tuple[bool, Tuple[List[bytes], int, bool, str]]:
-        if _native_scan_disabled() or _NATIVE_SCAN_ZIP_NAMES is None:
-            return False, ([], 0, False, "")
-        try:
-            result = _NATIVE_SCAN_ZIP_NAMES(
-                archive_path,
-                self.MAX_ZIP_SAMPLES,
-                self.MAX_FILENAME_BYTES,
-            )
-        except Exception:
-            return False, ([], 0, False, "")
+    def _scan_zip_name_samples_native(self, archive_path: str) -> Tuple[List[bytes], int, bool, str]:
+        result = _NATIVE_SCAN_ZIP_NAMES(
+            archive_path,
+            self.MAX_ZIP_SAMPLES,
+            self.MAX_FILENAME_BYTES,
+        )
         if not isinstance(result, dict):
-            return False, ([], 0, False, "")
+            raise TypeError("Native ZIP name scanner returned a non-dict result")
 
         status = result.get("status")
         warning = self._zip_native_status_warning(status)
         if warning:
-            return True, ([], 0, False, warning)
+            return [], 0, False, warning
         if status != "ok":
-            return False, ([], 0, False, "")
+            raise RuntimeError(f"Native ZIP name scanner returned unsupported status: {status}")
 
         raw_names = result.get("raw_names")
         utf8_marked = result.get("utf8_marked")
         truncated = result.get("truncated")
         if not isinstance(raw_names, list) or not isinstance(truncated, bool):
-            return False, ([], 0, False, "")
+            raise TypeError("Native ZIP name scanner returned invalid raw_names/truncated")
         if not isinstance(utf8_marked, int):
-            return False, ([], 0, False, "")
+            raise TypeError("Native ZIP name scanner returned invalid utf8_marked")
         normalized_names = []
         for raw_name in raw_names:
             if not isinstance(raw_name, bytes):
-                return False, ([], 0, False, "")
+                raise TypeError("Native ZIP name scanner returned a non-bytes name")
             normalized_names.append(raw_name)
-        return True, (normalized_names, utf8_marked, truncated, "")
+        return normalized_names, utf8_marked, truncated, ""
 
     def _zip_native_status_warning(self, status) -> str:
         warnings = {
@@ -170,78 +144,6 @@ class ArchiveMetadataScanner:
             "central_range_invalid": "ZIP 中央目录范围异常，跳过编码修正",
         }
         return warnings.get(status, "")
-
-    def _scan_zip_name_samples_python(self, archive_path: str) -> Tuple[List[bytes], int, bool, str]:
-        started = time.monotonic()
-        file_size = os.path.getsize(archive_path)
-        if file_size < 22:
-            return [], 0, False, "ZIP 文件过小，无法读取 EOCD"
-
-        search_size = min(file_size, self.MAX_ZIP_COMMENT_BYTES + 22)
-        with open(archive_path, "rb") as handle:
-            handle.seek(file_size - search_size)
-            tail = handle.read(search_size)
-
-        eocd_index = tail.rfind(self.ZIP_EOCD_SIGNATURE)
-        if eocd_index < 0:
-            return [], 0, False, "未找到 ZIP EOCD，跳过编码修正"
-
-        eocd = tail[eocd_index : eocd_index + 22]
-        if len(eocd) < 22:
-            return [], 0, False, "ZIP EOCD 不完整，跳过编码修正"
-
-        _, _, _, _, total_entries, central_size, central_offset, _ = struct.unpack("<4s4H2IH", eocd)
-        if central_offset == self.ZIP64_MARKER or central_size == self.ZIP64_MARKER:
-            return [], 0, False, "ZIP64 中央目录暂不做纯 Python 编码修正"
-        if central_offset < 0 or central_size < 0 or central_offset + central_size > file_size:
-            return [], 0, False, "ZIP 中央目录范围异常，跳过编码修正"
-
-        read_size = min(central_size, self.MAX_FILENAME_BYTES + 46 * self.MAX_ZIP_SAMPLES)
-        with open(archive_path, "rb") as handle:
-            handle.seek(central_offset)
-            central = handle.read(read_size)
-
-        raw_names, utf8_marked, truncated = self._collect_zip_names(central, total_entries, started)
-        return raw_names, utf8_marked, truncated, ""
-
-    def _collect_zip_names(self, central: bytes, total_entries: int, started: float) -> Tuple[List[bytes], int, bool]:
-        raw_names = []
-        utf8_marked = 0
-        filename_bytes = 0
-        offset = 0
-        expected_entries = min(total_entries or self.MAX_ZIP_SAMPLES, self.MAX_ZIP_SAMPLES)
-        truncated = False
-
-        while offset + 46 <= len(central) and len(raw_names) < expected_entries:
-            if time.monotonic() - started > self.MAX_SCAN_SECONDS:
-                truncated = True
-                break
-            if central[offset : offset + 4] != self.ZIP_CENTRAL_DIRECTORY_SIGNATURE:
-                break
-
-            flags = int.from_bytes(central[offset + 8 : offset + 10], "little")
-            name_len = int.from_bytes(central[offset + 28 : offset + 30], "little")
-            extra_len = int.from_bytes(central[offset + 30 : offset + 32], "little")
-            comment_len = int.from_bytes(central[offset + 32 : offset + 34], "little")
-            name_start = offset + 46
-            name_end = name_start + name_len
-            next_offset = name_end + extra_len + comment_len
-            if name_end > len(central):
-                truncated = True
-                break
-
-            raw_name = central[name_start:name_end]
-            if raw_name:
-                raw_names.append(raw_name)
-                filename_bytes += len(raw_name)
-                if flags & self.ZIP_UTF8_FLAG:
-                    utf8_marked += 1
-            offset = next_offset
-            if filename_bytes >= self.MAX_FILENAME_BYTES:
-                truncated = True
-                break
-
-        return raw_names, utf8_marked, truncated
 
     def _select_codepage(self, raw_names: List[bytes]) -> Dict[str, Any]:
         scores = []

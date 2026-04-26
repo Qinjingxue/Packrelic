@@ -66,7 +66,7 @@ def test_directory_blacklist_prevents_archive_from_becoming_scan_task(tmp_path):
 
     results = ScanOrchestrator(scan_config(patterns=[r"FBX/weapon"])).scan(str(tmp_path))
 
-    assert [Path(result.primary_path).name for result in results] == ["keep.zip"]
+    assert [Path(result.main_path).name for result in results] == ["keep.zip"]
 
 
 def test_filename_blacklist_filters_single_rename_candidate_before_planning(tmp_path):

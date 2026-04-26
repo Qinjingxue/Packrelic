@@ -27,8 +27,7 @@ class ArchiveTaskScanner:
         tasks: List[ArchiveTask] = []
         for detection in self.detector.detect_targets(scan_roots):
             bag = detection.fact_bag
-            primary_path = bag.get("file.path")
-            if not primary_path:
+            if not bag.get("candidate.entry_path"):
                 continue
 
             decision = detection.decision
@@ -42,8 +41,8 @@ class ArchiveTaskScanner:
     def _scan_standard_archive_targets(self, scan_roots: List[str]) -> List[ArchiveTask]:
         tasks: List[ArchiveTask] = []
         for bag in self.detector.build_candidate_fact_bags(scan_roots):
-            primary_path = bag.get("file.path")
-            if not primary_path or not self._is_standard_archive_candidate(primary_path, bag):
+            main_path = bag.get("candidate.entry_path")
+            if not main_path or not self._is_standard_archive_candidate(main_path, bag):
                 continue
             task = ArchiveTask.from_fact_bag(bag, score=0)
             if task.key in self.context.processed_keys:

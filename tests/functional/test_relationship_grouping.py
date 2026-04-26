@@ -37,18 +37,16 @@ def _scan_parts(root: Path) -> dict[str, list[str]]:
     results = ScanOrchestrator(SCAN_CONFIG).scan(str(root))
     actual = {}
     for result in results:
-        key = Path(result.primary_path).name
+        key = Path(result.main_path).name
         if key.endswith(".7z.001"):
             key = key.removesuffix(".7z.001")
         elif key.endswith(".zip.001"):
             key = key.removesuffix(".zip.001")
         elif ".part1.rar" in key:
             key = key.split(".part1.rar", 1)[0]
-        elif key.endswith(".exe") and result.members:
+        elif key.endswith(".exe") and len(result.all_parts) > 1:
             key = key.removesuffix(".exe")
-        main = Path(result.primary_path).name
-        members = [Path(path).name for path in result.members]
-        actual[key] = sorted([main, *members])
+        actual[key] = sorted(Path(path).name for path in result.all_parts)
     return actual
 
 

@@ -162,8 +162,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             succeeded = SimpleNamespace(returncode=0, stdout="", stderr="")
 
             bag = FactBag()
-            bag.set("file.path", str(archive_path))
-            task = ArchiveTask.from_fact_bag(bag, score=10)
+            task = ArchiveTask(fact_bag=bag, score=10, main_path=str(archive_path), all_parts=[str(archive_path)])
 
             with patch("smart_unpacker.extraction.scheduler.subprocess.run", side_effect=[failed, succeeded]):
                 result = extractor.extract(task, str(out_dir))

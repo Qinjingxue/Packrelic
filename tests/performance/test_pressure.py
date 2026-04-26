@@ -102,7 +102,7 @@ def test_pressure_scan_avoids_7z_confirmation_fanout_on_mixed_corpus(tmp_path, m
     start = time.perf_counter()
     results = ScanOrchestrator(pressure_scan_config()).scan(str(tmp_path))
     elapsed = time.perf_counter() - start
-    actual = sorted(Path(result.primary_path).name for result in results)
+    actual = sorted(Path(result.main_path).name for result in results)
 
     assert actual == expected
     assert fact_counts == {"7z.probe": 0, "7z.validation": 0}
@@ -127,8 +127,8 @@ def test_task_executor_uses_multiple_workers_under_backlog():
 
     def make_task(index: int) -> ArchiveTask:
         bag = FactBag()
-        bag.set("file.path", f"archive_{index}.zip")
-        return ArchiveTask(fact_bag=bag, score=5)
+        path = f"archive_{index}.zip"
+        return ArchiveTask(fact_bag=bag, score=5, main_path=path, all_parts=[path])
 
     def worker(_task):
         nonlocal active, peak_active

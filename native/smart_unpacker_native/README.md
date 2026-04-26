@@ -4,7 +4,7 @@ Rust/PyO3 extension module for narrow native helpers used by Smart Unpacker.
 
 This crate should stay focused on byte-search primitives. Python remains
 responsible for configuration, rule decisions, ZIP plausibility checks, 7-Zip
-integration, and fallback behavior.
+integration, and error reporting.
 
 ## Build
 
@@ -36,8 +36,8 @@ tests to confirm the extension was imported.
 `scan_directory_entries(root_path, max_depth, patterns, prune_dirs, blocked_extensions, min_size)`
 walks a directory tree and returns basic entry metadata after applying the
 built-in filesystem scan filters. Python still owns `DirectorySnapshot` /
-`FileEntry` construction and falls back to its own scanner when custom filters
-are present.
+`FileEntry` construction. Custom filters must be expressible through native
+scan parameters or the caller should fail explicitly.
 
 Return value:
 
@@ -92,7 +92,7 @@ Return value:
 `scan_zip_central_directory_names(path, max_samples, max_filename_bytes)`
 reads ZIP central-directory metadata and returns raw filename samples for
 encoding detection. ZIP64 central directory parsing is intentionally not handled
-here; Python keeps the higher-level fallback behavior.
+here; Python reports the unsupported status instead of reparsing it.
 
 Return value:
 
