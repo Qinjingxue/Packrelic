@@ -4,8 +4,6 @@ from typing import List, Optional, Tuple, Dict, Any
 
 from smart_unpacker_native import scan_zip_central_directory_names as _NATIVE_SCAN_ZIP_NAMES
 
-from smart_unpacker.support.sevenzip_native import cached_probe_archive
-
 class ArchiveMetadataScanResult:
     def __init__(self, archive_path: str, archive_type: str, reasons: List[str] = None):
         self.archive_path = archive_path
@@ -67,7 +65,11 @@ class ArchiveMetadataScanner:
         if ext == ".zip":
             return self._scan_zip_central_directory(archive_path)
         if ext in {".7z", ".rar"}:
-            return self._scan_with_7z_listing(archive_path, ext.lstrip("."), password=password, part_paths=part_paths)
+            return ArchiveMetadataScanResult(
+                archive_path=archive_path,
+                archive_type=ext.lstrip("."),
+                reasons=[f"{ext.lstrip('.').upper()} 解压前元数据扫描不需要编码修正，保持默认解压参数"],
+            )
         return ArchiveMetadataScanResult(
             archive_path=archive_path,
             archive_type=ext.lstrip(".") or "unknown",
@@ -269,18 +271,6 @@ class ArchiveMetadataScanner:
 
         score -= latin_symbols
         return score, stats
-
-    def _scan_with_7z_listing(self, archive_path: str, archive_type: str, password: Optional[str] = None, part_paths: list[str] | None = None) -> ArchiveMetadataScanResult:
-        result = ArchiveMetadataScanResult(archive_path=archive_path, archive_type=archive_type)
-        probe = cached_probe_archive(archive_path, part_paths=part_paths)
-        result.sample_count = max(0, int(probe.item_count or 0))
-        if probe.is_archive and not probe.is_encrypted:
-            result.reasons.append(f"{archive_type.upper()} 元数据可由 7z.dll 正常列出，保持默认编码处理")
-        elif probe.is_encrypted:
-            result.warnings.append(f"{archive_type.upper()} 元数据需要密码，保持默认解压参数")
-        else:
-            result.warnings.append(f"{archive_type.upper()} 元数据列出失败: {probe.message}")
-        return result
 
     def _is_ascii_name(self, raw_name: bytes) -> bool:
         return all(byte < 128 for byte in raw_name)
