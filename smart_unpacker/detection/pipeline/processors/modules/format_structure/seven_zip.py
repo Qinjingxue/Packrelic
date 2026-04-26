@@ -6,6 +6,11 @@ from typing import Any
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 
+try:
+    from smart_unpacker_native import inspect_seven_zip_structure as _native_inspect_seven_zip_structure
+except ImportError:  # pragma: no cover - exercised when native extension is absent
+    _native_inspect_seven_zip_structure = None
+
 
 SEVEN_Z_SIGNATURE = b"7z\xbc\xaf\x27\x1c"
 HEADER_SIZE = 32
@@ -44,6 +49,12 @@ def inspect_seven_zip_structure(
     magic_bytes: bytes | None = None,
     max_next_header_check_bytes: int = DEFAULT_MAX_NEXT_HEADER_CHECK_BYTES,
 ) -> dict[str, Any]:
+    if _native_inspect_seven_zip_structure is not None:
+        try:
+            return dict(_native_inspect_seven_zip_structure(path, magic_bytes or b"", max_next_header_check_bytes))
+        except Exception:
+            pass
+
     try:
         file_size = os.path.getsize(path)
         with open(path, "rb") as handle:

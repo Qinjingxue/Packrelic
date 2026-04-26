@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod carrier;
 mod directory_scan;
+mod format_structure;
 mod magic;
 mod util;
 mod zip_names;
@@ -45,5 +46,12 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(directory_scan::scan_directory_entries, m)?)?;
+    m.add_function(wrap_pyfunction!(format_structure::inspect_zip_local_header, m)?)?;
+    m.add_function(wrap_pyfunction!(format_structure::inspect_zip_eocd_structure, m)?)?;
+    m.add_function(wrap_pyfunction!(format_structure::inspect_seven_zip_structure, m)?)?;
+    m.add_function(wrap_pyfunction!(format_structure::inspect_rar_structure, m)?)?;
+    m.add_function(wrap_pyfunction!(format_structure::inspect_tar_header_structure, m)?)?;
+    m.add_function(wrap_pyfunction!(format_structure::inspect_compression_stream_structure, m)?)?;
+    m.add_function(wrap_pyfunction!(format_structure::inspect_archive_container_structure, m)?)?;
     Ok(())
 }

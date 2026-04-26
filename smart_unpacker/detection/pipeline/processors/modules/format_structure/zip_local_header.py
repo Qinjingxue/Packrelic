@@ -5,12 +5,23 @@ from typing import Any
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 
+try:
+    from smart_unpacker_native import inspect_zip_local_header as _native_inspect_zip_local_header
+except ImportError:  # pragma: no cover - exercised when native extension is absent
+    _native_inspect_zip_local_header = None
+
 
 KNOWN_ZIP_COMPRESSION_METHODS = {0, 1, 6, 8, 9, 12, 14, 95, 96, 98, 99}
 LOCAL_HEADER_LENGTH = 30
 
 
 def inspect_zip_local_header(path: str, offset: int) -> dict[str, Any]:
+    if _native_inspect_zip_local_header is not None:
+        try:
+            return dict(_native_inspect_zip_local_header(path, offset))
+        except Exception:
+            pass
+
     offset = max(0, int(offset or 0))
     result = {
         "offset": offset,

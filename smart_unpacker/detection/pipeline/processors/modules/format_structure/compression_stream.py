@@ -6,6 +6,11 @@ from typing import Any
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 
+try:
+    from smart_unpacker_native import inspect_compression_stream_structure as _native_inspect_compression_stream_structure
+except ImportError:  # pragma: no cover - exercised when native extension is absent
+    _native_inspect_compression_stream_structure = None
+
 
 XZ_MAGIC = b"\xfd7zXZ\x00"
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
@@ -130,6 +135,12 @@ def _inspect_zstd(header: bytes, file_size: int) -> dict[str, Any]:
 
 
 def inspect_compression_stream_structure(path: str) -> dict[str, Any]:
+    if _native_inspect_compression_stream_structure is not None:
+        try:
+            return dict(_native_inspect_compression_stream_structure(path))
+        except Exception:
+            pass
+
     try:
         file_size = os.path.getsize(path)
         with open(path, "rb") as handle:

@@ -6,6 +6,11 @@ from typing import Any
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 
+try:
+    from smart_unpacker_native import inspect_archive_container_structure as _native_inspect_archive_container_structure
+except ImportError:  # pragma: no cover - exercised when native extension is absent
+    _native_inspect_archive_container_structure = None
+
 
 def _empty_result(error: str = "") -> dict[str, Any]:
     return {
@@ -104,6 +109,12 @@ def _inspect_cpio(header: bytes, file_size: int) -> dict[str, Any]:
 
 
 def inspect_archive_container_structure(path: str) -> dict[str, Any]:
+    if _native_inspect_archive_container_structure is not None:
+        try:
+            return dict(_native_inspect_archive_container_structure(path))
+        except Exception:
+            pass
+
     try:
         file_size = os.path.getsize(path)
         read_size = min(max(file_size, 0), 4096)
