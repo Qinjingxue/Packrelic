@@ -15,7 +15,7 @@ from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
 from smart_unpacker.postprocess.actions import PostProcessActions
 from smart_unpacker.coordinator.reporting import RunReporter
 
-from smart_unpacker.coordinator.output_scan import OutputScanPolicy
+from smart_unpacker.detection import NestedOutputScanPolicy
 from smart_unpacker.coordinator.recursion import RecursionController
 from smart_unpacker.coordinator.task_scan import ArchiveTaskScanner
 
@@ -41,7 +41,7 @@ class PipelineRunner:
             scheduler_profile=performance_config.get("scheduler_profile", "auto"),
             scheduler_overrides=performance_config,
         )
-        self.output_scan_policy = OutputScanPolicy(config)
+        self.output_scan_policy = NestedOutputScanPolicy(config)
         
         recur_cfg = config.get("recursive_extract", {"mode": "fixed", "max_rounds": 1})
         if not isinstance(recur_cfg, dict):

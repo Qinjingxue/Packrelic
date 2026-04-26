@@ -2,7 +2,7 @@ import os
 from typing import List
 
 from smart_unpacker.coordinator.context import RunContext
-from smart_unpacker.coordinator.output_scan import OutputScanPolicy
+from smart_unpacker.detection import NestedOutputScanPolicy
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.rename.scheduler import RenameScheduler
@@ -13,7 +13,7 @@ class ExtractionBatchRunner:
         self,
         context: RunContext,
         extractor: ExtractionScheduler,
-        output_scan_policy: OutputScanPolicy,
+        output_scan_policy: NestedOutputScanPolicy,
         rename_scheduler: RenameScheduler | None = None,
     ):
         self.context = context

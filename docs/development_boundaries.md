@@ -97,6 +97,8 @@ contracts
 | 配置 | `config.payload_io` | 读取、写出、展示配置 payload。 |
 | 配置 | `config.detection_view` | detection 需要的配置选择器。 |
 | 检测 | `detection.DetectionScheduler` | 构建候选、补齐 facts、执行规则判断。 |
+| 检测 | `detection.ArchiveTaskProvider` | 将 detection 结果转换为解压任务。 |
+| 检测 | `detection.NestedOutputScanPolicy` | 判断解压输出目录是否值得进入下一轮检测。 |
 | 检测 | `detection.validate_detection_contracts` | 校验检测插件和配置契约。 |
 | 解压 | `extraction.scheduler.ExtractionScheduler` | 解压调度、默认输出目录、调度配置。 |
 | 密码 | `smart_unpacker.passwords` | 密码文件读取、内置密码、去重和行解析。 |
@@ -191,9 +193,9 @@ contracts
 - `runner.py`：完整 extract pipeline 的总调度。
 - `scanner.py`：scan 命令的编排。
 - `inspector.py`：inspect 命令的编排，只读 detection facts 和 decision。
-- `task_scan.py`：将 detection 结果转换为 `ArchiveTask`。
+- `task_scan.py`：调用 detection 的 `ArchiveTaskProvider`，不持有候选识别规则。
 - `extraction_batch.py`：批量解压流程编排。
-- `output_scan.py`：是否将输出目录加入下一轮递归扫描的策略。
+- `output_scan.py`：递归输出扫描策略的兼容门面；实际策略在 detection。
 - `space_guard.py`：决定什么时候触发清理；实际清理由 `PostProcessActions` 执行。
 - `recursion.py`：递归轮次策略。
 - `reporting.py`：运行摘要输出。
@@ -216,11 +218,12 @@ contracts
 - 不读取 `FactBag._facts`。
 - 不导入 `detection.pipeline.*` 的具体规则来做判断。
 
-`coordinator/output_scan.py` 的特殊边界：
+递归输出扫描的特殊边界：
 
-- 它可以使用 `detection.scene.directory_context` 判断输出目录是否像游戏、程序或其他强场景目录。
+- `detection.NestedOutputScanPolicy` 可以使用 `detection.scene.directory_context` 判断输出目录是否像游戏、程序或其他强场景目录。
 - 它的职责只是决定“输出目录是否加入下一轮递归扫描”。
 - 它不生成 detection pipeline facts，也不参与规则打分。
+- coordinator 只调用该公开策略，不自己判断文件是否像归档候选。
 
 ## `detection`
 

@@ -17,3 +17,6 @@ class RelationsScheduler:
 
     def build_candidate_groups(self, snapshot: DirectorySnapshot) -> list[CandidateGroup]:
         return self._builder.build_candidate_groups(snapshot)
+
+    def detect_split_role(self, filename: str) -> str | None:
+        return self._builder.detect_split_role(filename)
