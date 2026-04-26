@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from smart_unpacker.config.detection_view import DIRECTORY_SCAN_MODES, directory_scan_mode, rule_pipeline_config, scan_filters_config
+from smart_unpacker.config.shortcuts import normalize_archive_cleanup_mode, normalize_recursive_extract
 from smart_unpacker.support.json_format import load_json_file
 from smart_unpacker.support.resources import candidate_resource_paths, dedupe_paths, first_existing_path
 
@@ -27,10 +28,24 @@ def _first_existing_config(filename: str) -> Path | None:
 
 
 def _validate_pipeline(config: dict[str, Any]):
+    try:
+        normalize_recursive_extract(config.get("recursive_extract"))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    post_extract = config.get("post_extract") if isinstance(config.get("post_extract"), dict) else {}
+    try:
+        normalize_archive_cleanup_mode(post_extract.get("archive_cleanup_mode"))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
     filesystem = config.get("filesystem")
     if not isinstance(filesystem, dict):
         raise ConfigError("Missing required config object: filesystem")
-    if directory_scan_mode(config) not in DIRECTORY_SCAN_MODES:
+    try:
+        scan_mode = directory_scan_mode(config)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if scan_mode not in DIRECTORY_SCAN_MODES:
         allowed = ", ".join(sorted(DIRECTORY_SCAN_MODES))
         raise ConfigError(f"filesystem.directory_scan_mode must be one of: {allowed}")
     filters = scan_filters_config(config)

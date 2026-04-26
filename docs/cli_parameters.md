@@ -56,7 +56,7 @@ python sunpack_cli.py extract [options] <paths...>
 | `--no-builtin-pw` | 禁用内置高频密码表。 |
 | `--recur VALUE` | 覆盖递归解压设置。当前解析器接受正整数、`*`、`?`。 |
 | `--sched {auto,conservative,aggressive}` | 覆盖并发调度档位。 |
-| `--cleanup {keep,recycle,delete}` | 覆盖成功解压后的原压缩包处理方式。 |
+| `--cleanup VALUE` | 覆盖成功解压后的原压缩包处理方式：`d` 删除，`r` 回收站，`k` 不动。 |
 | `--flatten` | 解压后扁平化单一顶层目录。 |
 | `--no-flatten` | 保留解压目录结构。 |
 
@@ -71,7 +71,7 @@ python sunpack_cli.py extract [options] <paths...>
 ```powershell
 python sunpack_cli.py extract D:\Downloads
 python sunpack_cli.py extract D:\A.7z -p 123456 -p secret
-python sunpack_cli.py extract D:\Archives --pw-file .\passwords.txt --cleanup recycle --sched auto
+python sunpack_cli.py extract D:\Archives --pw-file .\passwords.txt --cleanup r --sched auto
 python sunpack_cli.py extract D:\Nested --recur * --no-flatten
 ```
 

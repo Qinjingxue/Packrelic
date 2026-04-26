@@ -2,6 +2,7 @@ import os
 from typing import Any, Dict, Iterable
 
 from smart_unpacker.coordinator.context import RunContext
+from smart_unpacker.config.shortcuts import normalize_archive_cleanup_mode
 from smart_unpacker.postprocess.internal.cleanup import ArchiveCleanup
 from smart_unpacker.postprocess.internal.flatten import DirectoryFlattener
 
@@ -10,7 +11,7 @@ class PostProcessActions:
     def __init__(self, config: Dict[str, Any], context: RunContext | None = None, language: str = "en"):
         self.config = config
         self.context = context
-        self.cleanup_mode = config.get("post_extract", {}).get("archive_cleanup_mode", "recycle")
+        self.cleanup_mode = normalize_archive_cleanup_mode(config.get("post_extract", {}).get("archive_cleanup_mode", "r"))
         self.cleanup = ArchiveCleanup(mode=self.cleanup_mode, language=language)
         self.flattener = DirectoryFlattener()
 

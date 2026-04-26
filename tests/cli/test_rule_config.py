@@ -23,6 +23,20 @@ def test_config_validate_checks_rule_schema_types_even_when_disabled():
     assert any("Invalid type" in error for error in result["errors"])
 
 
+def test_config_validate_rejects_legacy_config_switch_values():
+    payload = _payload()
+    payload["recursive_extract"] = {"mode": "infinite", "max_rounds": 999}
+    payload["post_extract"] = {"archive_cleanup_mode": "recycle"}
+    payload["filesystem"] = {"directory_scan_mode": "recursive", "scan_filters": []}
+
+    result = validate_config_payload(payload)
+
+    assert not result["ok"]
+    assert any("recursive_extract must" in error for error in result["errors"])
+    assert any("archive_cleanup_mode must" in error for error in result["errors"])
+    assert any("directory_scan_mode must" in error for error in result["errors"])
+
+
 def test_scheduler_profile_override_expands_scheduler_config():
     class Args:
         scheduler_profile = "aggressive"
@@ -41,7 +55,7 @@ def test_scheduler_profile_override_expands_scheduler_config():
 def test_effective_config_includes_thresholds_scheduler_and_rule_pipeline():
     config = _payload()
     config["filesystem"] = {
-        "directory_scan_mode": "current_dir_only",
+        "directory_scan_mode": "-",
         "scan_filters": [
             {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 1048576}
         ]

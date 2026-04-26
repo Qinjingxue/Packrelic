@@ -6,16 +6,13 @@
     "archive_score_threshold": 6,
     "maybe_archive_threshold": 3
   },
-  "recursive_extract": {
-    "mode": "infinite",
-    "max_rounds": 999
-  },
+  "recursive_extract": "*",
   "post_extract": {
-    "archive_cleanup_mode": "recycle",
+    "archive_cleanup_mode": "r",
     "flatten_single_directory": true
   },
   "filesystem": {
-    "directory_scan_mode": "recursive",
+    "directory_scan_mode": "*",
     "scan_filters": [
       {
         "name": "blacklist",

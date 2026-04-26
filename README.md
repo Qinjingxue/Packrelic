@@ -136,10 +136,10 @@ python sunpack_cli.py config validate
 
 - `cli.language`：CLI 语言，中文可设为 `zh`。
 - `thresholds`：压缩包判定阈值；中间可疑区间会自动进入确认层。
-- `recursive_extract`：递归解压模式。
-- `post_extract.archive_cleanup_mode`：成功后 `keep`、`recycle` 或 `delete`。
+- `recursive_extract`：递归解压模式，`*` 无限递归，正整数为轮数，`?` 每轮询问。
+- `post_extract.archive_cleanup_mode`：成功后 `d` 删除、`r` 回收站或 `k` 不动。
 - `post_extract.flatten_single_directory`：是否扁平化单一顶层目录。
-- `filesystem.directory_scan_mode`：目录扫描是否递归进入已有子目录。
+- `filesystem.directory_scan_mode`：`*` 递归扫描，`-` 只扫描当前目录。
 - `filesystem.scan_filters`：目录扫描阶段的黑名单、剪枝目录、阻止扩展名和最小检测大小。
 - `performance.scheduler_profile`：`auto`、`conservative` 或 `aggressive`。
 - `detection.rule_pipeline`：检测规则流水线。

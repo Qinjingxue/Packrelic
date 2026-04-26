@@ -27,7 +27,7 @@ def run_postprocess_action(act: dict, workspace: Path):
             [str(workspace / part) for part in archive_parts]
             for archive_parts in act.get("archives", [])
         ]
-        config = {"post_extract": {"archive_cleanup_mode": act.get("mode", "delete")}}
+        config = {"post_extract": {"archive_cleanup_mode": act.get("mode", "d")}}
         PostProcessActions(config).apply(
             cleanup_archives=True,
             flatten_outputs=False,

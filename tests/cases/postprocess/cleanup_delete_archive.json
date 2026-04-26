@@ -10,7 +10,7 @@
   },
   "act": {
     "type": "cleanup",
-    "mode": "delete",
+    "mode": "d",
     "archives": [["dummy_archive.zip"]]
   },
   "assert": {

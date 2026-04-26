@@ -34,7 +34,7 @@ def test_directory_scanner_current_dir_only_scan_mode_skips_subdirectories(tmp_p
 
     snapshot = DirectoryScanner(str(tmp_path), config={
         "filesystem": {
-            "directory_scan_mode": "current_dir_only",
+            "directory_scan_mode": "-",
             "scan_filters": [],
         }
     }).scan()
@@ -68,7 +68,7 @@ def test_directory_scanner_explicit_max_depth_overrides_scan_mode(tmp_path):
 
     snapshot = DirectoryScanner(str(tmp_path), max_depth=1, config={
         "filesystem": {
-            "directory_scan_mode": "current_dir_only",
+            "directory_scan_mode": "-",
             "scan_filters": [],
         }
     }).scan()

@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 from smart_unpacker.coordinator.context import RunContext
 from smart_unpacker.contracts.results import RunSummary
 from smart_unpacker.contracts.tasks import ArchiveTask
+from smart_unpacker.config.shortcuts import normalize_recursive_extract
 
 from smart_unpacker.rename.scheduler import RenameScheduler
 
@@ -41,9 +42,7 @@ class PipelineRunner:
         )
         self.output_scan_policy = OutputScanPolicy(config)
         
-        recur_cfg = config.get("recursive_extract", {"mode": "fixed", "max_rounds": 1})
-        if not isinstance(recur_cfg, dict):
-            raise ValueError("recursive_extract must be an object with mode and max_rounds")
+        recur_cfg = normalize_recursive_extract(config.get("recursive_extract", 1))
         recur_mode = recur_cfg.get("mode", "fixed")
         recur_rounds = int(recur_cfg.get("max_rounds", 1))
                 

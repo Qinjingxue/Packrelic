@@ -1,5 +1,7 @@
 from typing import Any
 
+from smart_unpacker.config.shortcuts import normalize_directory_scan_mode
+
 
 DIRECTORY_SCAN_RECURSIVE = "recursive"
 DIRECTORY_SCAN_CURRENT_DIR_ONLY = "current_dir_only"
@@ -33,7 +35,7 @@ def filesystem_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def directory_scan_mode(config: dict[str, Any]) -> str:
     value = filesystem_config(config).get("directory_scan_mode")
-    return value if isinstance(value, str) and value.strip() else "recursive"
+    return normalize_directory_scan_mode(value)
 
 
 def scan_filters_config(config: dict[str, Any]) -> list[dict[str, Any]]:

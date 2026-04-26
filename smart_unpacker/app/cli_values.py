@@ -1,5 +1,7 @@
 import argparse
 
+from smart_unpacker.config.shortcuts import normalize_archive_cleanup_mode, normalize_recursive_extract
+
 
 def parse_non_negative_int(value: str) -> int:
     try:
@@ -21,11 +23,17 @@ def parse_bool_value(value: str) -> bool:
 
 
 def parse_recursive_extract_value(value: str):
-    normalized = str(value).strip()
-    if normalized == "*":
-        return {"mode": "infinite", "max_rounds": 999}
-    if normalized == "?":
-        return {"mode": "prompt", "max_rounds": 999}
-    if normalized.isdigit() and int(normalized) > 0:
-        return {"mode": "fixed", "max_rounds": int(normalized)}
-    raise argparse.ArgumentTypeError('must be a positive integer, "*" or "?"')
+    try:
+        normalize_recursive_extract(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return str(value).strip()
+
+
+def parse_archive_cleanup_value(value: str) -> str:
+    raw = str(value).strip().lower()
+    try:
+        normalize_archive_cleanup_mode(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return raw

@@ -37,9 +37,9 @@ class PressureCase:
 def pressure_config(passwords: list[str] | None = None) -> dict:
     return with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-        "recursive_extract": {"mode": "fixed", "max_rounds": 1},
+        "recursive_extract": "1",
         "post_extract": {
-            "archive_cleanup_mode": "keep",
+            "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
         },
         "user_passwords": passwords or [],

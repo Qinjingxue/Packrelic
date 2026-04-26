@@ -1,8 +1,8 @@
 import argparse
 
-from smart_unpacker.app.cli_constants import ARCHIVE_CLEANUP_MODES, SCHEDULER_PROFILES
+from smart_unpacker.app.cli_constants import SCHEDULER_PROFILES
 from smart_unpacker.app.cli_context import CliContext
-from smart_unpacker.app.cli_values import parse_recursive_extract_value
+from smart_unpacker.app.cli_values import parse_archive_cleanup_value, parse_recursive_extract_value
 
 
 class CliHelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -69,7 +69,7 @@ def build_extract_config_override_parser(ctx: CliContext) -> argparse.ArgumentPa
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--recur", dest="recursive_extract", type=parse_recursive_extract_value, help=ctx.core_text("recursive_extract"))
     parser.add_argument("--sched", dest="scheduler_profile", choices=sorted(SCHEDULER_PROFILES), help=ctx.core_text("scheduler_profile"))
-    parser.add_argument("--cleanup", dest="archive_cleanup_mode", choices=sorted(ARCHIVE_CLEANUP_MODES), help=ctx.core_text("archive_cleanup_mode"))
+    parser.add_argument("--cleanup", dest="archive_cleanup_mode", type=parse_archive_cleanup_value, help=ctx.core_text("archive_cleanup_mode"))
     flatten_group = parser.add_mutually_exclusive_group()
     flatten_group.add_argument("--flatten", dest="flatten_single_directory", action="store_true", default=None, help=ctx.core_text("flatten"))
     flatten_group.add_argument("--no-flatten", dest="flatten_single_directory", action="store_false", help=ctx.core_text("no_flatten"))
