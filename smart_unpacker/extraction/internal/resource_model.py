@@ -56,6 +56,21 @@ class ResourceBudget:
         )
 
 
+@dataclass(frozen=True)
+class TaskRunFeedback:
+    demand: ResourceDemand
+    duration_seconds: float
+    estimated_bytes: int
+    active_workers_at_start: int
+    success: bool
+
+    @property
+    def throughput_bytes_per_second(self) -> float:
+        if self.duration_seconds <= 0 or self.estimated_bytes <= 0:
+            return 0.0
+        return self.estimated_bytes / self.duration_seconds
+
+
 def build_resource_budget(config: dict, max_workers: int) -> ResourceBudget:
     max_workers = max(1, int(max_workers or 1))
     cpu_tokens = int(config.get("cpu_tokens", _default_cpu_tokens(max_workers)) or max_workers)
@@ -147,3 +162,26 @@ def estimate_resource_demand(analysis: Any) -> ResourceDemand:
         io=min(io, 6),
         memory=min(memory, 6),
     ).normalized()
+
+
+def estimate_task_work_bytes(task: Any) -> int:
+    fact_bag = getattr(task, "fact_bag", None)
+    if fact_bag is not None:
+        try:
+            analysis = fact_bag.get("resource.analysis") or {}
+            archive_size = int(analysis.get("archive_size", 0) or 0)
+            unpacked_size = int(analysis.get("total_unpacked_size", 0) or 0)
+            packed_size = int(analysis.get("total_packed_size", 0) or 0)
+            estimated = max(archive_size + unpacked_size, packed_size + unpacked_size)
+            if estimated > 0:
+                return estimated
+        except Exception:
+            pass
+
+    total = 0
+    for path in list(getattr(task, "all_parts", None) or []) or [getattr(task, "main_path", "")]:
+        try:
+            total += os.path.getsize(path)
+        except Exception:
+            pass
+    return max(0, total)

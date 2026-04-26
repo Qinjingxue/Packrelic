@@ -1,8 +1,9 @@
 import concurrent.futures
+import time
 from typing import Any, Callable
 
 from smart_unpacker.extraction.internal.concurrency import ConcurrencyScheduler
-from smart_unpacker.extraction.internal.resource_model import ResourceDemand, demand_from_value
+from smart_unpacker.extraction.internal.resource_model import ResourceDemand, demand_from_value, estimate_task_work_bytes
 
 
 class TaskExecutor:
@@ -17,9 +18,22 @@ class TaskExecutor:
         self.scheduler.start()
 
         def wrapped_worker(task: Any, demand: ResourceDemand) -> Any:
+            started_at = time.perf_counter()
+            active_workers_at_start = self.scheduler.active_workers_snapshot()
+            success = False
             try:
-                return worker_func(task)
+                result = worker_func(task)
+                success = self._worker_result_success(result)
+                return result
             finally:
+                duration = time.perf_counter() - started_at
+                self.scheduler.record_task_feedback(
+                    demand=demand,
+                    duration_seconds=duration,
+                    estimated_bytes=estimate_task_work_bytes(task),
+                    active_workers_at_start=active_workers_at_start,
+                    success=success,
+                )
                 self.scheduler.release_slot(demand=demand)
 
         try:
@@ -100,3 +114,11 @@ class TaskExecutor:
             except Exception:
                 pass
         return demand_from_value(getattr(task, "resource_token_cost", 1) or 1)
+
+    def _worker_result_success(self, result: Any) -> bool:
+        if isinstance(result, tuple) and len(result) >= 2:
+            result = result[1]
+        success = getattr(result, "success", None)
+        if success is not None:
+            return bool(success)
+        return True

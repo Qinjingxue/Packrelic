@@ -104,6 +104,86 @@ def test_concurrency_scheduler_adjusts_cpu_io_memory_limits_independently():
     assert scheduler.cpu_limit >= 1
 
 
+def test_concurrency_scheduler_blocks_scale_up_when_throughput_regresses():
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "cpu_tokens": 6,
+            "io_tokens": 6,
+            "memory_tokens": 6,
+            "throughput_window_size": 4,
+            "throughput_regression_ratio": 0.95,
+            "scale_up_threshold_mb_s": 10,
+            "scale_up_backlog_threshold_mb_s": 20,
+            "cpu_scale_up_threshold_percent": 65,
+            "memory_scale_up_available_mb": 2048,
+            "scale_up_streak_required": 1,
+            "scale_down_streak_required": 1,
+        },
+        current_limit=2,
+        max_workers=6,
+    )
+    for active_workers, duration in ((1, 1.0), (1, 1.0), (3, 4.0), (3, 4.0)):
+        scheduler.record_task_feedback(
+            demand={"cpu": 1, "io": 1, "memory": 1},
+            duration_seconds=duration,
+            estimated_bytes=100 * 1024 * 1024,
+            active_workers_at_start=active_workers,
+            success=True,
+        )
+    scheduler.pending_task_estimate = 20
+
+    scheduler.adjust_once(
+        0,
+        cpu_percent=20,
+        available_memory=8 * 1024 * 1024 * 1024,
+    )
+
+    assert scheduler.cpu_limit == 2
+    assert scheduler.io_limit == 2
+    assert scheduler.memory_limit == 2
+
+
+def test_concurrency_scheduler_allows_scale_up_when_total_throughput_improves():
+    scheduler = ConcurrencyScheduler(
+        {
+            "initial_concurrency_limit": 2,
+            "cpu_tokens": 6,
+            "io_tokens": 6,
+            "memory_tokens": 6,
+            "throughput_window_size": 4,
+            "throughput_regression_ratio": 0.95,
+            "scale_up_threshold_mb_s": 10,
+            "scale_up_backlog_threshold_mb_s": 20,
+            "cpu_scale_up_threshold_percent": 65,
+            "memory_scale_up_available_mb": 2048,
+            "scale_up_streak_required": 1,
+            "scale_down_streak_required": 1,
+        },
+        current_limit=2,
+        max_workers=6,
+    )
+    for active_workers, duration in ((1, 1.0), (1, 1.0), (3, 2.0), (3, 2.0)):
+        scheduler.record_task_feedback(
+            demand={"cpu": 1, "io": 1, "memory": 1},
+            duration_seconds=duration,
+            estimated_bytes=100 * 1024 * 1024,
+            active_workers_at_start=active_workers,
+            success=True,
+        )
+    scheduler.pending_task_estimate = 20
+
+    scheduler.adjust_once(
+        0,
+        cpu_percent=20,
+        available_memory=8 * 1024 * 1024 * 1024,
+    )
+
+    assert scheduler.cpu_limit > 2
+    assert scheduler.io_limit > 2
+    assert scheduler.memory_limit > 2
+
+
 def test_task_executor_submits_only_after_resource_tokens_are_available(tmp_path):
     scheduler = ConcurrencyScheduler(
         {

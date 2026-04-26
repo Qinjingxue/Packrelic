@@ -2,10 +2,16 @@ import os
 import subprocess
 import threading
 import time
+from collections import deque
 
 import psutil
 
-from smart_unpacker.extraction.internal.resource_model import ResourceDemand, build_resource_budget, demand_from_value
+from smart_unpacker.extraction.internal.resource_model import (
+    ResourceDemand,
+    TaskRunFeedback,
+    build_resource_budget,
+    demand_from_value,
+)
 
 
 SCHEDULER_PROFILES = {
@@ -110,6 +116,9 @@ class ConcurrencyScheduler:
         self.memory_scale_up_streak = 0
         self.memory_scale_down_streak = 0
         self.io_history = []
+        self.feedback_window_size = max(4, int(config.get("throughput_window_size", 8) or 8))
+        self.throughput_regression_ratio = float(config.get("throughput_regression_ratio", 0.95) or 0.95)
+        self.feedback_window: deque[TaskRunFeedback] = deque(maxlen=self.feedback_window_size)
 
         self.cond = threading.Condition()
         self.thread = None
@@ -186,10 +195,11 @@ class ConcurrencyScheduler:
 
             old_limits = (self.cpu_limit, self.io_limit, self.memory_limit, self.current_limit)
             backlog_wants_more = backlog > max(self.cpu_limit, self.io_limit, self.memory_limit) * 2
+            throughput_allows_scale_up = self._throughput_allows_scale_up_locked()
 
             self._adjust_cpu_limit_locked(
                 cpu_percent,
-                backlog_wants_more,
+                backlog_wants_more and throughput_allows_scale_up,
                 dynamic_floor,
                 scale_up_streak_req,
                 scale_down_streak_req,
@@ -200,6 +210,7 @@ class ConcurrencyScheduler:
                 avg_delta,
                 backlog,
                 dynamic_floor,
+                throughput_allows_scale_up,
                 scale_up_threshold,
                 scale_up_backlog_threshold,
                 scale_down_threshold,
@@ -208,7 +219,7 @@ class ConcurrencyScheduler:
             )
             self._adjust_memory_limit_locked(
                 available_memory,
-                backlog_wants_more,
+                backlog_wants_more and throughput_allows_scale_up,
                 dynamic_floor,
                 scale_up_streak_req,
                 scale_down_streak_req,
@@ -222,6 +233,30 @@ class ConcurrencyScheduler:
     def update_pending_task_estimate(self, pending_count: int, futures_count: int = 0):
         with self.cond:
             self.pending_task_estimate = pending_count + futures_count + self.active_workers
+
+    def active_workers_snapshot(self) -> int:
+        with self.cond:
+            return self.active_workers
+
+    def record_task_feedback(
+        self,
+        demand: ResourceDemand | dict,
+        duration_seconds: float,
+        estimated_bytes: int,
+        active_workers_at_start: int,
+        success: bool,
+    ) -> None:
+        feedback = TaskRunFeedback(
+            demand=demand_from_value(demand),
+            duration_seconds=max(0.0, float(duration_seconds or 0.0)),
+            estimated_bytes=max(0, int(estimated_bytes or 0)),
+            active_workers_at_start=max(1, int(active_workers_at_start or 1)),
+            success=bool(success),
+        )
+        if feedback.throughput_bytes_per_second <= 0:
+            return
+        with self.cond:
+            self.feedback_window.append(feedback)
 
     def acquire_slot(self, token_cost: int = 1, demand: ResourceDemand | dict | None = None):
         demand_value = demand_from_value(demand or token_cost)
@@ -322,6 +357,7 @@ class ConcurrencyScheduler:
         avg_delta: float,
         backlog: int,
         dynamic_floor: int,
+        throughput_allows_scale_up: bool,
         scale_up_threshold: float,
         scale_up_backlog_threshold: float,
         scale_down_threshold: float,
@@ -329,7 +365,9 @@ class ConcurrencyScheduler:
         scale_down_streak_req: int,
     ) -> None:
         near_capacity = self.active_io_tokens >= max(1, self.io_limit - 1)
-        if avg_delta < scale_up_threshold or (backlog > self.io_limit * 2 and avg_delta < scale_up_backlog_threshold):
+        if throughput_allows_scale_up and (
+            avg_delta < scale_up_threshold or (backlog > self.io_limit * 2 and avg_delta < scale_up_backlog_threshold)
+        ):
             self.io_scale_up_streak += 1
             self.io_scale_down_streak = 0
             self.scale_up_streak = self.io_scale_up_streak
@@ -391,3 +429,22 @@ class ConcurrencyScheduler:
 
     def _refresh_current_limit_locked(self) -> None:
         self.current_limit = max(1, min(self.max_workers, max(self.cpu_limit, self.io_limit, self.memory_limit)))
+
+    def _throughput_allows_scale_up_locked(self) -> bool:
+        if len(self.feedback_window) < self.feedback_window_size:
+            return True
+        samples = [sample for sample in self.feedback_window if sample.success and sample.throughput_bytes_per_second > 0]
+        if len(samples) < self.feedback_window_size:
+            return True
+        midpoint = len(samples) // 2
+        previous = samples[:midpoint]
+        recent = samples[midpoint:]
+        previous_throughput = sum(item.throughput_bytes_per_second for item in previous) / len(previous)
+        recent_throughput = sum(item.throughput_bytes_per_second for item in recent) / len(recent)
+        previous_workers = sum(item.active_workers_at_start for item in previous) / len(previous)
+        recent_workers = sum(item.active_workers_at_start for item in recent) / len(recent)
+        if recent_workers <= previous_workers:
+            return True
+        previous_total_throughput = previous_throughput * previous_workers
+        recent_total_throughput = recent_throughput * recent_workers
+        return recent_total_throughput >= previous_total_throughput * self.throughput_regression_ratio
