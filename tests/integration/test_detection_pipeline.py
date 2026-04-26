@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 
 from smart_unpacker.coordinator.runner import PipelineRunner
+from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.rename.scheduler import RenameScheduler
@@ -14,7 +15,7 @@ from tests.helpers.detection_config import with_detection_pipeline
 
 
 def minimal_config():
-    return with_detection_pipeline({
+    return normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "1",
         "post_extract": {
@@ -30,7 +31,7 @@ def minimal_config():
             "enabled": True,
             "extension_score_groups": [{"score": 5, "extensions": [".zip"]}],
         }
-    ])
+    ]))
 
 
 class DetectionPipelineTests(unittest.TestCase):

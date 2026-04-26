@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from smart_unpacker.coordinator.runner import PipelineRunner
+from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.coordinator.scanner import ScanOrchestrator
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
@@ -35,7 +36,7 @@ class PressureCase:
 
 
 def pressure_config(passwords: list[str] | None = None) -> dict:
-    return with_detection_pipeline({
+    return normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "1",
         "post_extract": {
@@ -58,7 +59,7 @@ def pressure_config(passwords: list[str] | None = None) -> dict:
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
-    ])
+    ]))
 
 
 def timed(factory: Callable[[], ArchiveCase]) -> tuple[ArchiveCase, float]:

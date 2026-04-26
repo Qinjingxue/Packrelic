@@ -1,11 +1,14 @@
 from typing import Any
 
-from smart_unpacker.config.shortcuts import normalize_directory_scan_mode
+from smart_unpacker.config.schema import normalize_config_value
+from smart_unpacker.filesystem.config_fields import (
+    DIRECTORY_SCAN_CURRENT_DIR_ONLY,
+    DIRECTORY_SCAN_MODES,
+    DIRECTORY_SCAN_RECURSIVE,
+)
 
 
-DIRECTORY_SCAN_RECURSIVE = "recursive"
-DIRECTORY_SCAN_CURRENT_DIR_ONLY = "current_dir_only"
-DIRECTORY_SCAN_MODES = {DIRECTORY_SCAN_RECURSIVE, DIRECTORY_SCAN_CURRENT_DIR_ONLY}
+DIRECTORY_SCAN_MODE_PATH = ("filesystem", "directory_scan_mode")
 
 
 def detection_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -35,7 +38,9 @@ def filesystem_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def directory_scan_mode(config: dict[str, Any]) -> str:
     value = filesystem_config(config).get("directory_scan_mode")
-    return normalize_directory_scan_mode(value)
+    if value in DIRECTORY_SCAN_MODES:
+        return value
+    return normalize_config_value(DIRECTORY_SCAN_MODE_PATH, value)
 
 
 def scan_filters_config(config: dict[str, Any]) -> list[dict[str, Any]]:

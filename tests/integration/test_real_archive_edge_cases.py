@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from smart_unpacker.coordinator.runner import PipelineRunner
+from smart_unpacker.config.schema import normalize_config
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.tool_config import get_optional_rar, require_7z
@@ -15,7 +16,7 @@ FACTORY = ArchiveFixtureFactory()
 
 
 def edge_config(passwords: list[str] | None = None) -> dict:
-    return with_detection_pipeline({
+    return normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "1",
         "post_extract": {
@@ -34,11 +35,11 @@ def edge_config(passwords: list[str] | None = None) -> dict:
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
-    ])
+    ]))
 
 
 def detection_disabled_config(passwords: list[str] | None = None) -> dict:
-    return {
+    return normalize_config({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "1",
         "post_extract": {
@@ -56,7 +57,7 @@ def detection_disabled_config(passwords: list[str] | None = None) -> dict:
                 "confirmation": [],
             },
         },
-    }
+    })
 
 
 def run_pipeline(target: Path, passwords: list[str] | None = None):

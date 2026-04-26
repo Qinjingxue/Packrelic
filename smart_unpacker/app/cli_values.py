@@ -1,6 +1,6 @@
 import argparse
 
-from smart_unpacker.config.shortcuts import normalize_archive_cleanup_mode, normalize_recursive_extract
+from smart_unpacker.config.schema import normalize_config_value
 
 
 def parse_non_negative_int(value: str) -> int:
@@ -24,7 +24,7 @@ def parse_bool_value(value: str) -> bool:
 
 def parse_recursive_extract_value(value: str):
     try:
-        normalize_recursive_extract(value)
+        normalize_config_value(("recursive_extract",), value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
     return str(value).strip()
@@ -33,7 +33,7 @@ def parse_recursive_extract_value(value: str):
 def parse_archive_cleanup_value(value: str) -> str:
     raw = str(value).strip().lower()
     try:
-        normalize_archive_cleanup_mode(raw)
+        normalize_config_value(("post_extract", "archive_cleanup_mode"), raw)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
     return raw

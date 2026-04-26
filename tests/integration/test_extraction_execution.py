@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from smart_unpacker.coordinator.output_scan import OutputScanPolicy
+from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
@@ -12,14 +13,14 @@ from tests.helpers.detection_config import with_detection_pipeline
 
 
 def runner_config():
-    return with_detection_pipeline({
+    return normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
         "recursive_extract": "1",
         "post_extract": {
             "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
         },
-    })
+    }))
 
 
 class FakePasswordResolver:

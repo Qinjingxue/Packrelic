@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from smart_unpacker.config.detection_view import DIRECTORY_SCAN_MODES, directory_scan_mode, rule_pipeline_config, scan_filters_config
-from smart_unpacker.config.shortcuts import normalize_archive_cleanup_mode, normalize_recursive_extract
+from smart_unpacker.config.schema import ConfigSchemaError, normalize_config, validate_external_config
 from smart_unpacker.support.json_format import load_json_file
 from smart_unpacker.support.resources import candidate_resource_paths, dedupe_paths, first_existing_path
 
@@ -28,15 +28,9 @@ def _first_existing_config(filename: str) -> Path | None:
 
 
 def _validate_pipeline(config: dict[str, Any]):
-    try:
-        normalize_recursive_extract(config.get("recursive_extract"))
-    except ValueError as exc:
-        raise ConfigError(str(exc)) from exc
-    post_extract = config.get("post_extract") if isinstance(config.get("post_extract"), dict) else {}
-    try:
-        normalize_archive_cleanup_mode(post_extract.get("archive_cleanup_mode"))
-    except ValueError as exc:
-        raise ConfigError(str(exc)) from exc
+    shortcut_errors = validate_external_config(config)
+    if shortcut_errors:
+        raise ConfigError("; ".join(shortcut_errors))
 
     filesystem = config.get("filesystem")
     if not isinstance(filesystem, dict):
@@ -83,4 +77,7 @@ def load_config() -> dict[str, Any]:
 
     config = _load_json(config_path)
     _validate_pipeline(config)
-    return config
+    try:
+        return normalize_config(config)
+    except ConfigSchemaError as exc:
+        raise ConfigError(str(exc)) from exc

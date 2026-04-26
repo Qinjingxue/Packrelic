@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from smart_unpacker.coordinator.reporting import RunReporter
+from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.postprocess.actions import PostProcessActions
 from tests.helpers.assertions import assert_case_expectations
 from tests.helpers.case_loader import case_id, load_json_cases
@@ -27,7 +28,7 @@ def run_postprocess_action(act: dict, workspace: Path):
             [str(workspace / part) for part in archive_parts]
             for archive_parts in act.get("archives", [])
         ]
-        config = {"post_extract": {"archive_cleanup_mode": act.get("mode", "d")}}
+        config = normalize_config({"post_extract": {"archive_cleanup_mode": act.get("mode", "d")}})
         PostProcessActions(config).apply(
             cleanup_archives=True,
             flatten_outputs=False,
@@ -35,7 +36,7 @@ def run_postprocess_action(act: dict, workspace: Path):
         )
         return
     if action_type == "flatten":
-        PostProcessActions({}).apply(
+        PostProcessActions(normalize_config({})).apply(
             cleanup_archives=False,
             flatten_outputs=True,
             flatten_targets=[str(workspace / act["target"])],

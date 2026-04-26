@@ -93,6 +93,7 @@ contracts
 | ---- | -------- | ---- |
 | CLI | `smart_unpacker.app.cli.main` | CLI 主入口。 |
 | 配置 | `config.loader.load_config` | 读取主配置。 |
+| 配置 | `config.schema` | 外部配置字段声明发现、校验和归一化。 |
 | 配置 | `config.payload_io` | 读取、写出、展示配置 payload。 |
 | 配置 | `config.detection_view` | detection 需要的配置选择器。 |
 | 检测 | `detection.DetectionScheduler` | 构建候选、补齐 facts、执行规则判断。 |
@@ -622,13 +623,17 @@ postprocess/internal/
 放置：
 
 - 默认配置：`smart_unpacker_config.json`
+- 外部配置字段声明：字段所属领域的轻量 `config_fields.py`
+- 字段发现和归一化入口：`config.schema`
 - 读取：`config.loader`
 - 领域视图：必要时新增或扩展 `config.*_view.py`
-- 校验：`config.config_validator` 或领域自带 validator
+- 校验：普通外部字段走 `config.schema`；规则插件字段走领域自带 validator
 - 文档：`docs/configuration.md`
 
 要求：
 
+- 外部配置语法、默认值和归一化函数必须在一个 `ConfigField` 声明里完成。
+- 领域模块可以声明自己的配置字段，但业务运行时应消费 `load_config()` 或 `normalize_config()` 后的内部配置形状。
 - 领域模块不要直接到处写 `config.get(...).get(...)` selector。
 - 如果多个模块需要同一段配置，抽成 config view。
 

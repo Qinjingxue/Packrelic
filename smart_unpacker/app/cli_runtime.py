@@ -4,6 +4,7 @@ from typing import Any
 
 from smart_unpacker.app.cli_constants import EXIT_USAGE
 from smart_unpacker.app.cli_types import CliCommandResult, CliPasswordSummary
+from smart_unpacker.config.schema import normalize_config_value
 from smart_unpacker.config.detection_view import directory_scan_mode, rule_pipeline_config, scan_filter_config
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
 from smart_unpacker.passwords import dedupe_passwords, get_builtin_passwords, read_password_file
@@ -112,14 +113,17 @@ def apply_runtime_config_overrides(config: dict, args) -> dict:
     overrides = {}
     if getattr(args, "recursive_extract", None) is not None:
         overrides["recursive_extract"] = args.recursive_extract
-        config["recursive_extract"] = args.recursive_extract
+        config["recursive_extract"] = normalize_config_value(("recursive_extract",), args.recursive_extract)
     if getattr(args, "scheduler_profile", None) is not None:
         overrides["scheduler_profile"] = args.scheduler_profile
         performance = config.setdefault("performance", {})
         performance["scheduler_profile"] = args.scheduler_profile
     if getattr(args, "archive_cleanup_mode", None) is not None:
         overrides["archive_cleanup_mode"] = args.archive_cleanup_mode
-        config.setdefault("post_extract", {})["archive_cleanup_mode"] = args.archive_cleanup_mode
+        config.setdefault("post_extract", {})["archive_cleanup_mode"] = normalize_config_value(
+            ("post_extract", "archive_cleanup_mode"),
+            args.archive_cleanup_mode,
+        )
     if getattr(args, "flatten_single_directory", None) is not None:
         overrides["flatten_single_directory"] = args.flatten_single_directory
         config.setdefault("post_extract", {})["flatten_single_directory"] = args.flatten_single_directory
