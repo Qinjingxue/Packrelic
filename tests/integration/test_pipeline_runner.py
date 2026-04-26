@@ -7,6 +7,22 @@ from tests.helpers.detection_config import with_detection_pipeline
 from tests.helpers.fs_builder import make_zip
 
 
+def test_pipeline_runner_passes_performance_scheduler_overrides():
+    config = normalize_config(with_detection_pipeline({
+        "recursive_extract": "1",
+        "performance": {
+            "scheduler_profile": "auto",
+            "max_extract_task_seconds": 1800,
+            "process_no_progress_timeout_seconds": 180,
+        },
+    }))
+
+    runner = PipelineRunner(config)
+
+    assert runner.extractor.scheduler_config["max_extract_task_seconds"] == 1800
+    assert runner.extractor.scheduler_config["process_no_progress_timeout_seconds"] == 180
+
+
 def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path, monkeypatch):
     archive = tmp_path / "payload.zip"
     archive.write_bytes(make_zip({"inside.txt": "hello"}))

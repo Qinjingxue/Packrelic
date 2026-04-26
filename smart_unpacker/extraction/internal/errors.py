@@ -44,6 +44,61 @@ def has_archive_damage_signals(err_text: str) -> bool:
     )
 
 
+def has_transient_system_signals(err_text: str) -> bool:
+    err_lower = _norm(err_text)
+    return any(
+        marker in err_lower
+        for marker in (
+            "no space",
+            "write error",
+            "disk full",
+            "not enough space",
+            "sharing violation",
+            "access denied",
+            "permission denied",
+            "being used by another process",
+            "process cannot access the file",
+            "cannot create output directory",
+            "device is not ready",
+            "i/o error",
+            "io error",
+            "resource temporarily unavailable",
+            "too many open files",
+            "7z process failed to start",
+            "7z process timed out",
+            "7z process made no observable progress",
+        )
+    )
+
+
+def should_retry_extract_failure(
+    run_result: Optional[subprocess.CompletedProcess],
+    err_text: str,
+    archive: str = None,
+    is_split_archive: bool = False,
+) -> bool:
+    err_lower = _norm(err_text)
+
+    if has_definite_wrong_password(err_lower):
+        return False
+    if has_archive_damage_signals(err_lower):
+        return False
+
+    if has_transient_system_signals(err_lower):
+        return True
+
+    if not run_result:
+        return False
+
+    code = run_result.returncode
+    if code in (-100, -101, -102, 8):
+        return True
+    if code is not None and code < 0:
+        return True
+
+    return False
+
+
 def classify_extract_error(
     run_result: Optional[subprocess.CompletedProcess],
     err_text: str,
@@ -78,6 +133,14 @@ def classify_extract_error(
 
     if run_result:
         code = run_result.returncode
+        if code == -100:
+            return "7z进程启动失败"
+        if code == -101:
+            return "7z进程超时"
+        if code == -102:
+            return "7z进程无进展"
+        if code is not None and code < 0:
+            return "7z进程异常退出或被终止"
         if code == 1:
             error_msg = "警告 (文件被占用或部分失败)"
         elif code == 2:
@@ -88,6 +151,8 @@ def classify_extract_error(
             error_msg = "内存/磁盘空间不足"
         elif code == 255:
             error_msg = "用户中断"
+        elif code not in (None, 0):
+            error_msg = f"7z进程异常退出 (退出码 {code})"
 
     return error_msg
 

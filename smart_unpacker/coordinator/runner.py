@@ -32,12 +32,14 @@ class PipelineRunner:
         self.postprocess_actions = PostProcessActions(config, self.context, language=self.language)
         self.space_guard = ExtractionSpaceGuard(self.context, self.postprocess_actions)
         self.disk_monitor = None
+        performance_config = config.get("performance", {}) if isinstance(config.get("performance"), dict) else {}
         self.extractor = ExtractionScheduler(
             cli_passwords=config.get("user_passwords", []),
             builtin_passwords=config.get("builtin_passwords", []),
             ensure_space=self.ensure_space,
             max_retries=config.get("max_retries", 3),
-            scheduler_profile=config.get("performance", {}).get("scheduler_profile", "auto"),
+            scheduler_profile=performance_config.get("scheduler_profile", "auto"),
+            scheduler_overrides=performance_config,
         )
         self.output_scan_policy = OutputScanPolicy(config)
         

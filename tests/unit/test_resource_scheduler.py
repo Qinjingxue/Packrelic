@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.internal.concurrency import ConcurrencyScheduler
+from smart_unpacker.extraction.internal.errors import classify_extract_error, should_retry_extract_failure
 from smart_unpacker.extraction.internal.executor import TaskExecutor
 from smart_unpacker.extraction.internal.resource_model import build_resource_profile_key, estimate_resource_demand
 
@@ -446,3 +447,24 @@ def test_profile_calibration_ignores_corrupt_project_cache(tmp_path):
     )
 
     assert scheduler.profile_adjustments == {}
+
+
+def test_extract_error_classifies_process_abnormal_conditions():
+    assert classify_extract_error(SimpleNamespace(returncode=-100), "") == "7z进程启动失败"
+    assert classify_extract_error(SimpleNamespace(returncode=-101), "") == "7z进程超时"
+    assert classify_extract_error(SimpleNamespace(returncode=-102), "") == "7z进程无进展"
+    assert classify_extract_error(SimpleNamespace(returncode=-9), "") == "7z进程异常退出或被终止"
+    assert classify_extract_error(SimpleNamespace(returncode=123), "") == "7z进程异常退出 (退出码 123)"
+
+
+def test_extract_retry_policy_only_retries_transient_failures():
+    assert should_retry_extract_failure(
+        SimpleNamespace(returncode=-102),
+        "7z process made no observable progress",
+    ) is True
+    assert should_retry_extract_failure(SimpleNamespace(returncode=8), "write error") is True
+    assert should_retry_extract_failure(SimpleNamespace(returncode=1), "sharing violation") is True
+
+    assert should_retry_extract_failure(SimpleNamespace(returncode=2), "headers error") is False
+    assert should_retry_extract_failure(SimpleNamespace(returncode=2), "missing volume") is False
+    assert should_retry_extract_failure(SimpleNamespace(returncode=2), "wrong password") is False

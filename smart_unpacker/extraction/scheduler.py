@@ -2,13 +2,14 @@ import os
 import shutil
 import subprocess
 import inspect
+import time
 from typing import Callable, Optional
 
 import psutil
 
 from smart_unpacker.extraction.internal.concurrency import ConcurrencyScheduler, build_scheduler_profile_config, resolve_max_workers
 from smart_unpacker.extraction.internal.executor import TaskExecutor
-from smart_unpacker.extraction.internal.errors import classify_extract_error
+from smart_unpacker.extraction.internal.errors import classify_extract_error, should_retry_extract_failure
 from smart_unpacker.extraction.internal.metadata import ArchiveMetadataScanner
 from smart_unpacker.extraction.internal.output_paths import default_output_dir_for_task
 from smart_unpacker.extraction.internal.password_manager import ArchivePasswordTester
@@ -31,6 +32,7 @@ class ExtractionScheduler:
         ensure_space: Optional[Callable[[int], bool]] = None,
         max_retries: int = 3,
         scheduler_profile: str | None = "auto",
+        scheduler_overrides: dict | None = None,
         max_workers: int | None = None,
     ):
         self.password_store = PasswordStore.from_sources(
@@ -46,6 +48,12 @@ class ExtractionScheduler:
         self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)
         self.scheduler_config = build_scheduler_profile_config(scheduler_profile)
+        if scheduler_overrides:
+            self.scheduler_config.update({
+                key: value
+                for key, value in scheduler_overrides.items()
+                if key != "scheduler_profile" and value is not None
+            })
         self.max_workers = max(1, max_workers or resolve_max_workers())
 
     @staticmethod
@@ -146,6 +154,10 @@ class ExtractionScheduler:
             if not self.ensure_space(5):
                 shutil.rmtree(out_dir, ignore_errors=True)
                 return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except Exception as exc:
+                return self._failed(archive, out_dir, all_parts, f"目录创建失败: {exc}")
 
             staged = self.rename_scheduler.normalize_archive_paths(archive, all_parts, startupinfo=startupinfo)
             run_archive = staged.archive
@@ -203,12 +215,25 @@ class ExtractionScheduler:
             finally:
                 self.rename_scheduler.cleanup_normalized_split_group(staged)
 
-            if run_result and ("no space" in err or "write error" in err or run_result.returncode == 8):
+            if run_result and should_retry_extract_failure(
+                run_result,
+                err,
+                archive=archive,
+                is_split_archive=is_split,
+            ) and retry_count + 1 < self.max_retries:
                 retry_count += 1
-                if self.ensure_space(10):
-                    continue
+                if ("no space" in err or "write error" in err or run_result.returncode == 8) and not self.ensure_space(10):
+                    shutil.rmtree(out_dir, ignore_errors=True)
+                    return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
+                shutil.rmtree(out_dir, ignore_errors=True)
+                backoff_seconds = min(2.0, 0.5 * (2 ** (retry_count - 1)))
+                print(f"[EXTRACT] 临时失败，准备第 {retry_count + 1}/{self.max_retries} 次尝试: {archive}")
+                time.sleep(backoff_seconds)
+                continue
 
             error_msg = classify_extract_error(run_result or test_result, err, archive=archive, is_split_archive=is_split)
+            if retry_count:
+                error_msg = f"{error_msg}（已重试 {retry_count} 次）"
             print(f"[EXTRACT] 失败: {archive} (错误: {error_msg})")
             shutil.rmtree(out_dir, ignore_errors=True)
             return self._failed(archive, out_dir, run_parts, error_msg)
@@ -242,15 +267,18 @@ class ExtractionScheduler:
                 stdin=subprocess.DEVNULL,
             )
 
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            errors="replace",
-            startupinfo=startupinfo,
-            stdin=subprocess.DEVNULL,
-        )
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                startupinfo=startupinfo,
+                stdin=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            return subprocess.CompletedProcess(cmd, -100, "", f"7z process failed to start: {exc}")
         stdout, stderr = self._communicate_observed_process(process, runtime_scheduler, task)
         return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
@@ -261,9 +289,13 @@ class ExtractionScheduler:
         task: ArchiveTask,
     ) -> tuple[str, str]:
         interval = max(0.1, float(self.scheduler_config.get("process_sample_interval_ms", 500) or 500) / 1000.0)
+        max_task_seconds = max(0.0, float(self.scheduler_config.get("max_extract_task_seconds", 0) or 0))
+        no_progress_timeout = max(0.0, float(self.scheduler_config.get("process_no_progress_timeout_seconds", 0) or 0))
         profile_key = task_profile_key(task)
         ps_process = None
         last_io_bytes = 0
+        started_at = time.monotonic()
+        last_progress_at = started_at
         try:
             ps_process = psutil.Process(process.pid)
             ps_process.cpu_percent(interval=None)
@@ -279,7 +311,12 @@ class ExtractionScheduler:
             try:
                 return process.communicate(timeout=interval)
             except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                if max_task_seconds and now - started_at > max_task_seconds:
+                    return self._terminate_observed_process(process, -101, "7z process timed out")
                 if ps_process is None:
+                    if no_progress_timeout and now - last_progress_at > no_progress_timeout:
+                        return self._terminate_observed_process(process, -102, "7z process made no observable progress")
                     continue
                 try:
                     cpu_percent = ps_process.cpu_percent(interval=None)
@@ -288,16 +325,37 @@ class ExtractionScheduler:
                     now_io_bytes = int(io_counters.read_bytes + io_counters.write_bytes)
                     io_delta = max(0, now_io_bytes - last_io_bytes)
                     last_io_bytes = now_io_bytes
+                    if io_delta > 0 or cpu_percent > 0.1:
+                        last_progress_at = now
                     runtime_scheduler.record_process_sample(
                         cpu_percent=cpu_percent,
                         memory_bytes=memory_bytes,
                         io_bytes=io_delta,
                         profile_key=profile_key,
                     )
+                    if no_progress_timeout and now - last_progress_at > no_progress_timeout:
+                        return self._terminate_observed_process(process, -102, "7z process made no observable progress")
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     ps_process = None
                 except Exception:
                     continue
+
+    def _terminate_observed_process(
+        self,
+        process: subprocess.Popen,
+        returncode: int,
+        message: str,
+    ) -> tuple[str, str]:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=2.0)
+        except Exception:
+            stdout, stderr = "", ""
+        process.returncode = returncode
+        return stdout or "", f"{stderr or ''}\n{message}".strip()
 
     def _resolve_split_entry(
         self,

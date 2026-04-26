@@ -40,7 +40,9 @@
     ]
   },
   "performance": {
-    "scheduler_profile": "auto"
+    "scheduler_profile": "auto",
+    "max_extract_task_seconds": 1800,
+    "process_no_progress_timeout_seconds": 180
   },
   "detection": {
     "fact_collectors": [

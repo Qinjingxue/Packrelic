@@ -20,6 +20,9 @@ SCHEDULER_PROFILES = {
     "conservative": {
         "initial_concurrency_limit": 4,
         "poll_interval_ms": 1000,
+        "process_sample_interval_ms": 500,
+        "max_extract_task_seconds": 0,
+        "process_no_progress_timeout_seconds": 0,
         "scale_up_threshold_mb_s": 20,
         "scale_up_backlog_threshold_mb_s": 40,
         "scale_down_threshold_mb_s": 140,
@@ -33,6 +36,9 @@ SCHEDULER_PROFILES = {
     "aggressive": {
         "initial_concurrency_limit": 6,
         "poll_interval_ms": 500,
+        "process_sample_interval_ms": 500,
+        "max_extract_task_seconds": 0,
+        "process_no_progress_timeout_seconds": 0,
         "scale_up_threshold_mb_s": 80,
         "scale_up_backlog_threshold_mb_s": 160,
         "scale_down_threshold_mb_s": 400,
