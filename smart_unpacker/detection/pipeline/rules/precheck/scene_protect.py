@@ -7,7 +7,7 @@ from smart_unpacker.detection.pipeline.rules.registry import register_rule
 from smart_unpacker.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
 
 
-@register_rule(name="scene_protect", layer="hard_stop")
+@register_rule(name="scene_protect", layer="precheck")
 class SceneProtectRule(RuleBase):
     required_facts = {
         "scene.context",
@@ -25,7 +25,7 @@ class SceneProtectRule(RuleBase):
         "protect_weak_matches": {
             "type": "bool",
             "required": False,
-            "description": "Whether weak scene matches can hard-stop protected runtime resource archives.",
+            "description": "Whether weak scene matches can reject protected runtime resource archives.",
         },
         "scene_context_max_parent_depth": {
             "type": "int",
@@ -43,6 +43,6 @@ class SceneProtectRule(RuleBase):
             return RuleEffect.pass_()
 
         scene_type = facts.get("scene.scene_type") or "generic"
-        return RuleEffect.stop(
+        return RuleEffect.reject(
             reason=f"Scene Protect: {scene_type} runtime resource archive ({match_strength} match)"
         )

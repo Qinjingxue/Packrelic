@@ -1,6 +1,6 @@
 # 规则插件说明
 
-本文档描述当前版本的检测规则、Fact 采集器和处理器插件接口。项目现在以注册表和三层流水线为准：`hard_stop`、`scoring`、`confirmation`。
+本文档描述当前版本的检测规则、Fact 采集器和处理器插件接口。项目现在以注册表和三层流水线为准：`precheck`、`scoring`、`confirmation`。
 
 ## 总体流程
 
@@ -8,7 +8,7 @@
 
 1. 规则声明自己需要的 `required_facts`。
 2. 调度器按需调用 Fact 采集器、处理器或关系构建逻辑生成这些事实。
-3. 规则读取 facts 和自身配置，返回硬停止、加减分或确认结果。
+3. 规则读取 facts 和自身配置，返回预检接受/拒绝、加减分或确认结果。
 4. 最终分数和确认结果决定文件是否进入解压任务。
 
 默认配置见 `smart_unpacker_config.json` 的 `detection.rule_pipeline`。
@@ -48,7 +48,7 @@ class MyRule(RuleBase):
 
 可注册的 `layer`：
 
-- `hard_stop`：硬停止层。命中后可直接判定当前候选不应继续检测或解压，例如场景保护。黑名单和过小文件过滤属于 `filesystem.scan_filters`。
+- `precheck`：预检层。按配置顺序执行低成本终止型规则，可直接拒绝或直接接受候选，例如场景保护或高置信结构识别。黑名单和过小文件过滤属于 `filesystem.scan_filters`。
 - `scoring`：打分层。规则给候选增加或扣减分数，也可写入归一化事实。
 - `confirmation`：确认层。通常在分数处于可疑区间时调用 7-Zip 探测或测试。
 
@@ -160,7 +160,7 @@ def process_archive_identity(context):
 
 | 规则 | 层 | 作用 |
 | --- | --- | --- |
-| `scene_protect` | `hard_stop` | 保护游戏、程序等运行目录中的资源归档。 |
+| `scene_protect` | `precheck` | 保护游戏、程序等运行目录中的资源归档。 |
 | `extension` | `scoring` | 按扩展名组给候选加分。 |
 | `archive_identity` | `scoring` | 消费 `archive.identity`，根据真实内容证据加分并写入检测扩展名。 |
 | `scene_penalty` | `scoring` | 对运行目录资源、弱保护路径和常见资源文件扣分。 |

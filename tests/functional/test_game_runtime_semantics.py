@@ -12,7 +12,7 @@ from tests.helpers.fs_builder import make_zip
 
 SCENE_PROTECT_CONFIG = with_detection_pipeline({
     "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-}, hard_stop=[
+}, precheck=[
     {
         "name": "scene_protect",
         "enabled": True,

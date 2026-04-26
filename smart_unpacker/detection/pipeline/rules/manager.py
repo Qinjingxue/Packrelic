@@ -91,33 +91,53 @@ class RuleManager:
             if active_facts:
                 self.ensure_pool_facts([bag], set(active_facts), fact_configs)
 
-    def evaluate_pool(self, fact_bags: List[FactBag]) -> Dict[FactBag, RuleDecision]:
+    def _run_precheck(self, fact_bags: List[FactBag]) -> tuple[Dict[FactBag, RuleDecision], List[FactBag]]:
         decisions: Dict[FactBag, RuleDecision] = {}
         surviving = list(fact_bags)
 
-        for rule in self._prepare_rules("hard_stop"):
+        for rule in self._prepare_rules("precheck"):
             fact_configs = {fact_name: rule.config for fact_name in rule.instance.required_facts}
             self.ensure_pool_facts(surviving, rule.instance.required_facts, fact_configs)
 
             next_surviving: List[FactBag] = []
             for bag in surviving:
                 effect = rule.instance.evaluate(bag, rule.config)
-                if effect.decision == "stop":
+                if effect.decision == "reject":
                     decisions[bag] = RuleDecision(
                         should_extract=False,
                         total_score=0,
                         matched_rules=[rule.name],
                         stop_reason=effect.reason,
                         decision="not_archive",
-                        decision_stage="hard_stop",
-                        discarded_at="hard_stop",
+                        decision_stage="precheck",
+                        discarded_at="precheck",
                         deciding_rule=rule.name,
                     )
-                else:
+                elif effect.decision == "accept":
+                    decisions[bag] = RuleDecision(
+                        should_extract=True,
+                        total_score=0,
+                        matched_rules=[rule.name],
+                        stop_reason=effect.reason,
+                        decision="archive",
+                        decision_stage="precheck",
+                        discarded_at=None,
+                        deciding_rule=rule.name,
+                    )
+                elif effect.decision == "pass":
                     next_surviving.append(bag)
+                else:
+                    raise ValueError(f"Precheck rule {rule.name} returned unsupported effect: {effect.decision}")
             surviving = next_surviving
             if not surviving:
-                return decisions
+                break
+
+        return decisions, surviving
+
+    def evaluate_pool(self, fact_bags: List[FactBag]) -> Dict[FactBag, RuleDecision]:
+        decisions, surviving = self._run_precheck(fact_bags)
+        if not surviving:
+            return decisions
 
         scoring_rules = self._prepare_rules("scoring")
         self._ensure_scoring_facts(surviving, scoring_rules)

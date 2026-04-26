@@ -3,13 +3,17 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class RuleEffect:
-    decision: str  # "stop", "pass", "score"
+    decision: str  # "reject", "accept", "pass", "score"
     reason: Optional[str] = None
     score: int = 0
 
     @classmethod
-    def stop(cls, reason: str) -> "RuleEffect":
-        return cls(decision="stop", reason=reason)
+    def reject(cls, reason: str) -> "RuleEffect":
+        return cls(decision="reject", reason=reason)
+
+    @classmethod
+    def accept(cls, reason: str) -> "RuleEffect":
+        return cls(decision="accept", reason=reason)
 
     @classmethod
     def pass_(cls) -> "RuleEffect":

@@ -17,7 +17,7 @@ def test_pipeline_runner_uses_tmp_path_and_applies_success_postprocess(tmp_path,
             "archive_cleanup_mode": "delete",
             "flatten_single_directory": True,
         },
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},

@@ -6,21 +6,31 @@ from smart_unpacker.detection.pipeline.rules.registry import register_rule
 from tests.helpers.detection_config import with_detection_pipeline
 
 
-@register_rule(name="pool_blacklist_test", layer="hard_stop")
+@register_rule(name="pool_blacklist_test", layer="precheck")
 class PoolBlacklistTestRule(RuleBase):
     required_facts = {"blacklist.fact"}
 
     def evaluate(self, facts, config):
         if facts.get("file.path") == "drop":
-            return RuleEffect.stop("drop requested")
+            return RuleEffect.reject("drop requested")
         return RuleEffect.pass_()
 
 
-@register_rule(name="pool_scene_test", layer="hard_stop")
+@register_rule(name="pool_scene_test", layer="precheck")
 class PoolSceneTestRule(RuleBase):
     required_facts = {"scene.fact"}
 
     def evaluate(self, facts, config):
+        return RuleEffect.pass_()
+
+
+@register_rule(name="pool_accept_test", layer="precheck")
+class PoolAcceptTestRule(RuleBase):
+    required_facts = {"accept.fact"}
+
+    def evaluate(self, facts, config):
+        if facts.get("file.path") == "accept":
+            return RuleEffect.accept("accepted early")
         return RuleEffect.pass_()
 
 
@@ -56,10 +66,10 @@ def _bag(path: str) -> FactBag:
     return bag
 
 
-def test_pool_evaluation_filters_by_hard_stop_stage_then_collects_scoring_union(monkeypatch):
+def test_pool_evaluation_filters_by_precheck_stage_then_collects_scoring_union(monkeypatch):
     config = with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 3, "maybe_archive_threshold": 1},
-    }, hard_stop=[
+    }, precheck=[
         {"name": "pool_blacklist_test", "enabled": True},
         {"name": "pool_scene_test", "enabled": True},
     ], scoring=[
@@ -88,8 +98,8 @@ def test_pool_evaluation_filters_by_hard_stop_stage_then_collects_scoring_union(
     ]
     assert not decisions[drop].should_extract
     assert decisions[drop].matched_rules == ["pool_blacklist_test"]
-    assert decisions[drop].decision_stage == "hard_stop"
-    assert decisions[drop].discarded_at == "hard_stop"
+    assert decisions[drop].decision_stage == "precheck"
+    assert decisions[drop].discarded_at == "precheck"
     assert decisions[drop].deciding_rule == "pool_blacklist_test"
     assert decisions[keep].should_extract
     assert decisions[keep].total_score == 3
@@ -100,6 +110,42 @@ def test_pool_evaluation_filters_by_hard_stop_stage_then_collects_scoring_union(
         {"rule": "pool_score_a_test", "score": 1, "reason": "score a"},
         {"rule": "pool_score_b_test", "score": 2, "reason": "score b"},
     ]
+
+
+def test_precheck_accept_short_circuits_before_scoring(monkeypatch):
+    config = with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 3, "maybe_archive_threshold": 1},
+    }, precheck=[
+        {"name": "pool_accept_test", "enabled": True},
+        {"name": "pool_scene_test", "enabled": True},
+    ], scoring=[
+        {"name": "pool_score_a_test", "enabled": True},
+    ])
+    manager = DetectionScheduler(config)
+    calls = []
+
+    def fake_ensure_pool_facts(fact_bags, required_facts, fact_configs=None):
+        calls.append(([bag.get("file.path") for bag in fact_bags], set(required_facts)))
+        for bag in fact_bags:
+            for fact in required_facts:
+                bag.set(fact, True)
+
+    monkeypatch.setattr(manager, "_ensure_pool_facts", fake_ensure_pool_facts)
+
+    accept = _bag("accept")
+    keep = _bag("keep")
+    decisions = manager.evaluate_pool([accept, keep])
+
+    assert calls == [
+        (["accept", "keep"], {"accept.fact"}),
+        (["keep"], {"scene.fact"}),
+        (["keep"], {"score.a"}),
+    ]
+    assert decisions[accept].should_extract is True
+    assert decisions[accept].decision == "archive"
+    assert decisions[accept].decision_stage == "precheck"
+    assert decisions[accept].matched_rules == ["pool_accept_test"]
+    assert decisions[keep].decision_stage == "scoring"
 
 
 def test_confirmation_runs_only_for_maybe_score_window(monkeypatch):

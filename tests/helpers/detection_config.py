@@ -23,25 +23,25 @@ LIKELY_RESOURCE_EXTS = [
 def with_detection_pipeline(
     config: dict | None = None,
     *,
-    hard_stop: list[dict] | None = None,
+    precheck: list[dict] | None = None,
     scoring: list[dict] | None = None,
     confirmation: list[dict] | None = None,
 ) -> dict:
     result = dict(config or {})
     scan_filters = []
-    remaining_hard_stop = []
-    for rule in hard_stop or []:
+    remaining_precheck = []
+    for rule in precheck or []:
         if isinstance(rule, dict) and rule.get("name") in {"blacklist", "size_minimum"}:
             scan_filters.append(dict(rule))
         else:
-            remaining_hard_stop.append(rule)
+            remaining_precheck.append(rule)
     if scan_filters:
         filesystem = dict(result.get("filesystem") or {})
         filesystem["scan_filters"] = scan_filters
         result["filesystem"] = filesystem
     result["detection"] = {
         "rule_pipeline": {
-            "hard_stop": remaining_hard_stop,
+            "precheck": remaining_precheck,
             "scoring": [_complete_rule(rule) for rule in (scoring or [])],
             "confirmation": confirmation or [],
         }

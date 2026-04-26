@@ -139,7 +139,7 @@ python sunpack_cli.py config validate
 
 - `filesystem.directory_scan_mode`：控制扫描目标目录时是否递归进入已有子目录。
 - `filesystem.scan_filters`：在目录扫描阶段过滤黑名单路径、过小文件等明显不需要进入检测的条目。
-- `hard_stop`：场景保护等需要检测事实的硬停止规则。
+- `precheck`：场景保护、高置信快速放行等需要检测事实的预检规则。
 - `scoring`：扩展名、真实内容身份、场景扣分等打分规则。
 - `confirmation`：7-Zip 探测和测试规则。
 

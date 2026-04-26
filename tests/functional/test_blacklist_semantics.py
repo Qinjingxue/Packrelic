@@ -10,7 +10,7 @@ from tests.helpers.detection_config import with_detection_pipeline
 def scan_config(patterns=None, blocked_extensions=None):
     return with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
         {
             "name": "blacklist",
@@ -131,7 +131,7 @@ def test_scene_protect_stops_runtime_resource_archive_but_not_generic_control(tm
 
     config = with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
         {"name": "scene_protect", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
     ], scoring=[

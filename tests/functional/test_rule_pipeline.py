@@ -13,7 +13,7 @@ from tests.helpers.fs_builder import make_zip
 def _rule_pipeline_config():
     return with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, hard_stop=[
+    }, precheck=[
         {"name": "blacklist", "enabled": True, "patterns": [r"\.git", r"\.vscode"]},
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
         {

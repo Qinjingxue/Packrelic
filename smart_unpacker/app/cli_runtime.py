@@ -34,7 +34,7 @@ def build_effective_config(config: dict) -> dict[str, Any]:
                     for rule in pipeline_config.get(layer, [])
                     if isinstance(rule, dict)
                 ]
-                for layer in ("hard_stop", "scoring", "confirmation")
+                for layer in ("precheck", "scoring", "confirmation")
             }
         },
         "filesystem": {

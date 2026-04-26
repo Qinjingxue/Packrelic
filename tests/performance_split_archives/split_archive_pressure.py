@@ -46,7 +46,7 @@ def pressure_config(passwords: list[str] | None = None) -> dict:
         "builtin_passwords": [],
         "max_retries": 1,
         "performance": {"scheduler_profile": "single"},
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
         {

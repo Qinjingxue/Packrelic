@@ -68,7 +68,7 @@ def test_scene_markers_are_prefetched_once_per_directory_for_batch(tmp_path, mon
 
     monkeypatch.setattr(DirectoryScanner, "scan", counting_scan)
 
-    config = with_detection_pipeline(hard_stop=[
+    config = with_detection_pipeline(precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
         {"name": "scene_protect", "enabled": True},
     ])
@@ -96,7 +96,7 @@ def test_scene_marker_batch_collector_respects_disabled_module(tmp_path, monkeyp
     monkeypatch.setattr(DirectoryScanner, "scan", counting_scan)
 
     config = with_detection_pipeline(
-        hard_stop=[{"name": "scene_protect", "enabled": True}],
+        precheck=[{"name": "scene_protect", "enabled": True}],
     )
     config["detection"]["fact_collectors"] = [{"name": "scene_markers", "enabled": False}]
 

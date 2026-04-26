@@ -48,7 +48,7 @@ def _validate_pipeline(config: dict[str, Any]):
     pipeline = rule_pipeline_config(config)
     if not isinstance(pipeline, dict):
         raise ConfigError("Missing required config object: detection.rule_pipeline")
-    for layer in ("hard_stop", "scoring"):
+    for layer in ("precheck", "scoring"):
         rules = pipeline.get(layer)
         if not isinstance(rules, list):
             raise ConfigError(f"Missing required detection.rule_pipeline list: {layer}")

@@ -20,7 +20,7 @@ def config_with_rules(scoring):
             "archive_score_threshold": 5,
             "maybe_archive_threshold": 3,
         },
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=scoring)
 
@@ -257,7 +257,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(resource))
             config = with_detection_pipeline({
                 "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-            }, hard_stop=[
+            }, precheck=[
                 {"name": "scene_protect", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
             ], scoring=[
                 {"name": "archive_identity", "enabled": True},
@@ -305,7 +305,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             runtime.write_bytes(b"MZ")
             archive.write_bytes(b"7z\xbc\xaf\x27\x1c")
 
-            config = with_detection_pipeline(hard_stop=[
+            config = with_detection_pipeline(precheck=[
                 {"name": "scene_protect", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
             ])
 
@@ -355,7 +355,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             self.assertIn("scene_penalty", decision.matched_rules)
             self.assertTrue(bag.get("scene.is_runtime_resource_archive"))
 
-    def test_weak_scene_protected_archive_is_penalized_when_hard_stop_allows_weak_matches(self):
+    def test_weak_scene_protected_archive_is_penalized_when_precheck_allows_weak_matches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "www" / "audio").mkdir(parents=True)
@@ -367,7 +367,7 @@ class DetectionBehaviorTests(unittest.TestCase):
             bag.set("file.path", str(archive))
             config = with_detection_pipeline({
                 "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-            }, hard_stop=[
+            }, precheck=[
                 {
                     "name": "scene_protect",
                     "enabled": True,

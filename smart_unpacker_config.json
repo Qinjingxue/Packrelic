@@ -67,7 +67,7 @@
       {"name": "archive_identity", "enabled": true}
     ],
     "rule_pipeline": {
-      "hard_stop": [
+      "precheck": [
         {
           "name": "scene_protect",
           "enabled": true,

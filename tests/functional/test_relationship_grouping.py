@@ -8,7 +8,7 @@ from tests.helpers.detection_config import with_detection_pipeline
 
 SCAN_CONFIG = with_detection_pipeline({
     "thresholds": {"archive_score_threshold": 1, "maybe_archive_threshold": 1},
-}, hard_stop=[
+}, precheck=[
     {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
 ], scoring=[
     {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 1, "extensions": [".zip", ".7z", ".rar", ".001"]}]},

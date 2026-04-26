@@ -24,7 +24,7 @@ def edge_config(passwords: list[str] | None = None) -> dict:
         },
         "user_passwords": passwords or [],
         "builtin_passwords": [],
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
         {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
@@ -50,7 +50,7 @@ def detection_disabled_config(passwords: list[str] | None = None) -> dict:
             "fact_collectors": [],
             "processors": [],
             "rule_pipeline": {
-                "hard_stop": [],
+                "precheck": [],
                 "scoring": [],
                 "confirmation": [],
             },

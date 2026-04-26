@@ -58,7 +58,7 @@ class ArchiveTaskScanner:
         if self._has_enabled_modules(detector_config.get("processors")):
             return False
         pipeline = rule_pipeline_config(self.config)
-        for layer in ("hard_stop", "scoring", "confirmation"):
+        for layer in ("precheck", "scoring", "confirmation"):
             if self._has_enabled_modules(pipeline.get(layer)):
                 return False
         return True

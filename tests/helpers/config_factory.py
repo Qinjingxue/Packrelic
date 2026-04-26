@@ -8,12 +8,12 @@ from tests.helpers.detection_config import with_detection_pipeline
 CONFIGS: dict[str, dict[str, Any]] = {
     "minimal": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ]),
     "embedded_archive_loose": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
         {
@@ -28,14 +28,14 @@ CONFIGS: dict[str, dict[str, Any]] = {
     ]),
     "embedded_archive_carrier_tail": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
         {"name": "archive_identity", "enabled": True, "carrier_tail_score": 5},
     ]),
     "scene_protect_enabled": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-    }, hard_stop=[
+    }, precheck=[
         {
             "name": "scene_protect",
             "enabled": True,
@@ -55,7 +55,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
     ]),
     "archive_scan_full": with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
-    }, hard_stop=[
+    }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
         {"name": "scene_protect", "enabled": True},
     ], scoring=[

@@ -22,7 +22,7 @@ def minimal_config():
             "archive_cleanup_mode": "keep",
             "flatten_single_directory": False,
         },
-    }, hard_stop=[
+    }, precheck=[
         {"name": "blacklist", "enabled": True, "patterns": [r"\.git"]},
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[

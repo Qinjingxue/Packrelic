@@ -6,7 +6,7 @@ from smart_unpacker.detection.pipeline.rules.base import RuleBase
 class RuleRegistry:
     def __init__(self):
         self._rules: Dict[str, Dict[str, Type[RuleBase]]] = {
-            "hard_stop": {},
+            "precheck": {},
             "scoring": {},
             "confirmation": {},
         }
@@ -40,7 +40,7 @@ def discover_rules():
         return
 
     for package_name in (
-        "smart_unpacker.detection.pipeline.rules.hard_stop",
+        "smart_unpacker.detection.pipeline.rules.precheck",
         "smart_unpacker.detection.pipeline.rules.scoring",
         "smart_unpacker.detection.pipeline.rules.confirmation",
     ):
