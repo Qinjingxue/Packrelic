@@ -13,6 +13,7 @@ for package in (
     "smart_unpacker.detection.pipeline.facts.collectors",
     "smart_unpacker.detection.pipeline.processors.modules",
     "smart_unpacker.detection.pipeline.rules.hard_stop",
+    "smart_unpacker.detection.pipeline.rules.precheck",
     "smart_unpacker.detection.pipeline.rules.scoring",
     "smart_unpacker.detection.pipeline.rules.confirmation",
 ):
