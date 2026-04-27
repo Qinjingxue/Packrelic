@@ -299,8 +299,11 @@ function Build-SevenZipWrapper {
     Invoke-Native -FilePath "ctest" -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
 
     $wrapperDll = Join-Path $BuildDir "Release\sevenzip_password_tester_capi.dll"
+    $workerExe = Join-Path $BuildDir "Release\sevenzip_worker.exe"
     Assert-PathExists -LiteralPath $wrapperDll -Description "Built 7z wrapper DLL"
+    Assert-PathExists -LiteralPath $workerExe -Description "Built 7z worker executable"
     Copy-Item -LiteralPath $wrapperDll -Destination (Join-Path $ToolsRoot "sevenzip_password_tester_capi.dll") -Force
+    Copy-Item -LiteralPath $workerExe -Destination (Join-Path $ToolsRoot "sevenzip_worker.exe") -Force
 }
 
 function Test-NativeImport {
@@ -308,7 +311,7 @@ function Test-NativeImport {
 
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
-        "import smart_unpacker_native as n; assert n.native_available(); assert n.scanner_version(); assert callable(n.scan_directory_entries); assert callable(n.list_regular_files_in_directory); assert callable(n.scan_carrier_archive); assert callable(n.scan_magics_anywhere); assert callable(n.scan_zip_central_directory_names); assert callable(n.inspect_zip_eocd_structure); assert callable(n.inspect_pe_overlay_structure)"
+        "import smart_unpacker_native as n; assert n.native_available(); assert n.scanner_version(); assert callable(n.scan_directory_entries); assert callable(n.list_regular_files_in_directory); assert callable(n.scan_carrier_archive); assert callable(n.scan_magics_anywhere); assert callable(n.scan_zip_central_directory_names); assert callable(n.inspect_zip_eocd_structure); assert callable(n.inspect_pe_overlay_structure); assert callable(n.repair_read_file_range); assert callable(n.repair_concat_ranges_to_bytes); assert callable(n.repair_write_candidate); assert callable(n.repair_copy_range_to_file); assert callable(n.repair_concat_ranges_to_file); assert callable(n.repair_patch_file)"
     )
 }
 
@@ -318,6 +321,15 @@ function Test-SevenZipWrapper {
     Invoke-Native -FilePath $PythonPath -Arguments @(
         "-c",
         "from smart_unpacker.support.sevenzip_native import NativePasswordTester; tester = NativePasswordTester(); assert tester.available(), (tester.wrapper_path, tester.seven_zip_dll_path)"
+    )
+}
+
+function Test-SevenZipWorker {
+    param([string]$PythonPath)
+
+    Invoke-Native -FilePath $PythonPath -Arguments @(
+        "-c",
+        "from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path; import os; assert os.path.exists(get_sevenzip_worker_path()); assert os.path.exists(get_7z_dll_path())"
     )
 }
 
@@ -429,7 +441,7 @@ Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--upgr
 Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $requirementsPath -RequiredModules @("psutil", "send2trash") -Label "Runtime dependency"
 Install-PackageOrValidate -PythonPath $venvPython -PackageName "pytest" -ModuleName "pytest" -Label "Test dependency"
 if ($IncludeBuildDeps) {
-    Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $buildRequirementsPath -RequiredModules @("PyInstaller", "cmake") -Label "Build dependency"
+    Install-RequirementsOrValidate -PythonPath $venvPython -RequirementsFile $buildRequirementsPath -RequiredModules @("PyInstaller", "maturin", "cmake") -Label "Build dependency"
 }
 
 $env:Path = "$venvScripts;$env:Path"
@@ -454,6 +466,7 @@ Ensure-Bundled7ZipAssets -ToolsRoot $toolsRoot -LicenseDestinationPath $sevenZip
 $cmakeCommand = Ensure-CMake -PythonPath $venvPython -VenvScripts $venvScripts
 Build-SevenZipWrapper -CMakeCommand $cmakeCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath
 Test-SevenZipWrapper -PythonPath $venvPython
+Test-SevenZipWorker -PythonPath $venvPython
 
 Write-Step "Verifying local source execution"
 Invoke-Native -FilePath $venvPython -Arguments @("sunpack_cli.py", "--help")
