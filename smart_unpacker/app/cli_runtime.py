@@ -83,12 +83,21 @@ def collect_cli_passwords(
     if getattr(args, "password_file", None):
         passwords.extend(read_password_file(args.password_file))
     if getattr(args, "prompt_passwords", False):
-        print(prompt_text, flush=True)
-        while True:
-            line = input(input_prompt)
-            if not line:
-                break
-            passwords.append(line)
+        passwords.extend(prompt_for_passwords(prompt_text=prompt_text, input_prompt=input_prompt))
+    return dedupe_passwords(passwords)
+
+
+def prompt_for_passwords(
+    prompt_text: str = "[CLI] Enter passwords, one per line. Submit an empty line to finish.",
+    input_prompt: str = "password> ",
+) -> list[str]:
+    passwords = []
+    print(prompt_text, flush=True)
+    while True:
+        line = input(input_prompt)
+        if not line:
+            break
+        passwords.append(line)
     return dedupe_passwords(passwords)
 
 
