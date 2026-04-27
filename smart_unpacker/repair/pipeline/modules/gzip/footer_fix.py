@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import struct
+import zlib
+
+from smart_unpacker.repair.diagnosis import RepairDiagnosis
+from smart_unpacker.repair.job import RepairJob
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
+from smart_unpacker.repair.pipeline.registry import register_repair_module
+from smart_unpacker.repair.result import RepairResult
+
+
+class GzipFooterFix:
+    spec = RepairModuleSpec(
+        name="gzip_footer_fix",
+        formats=("gzip", "gz"),
+        categories=("content_recovery", "boundary_repair"),
+        stage="targeted",
+    )
+
+    def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
+        flags = set(job.damage_flags)
+        if flags & {"gzip_footer_bad", "crc_error", "checksum_error", "trailing_junk"}:
+            return 0.88
+        if "content_recovery" in diagnosis.categories or "boundary_repair" in diagnosis.categories:
+            return 0.62
+        return 0.0
+
+    def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
+        data = load_source_bytes(job.source_input)
+        header_end = _gzip_header_end(data)
+        if header_end is None or len(data) < header_end + 8:
+            return RepairResult(status="unrepairable", confidence=0.0, format="gzip", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="invalid gzip header")
+        decompressor = zlib.decompressobj(-15)
+        try:
+            payload = decompressor.decompress(data[header_end:-8]) + decompressor.flush()
+        except zlib.error as exc:
+            return RepairResult(status="unrepairable", confidence=0.0, format="gzip", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message=f"deflate stream could not be decoded: {exc}")
+        consumed = len(data[header_end:-8]) - len(decompressor.unused_data)
+        stream_end = header_end + consumed
+        footer = struct.pack("<II", zlib.crc32(payload) & 0xFFFFFFFF, len(payload) & 0xFFFFFFFF)
+        repaired = data[:stream_end] + footer
+        if repaired == data:
+            return RepairResult(status="unrepairable", confidence=0.0, format="gzip", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="gzip footer already matches decoded payload")
+        path = write_candidate(repaired, workspace, "gzip_footer_fix.gz")
+        return RepairResult(
+            status="repaired",
+            confidence=0.88,
+            format="gzip",
+            repaired_input={"kind": "file", "path": path, "format_hint": "gzip"},
+            actions=["decode_deflate_payload", "rewrite_gzip_footer"],
+            damage_flags=list(job.damage_flags),
+            workspace_paths=[path],
+            module_name=self.spec.name,
+            diagnosis=diagnosis.as_dict(),
+        )
+
+
+def _gzip_header_end(data: bytes) -> int | None:
+    if len(data) < 10 or data[:2] != b"\x1f\x8b" or data[2] != 8:
+        return None
+    flags = data[3]
+    offset = 10
+    if flags & 0x04:
+        if offset + 2 > len(data):
+            return None
+        extra_len = struct.unpack_from("<H", data, offset)[0]
+        offset += 2 + extra_len
+    if flags & 0x08:
+        offset = _skip_c_string(data, offset)
+        if offset is None:
+            return None
+    if flags & 0x10:
+        offset = _skip_c_string(data, offset)
+    if offset is None:
+        return None
+    if flags & 0x02:
+        offset += 2
+    return offset if offset <= len(data) else None
+
+
+def _skip_c_string(data: bytes, offset: int) -> int | None:
+    end = data.find(b"\0", offset)
+    return None if end < 0 else end + 1
+
+
+register_repair_module(GzipFooterFix())

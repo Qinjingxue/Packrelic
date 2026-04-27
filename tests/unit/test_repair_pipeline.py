@@ -1,7 +1,13 @@
 from dataclasses import dataclass
+import gzip
+import io
+import lzma
+import tarfile
 import struct
 import zipfile
 import zlib
+
+import pytest
 
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from smart_unpacker.repair import RepairJob, RepairScheduler
@@ -167,6 +173,108 @@ def test_zip_data_descriptor_recovery_supports_zip64_descriptor(tmp_path):
         assert archive.read("zip64-dd.txt") == b"zip64 descriptor payload"
 
 
+def test_zip_eocd_repair_rebuilds_missing_eocd_from_central_directory(tmp_path):
+    source = tmp_path / "missing_eocd.zip"
+    _write_zip(source, {"payload.txt": b"zip payload"})
+    data = source.read_bytes()
+    source.write_bytes(data[:data.rfind(b"PK\x05\x06")])
+
+    result = _run_repair(tmp_path, "zip_eocd_repair", "zip", source, ["eocd_bad", "central_directory_bad"])
+
+    assert result.ok is True
+    with zipfile.ZipFile(result.repaired_input["path"]) as archive:
+        assert archive.read("payload.txt") == b"zip payload"
+
+
+def test_zip_central_directory_offset_fix_rewrites_bad_eocd_offset(tmp_path):
+    source = tmp_path / "bad_cd_offset.zip"
+    _write_zip(source, {"payload.txt": b"zip payload"})
+    data = bytearray(source.read_bytes())
+    eocd_offset = bytes(data).rfind(b"PK\x05\x06")
+    struct.pack_into("<I", data, eocd_offset + 16, 0)
+    source.write_bytes(bytes(data))
+
+    result = _run_repair(tmp_path, "zip_central_directory_offset_fix", "zip", source, ["central_directory_offset_bad"])
+
+    assert result.ok is True
+    with zipfile.ZipFile(result.repaired_input["path"]) as archive:
+        assert archive.read("payload.txt") == b"zip payload"
+
+
+def test_zip_trailing_junk_trim_removes_bytes_after_eocd(tmp_path):
+    source = tmp_path / "zip_tail.zip"
+    _write_zip(source, {"payload.txt": b"zip payload"})
+    original = source.read_bytes()
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_repair(tmp_path, "zip_trailing_junk_trim", "zip", source, ["trailing_junk"])
+
+    assert result.ok is True
+    assert result.repaired_input["path"]
+    assert len(open(result.repaired_input["path"], "rb").read()) == len(original)
+
+
+def test_tar_header_checksum_fix_rewrites_bad_checksum(tmp_path):
+    source = tmp_path / "bad_checksum.tar"
+    source.write_bytes(_tar_bytes({"payload.txt": b"tar payload"}))
+    data = bytearray(source.read_bytes())
+    data[148:156] = b"000000\0 "
+    source.write_bytes(bytes(data))
+
+    result = _run_repair(tmp_path, "tar_header_checksum_fix", "tar", source, ["tar_checksum_bad"])
+
+    assert result.ok is True
+    with tarfile.open(result.repaired_input["path"]) as archive:
+        assert archive.extractfile("payload.txt").read() == b"tar payload"
+
+
+def test_tar_trailing_zero_block_repair_appends_missing_end_blocks(tmp_path):
+    source = tmp_path / "missing_zeros.tar"
+    full = _tar_bytes({"payload.txt": b"tar payload"})
+    source.write_bytes(full[:1024])
+
+    result = _run_repair(tmp_path, "tar_trailing_zero_block_repair", "tar", source, ["missing_end_block"])
+
+    assert result.ok is True
+    with tarfile.open(result.repaired_input["path"]) as archive:
+        assert archive.extractfile("payload.txt").read() == b"tar payload"
+
+
+def test_gzip_footer_fix_rewrites_crc_and_isize(tmp_path):
+    source = tmp_path / "bad_footer.gz"
+    data = bytearray(gzip.compress(b"gzip payload"))
+    data[-8:] = b"\0" * 8
+    source.write_bytes(bytes(data))
+
+    result = _run_repair(tmp_path, "gzip_footer_fix", "gzip", source, ["gzip_footer_bad"])
+
+    assert result.ok is True
+    assert gzip.decompress(open(result.repaired_input["path"], "rb").read()) == b"gzip payload"
+
+
+def test_xz_trailing_junk_trim_removes_bytes_after_stream(tmp_path):
+    source = tmp_path / "tail.xz"
+    original = lzma.compress(b"xz payload", format=lzma.FORMAT_XZ)
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_repair(tmp_path, "xz_trailing_junk_trim", "xz", source, ["trailing_junk"])
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == original
+
+
+def test_zstd_trailing_junk_trim_removes_bytes_after_stream_when_backend_available(tmp_path):
+    zstd = pytest.importorskip("zstandard")
+    source = tmp_path / "tail.zst"
+    original = zstd.ZstdCompressor().compress(b"zstd payload")
+    source.write_bytes(original + b"JUNK")
+
+    result = _run_repair(tmp_path, "zstd_trailing_junk_trim", "zstd", source, ["trailing_junk"])
+
+    assert result.ok is True
+    assert open(result.repaired_input["path"], "rb").read() == original
+
+
 @dataclass
 class _DummyBoundaryModule:
     spec = RepairModuleSpec(
@@ -192,6 +300,10 @@ class _DummyBoundaryModule:
 
 
 def _run_zip_repair(tmp_path, module_name, source, flags):
+    return _run_repair(tmp_path, module_name, "zip", source, flags)
+
+
+def _run_repair(tmp_path, module_name, fmt, source, flags):
     scheduler = RepairScheduler({
         "repair": {
             "workspace": str(tmp_path / "repair"),
@@ -200,7 +312,7 @@ def _run_zip_repair(tmp_path, module_name, source, flags):
     })
     return scheduler.repair(RepairJob(
         source_input={"kind": "file", "path": str(source)},
-        format="zip",
+        format=fmt,
         confidence=0.7,
         damage_flags=flags,
         archive_key=source.name,
@@ -211,6 +323,16 @@ def _write_zip(path, files):
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
         for name, payload in files.items():
             archive.writestr(name, payload)
+
+
+def _tar_bytes(files):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for name, payload in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
 
 
 def _descriptor_zip_fragment(name: str, payload: bytes, *, zip64: bool = False) -> bytes:
