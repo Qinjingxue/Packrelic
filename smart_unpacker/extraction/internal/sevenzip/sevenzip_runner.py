@@ -10,7 +10,7 @@ import psutil
 
 from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
 from smart_unpacker.contracts.tasks import ArchiveTask
-from smart_unpacker.support.resources import get_7z_dll_path, get_7z_path, get_sevenzip_worker_path
+from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 
 
 class _PersistentWorker:
@@ -159,18 +159,7 @@ class SevenZipRunner:
             )
         except (OSError, FileNotFoundError) as exc:
             return subprocess.CompletedProcess(["sevenzip_worker.exe"], -100, "", f"sevenzip_worker setup failed: {exc}")
-        result = self._run_worker(job, startupinfo=startupinfo, runtime_scheduler=runtime_scheduler, task=task)
-        if result.returncode != 0 and self._should_fallback_to_7z_cli(job):
-            fallback = self._run_7z_cli_extract(job, startupinfo=startupinfo)
-            if fallback.returncode == 0:
-                return fallback
-            return subprocess.CompletedProcess(
-                fallback.args,
-                fallback.returncode,
-                f"{result.stdout}\n{fallback.stdout}".strip(),
-                f"{result.stderr}\n{fallback.stderr}".strip(),
-            )
-        return result
+        return self._run_worker(job, startupinfo=startupinfo, runtime_scheduler=runtime_scheduler, task=task)
 
     def run_extract_command(
         self,
@@ -497,65 +486,6 @@ class SevenZipRunner:
         if self.worker_path is None:
             self.worker_path = get_sevenzip_worker_path()
         return self.worker_path
-
-    def _should_fallback_to_7z_cli(self, job: dict) -> bool:
-        archive_input = job.get("archive_input") if isinstance(job.get("archive_input"), dict) else {}
-        open_mode = str(archive_input.get("open_mode") or "file").lower()
-        if open_mode not in {"file", "native_volumes"}:
-            return False
-        if len(job.get("part_paths") or []) > 1:
-            return False
-        if str(job.get("password") or ""):
-            return False
-
-        hint = str(job.get("format_hint") or archive_input.get("format_hint") or "").lower().lstrip(".")
-        if hint in {"tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "gzip", "gz", "bzip2", "bz2", "xz", "zstd", "zst"}:
-            return True
-
-        name = os.path.basename(str(job.get("archive_path") or "")).lower()
-        stream_suffixes = (
-            ".tar",
-            ".tar.gz",
-            ".tgz",
-            ".tar.bz2",
-            ".tbz",
-            ".tbz2",
-            ".tar.xz",
-            ".txz",
-            ".tar.zst",
-            ".tzst",
-            ".gz",
-            ".bz2",
-            ".xz",
-            ".zst",
-        )
-        return any(name.endswith(suffix) for suffix in stream_suffixes)
-
-    @staticmethod
-    def _run_7z_cli_extract(job: dict, startupinfo) -> subprocess.CompletedProcess:
-        try:
-            seven_zip = get_7z_path()
-        except (OSError, FileNotFoundError, RuntimeError) as exc:
-            return subprocess.CompletedProcess(["7z.exe"], -100, "", f"7z.exe fallback setup failed: {exc}")
-
-        cmd = [
-            seven_zip,
-            "x",
-            str(job.get("archive_path") or ""),
-            f"-o{job.get('output_dir') or ''}",
-            "-y",
-        ]
-        try:
-            return subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                startupinfo=startupinfo,
-            )
-        except (OSError, FileNotFoundError) as exc:
-            return subprocess.CompletedProcess(cmd, -100, "", f"7z.exe fallback failed to start: {exc}")
 
     def close(self) -> None:
         with self._worker_pool_lock:

@@ -520,8 +520,8 @@ int run_request(const std::string& request) {
     };
 
     const auto archive_input = parse_archive_input_descriptor(request, archive_path, format_hint, part_paths);
-    const auto result = archive_input.ranges.empty()
-        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, password, output_dir, progress)
+    ExtractArchiveResult result = archive_input.ranges.empty()
+        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, password, output_dir, progress)
         : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, progress);
 
     const bool ok = result.status == PasswordTestStatus::Ok && result.command_ok;

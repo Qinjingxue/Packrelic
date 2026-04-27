@@ -55,3 +55,6 @@ fixtures/fakepicture.jpg
 testfiles/
 test_pipeline_run/
 test_extract/
+GEMINI.md
+test_extract_folder/
+test_targz/

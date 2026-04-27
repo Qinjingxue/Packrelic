@@ -103,9 +103,10 @@ ExtractArchiveResult extract_archive_with_parts(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths,
+    const std::wstring& format_hint,
     const std::wstring& password,
     const std::wstring& output_dir,
-    ExtractProgressCallback progress = {}
+    ExtractProgressCallback progress = nullptr
 );
 
 ExtractArchiveResult extract_archive_with_ranges(

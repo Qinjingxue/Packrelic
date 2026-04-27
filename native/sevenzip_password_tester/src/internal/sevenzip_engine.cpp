@@ -1167,6 +1167,10 @@ std::vector<unsigned char> format_ids_for_signature(const std::wstring& archive_
     const unsigned char rar5[] = {'R', 'a', 'r', '!', 0x1A, 0x07, 0x01, 0x00};
     const unsigned char seven_zip[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
     const unsigned char zip[] = {'P', 'K', 0x03, 0x04};
+    const unsigned char gzip[] = {0x1F, 0x8B};
+    const unsigned char bzip2[] = {'B', 'Z', 'h'};
+    const unsigned char xz[] = {0xFD, '7', 'z', 'X', 'Z', 0x00};
+    const unsigned char zstd[] = {0x28, 0xB5, 0x2F, 0xFD};
 
     const std::size_t search_limit = scan_prefix ? buffer.size() : 1;
     for (std::size_t offset = 0; offset < search_limit; ++offset) {
@@ -1183,6 +1187,18 @@ std::vector<unsigned char> format_ids_for_signature(const std::wstring& archive_
         }
         if (remaining >= sizeof(zip) && std::equal(std::begin(zip), std::end(zip), cursor)) {
             return {0x01};
+        }
+        if (remaining >= sizeof(xz) && std::equal(std::begin(xz), std::end(xz), cursor)) {
+            return {0x0C};
+        }
+        if (remaining >= sizeof(zstd) && std::equal(std::begin(zstd), std::end(zstd), cursor)) {
+            return {0x0E};
+        }
+        if (remaining >= sizeof(bzip2) && std::equal(std::begin(bzip2), std::end(bzip2), cursor)) {
+            return {0x02};
+        }
+        if (remaining >= sizeof(gzip) && std::equal(std::begin(gzip), std::end(gzip), cursor)) {
+            return {0x0F};
         }
     }
     return {};
@@ -1225,6 +1241,16 @@ std::vector<GUID> candidate_formats(const std::wstring& archive_path, const std:
         ids = {0x07, 0x01};
     } else if (ext == L".7z") {
         ids = {0x07};
+    } else if (ext == L".tar") {
+        ids = {0xEE};
+    } else if (ext == L".gz" || ext == L".tgz") {
+        ids = {0xEF, 0xEE};
+    } else if (ext == L".bz2" || ext == L".tbz2" || ext == L".tbz") {
+        ids = {0x02, 0xEE};
+    } else if (ext == L".xz" || ext == L".txz") {
+        ids = {0x0C, 0xEE};
+    } else if (ext == L".zst" || ext == L".tzst") {
+        ids = {0x0E, 0xEE};
     } else if (ext == L".001") {
         ids = format_ids_for_signature(archive_path);
         if (ids.empty()) {
@@ -1235,7 +1261,7 @@ std::vector<GUID> candidate_formats(const std::wstring& archive_path, const std:
     } else {
         ids = format_ids_for_signature(archive_path, is_sfx_path(archive_path));
         if (ids.empty()) {
-            ids = {0x07, 0x01, 0x03, 0xCC};
+            ids = {0x07, 0x01, 0x03, 0xCC, 0xEE, 0xEF, 0x02, 0x0C, 0x0E};
         }
     }
 
@@ -1260,6 +1286,16 @@ std::vector<GUID> candidate_formats_for_hint(const std::wstring& format_hint, co
         ids = {0x03, 0xCC};
     } else if (hint == L"rar5") {
         ids = {0xCC, 0x03};
+    } else if (hint == L"tar") {
+        ids = {0xEE};
+    } else if (hint == L"gz" || hint == L"gzip" || hint == L"tar.gz" || hint == L"tgz") {
+        ids = {0xEF, 0xEE};
+    } else if (hint == L"bz2" || hint == L"bzip2" || hint == L"tar.bz2" || hint == L"tbz2" || hint == L"tbz") {
+        ids = {0x02, 0xEE};
+    } else if (hint == L"xz" || hint == L"tar.xz" || hint == L"txz") {
+        ids = {0x0C, 0xEE};
+    } else if (hint == L"zst" || hint == L"zstd" || hint == L"tar.zst" || hint == L"tzst") {
+        ids = {0x0E, 0xEE};
     }
     if (ids.empty()) {
         return candidate_formats(archive_path, part_paths);
@@ -2306,6 +2342,7 @@ ExtractArchiveResult extract_archive_with_parts(
     const std::wstring& seven_zip_dll_path,
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths,
+    const std::wstring& format_hint,
     const std::wstring& password,
     const std::wstring& output_dir,
     ExtractProgressCallback progress
@@ -2327,13 +2364,14 @@ ExtractArchiveResult extract_archive_with_parts(
         password,
         effective_part_paths,
         {},
-        L"",
+        format_hint,
         output_dir,
         std::move(progress));
 #else
     (void)seven_zip_dll_path;
     (void)archive_path;
     (void)part_paths;
+    (void)format_hint;
     (void)password;
     (void)output_dir;
     (void)progress;
