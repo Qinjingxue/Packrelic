@@ -7,6 +7,9 @@ mod file_crc;
 mod format_structure;
 mod magic;
 mod pe_overlay;
+mod password_7z;
+mod password_rar;
+mod password_zip;
 mod util;
 mod zip_names;
 
@@ -61,5 +64,8 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(format_structure::inspect_compression_stream_structure, m)?)?;
     m.add_function(wrap_pyfunction!(format_structure::inspect_archive_container_structure, m)?)?;
     m.add_function(wrap_pyfunction!(pe_overlay::inspect_pe_overlay_structure, m)?)?;
+    m.add_function(wrap_pyfunction!(password_7z::seven_zip_fast_verify_passwords, m)?)?;
+    m.add_function(wrap_pyfunction!(password_rar::rar_fast_verify_passwords, m)?)?;
+    m.add_function(wrap_pyfunction!(password_zip::zip_fast_verify_passwords, m)?)?;
     Ok(())
 }

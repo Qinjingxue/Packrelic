@@ -10,7 +10,17 @@ from smart_unpacker.passwords.resolver import PasswordResolver
 from smart_unpacker.passwords.result import PasswordResolution
 from smart_unpacker.passwords.scheduler import PasswordProgressEvent, PasswordScheduler, PasswordSearchResult
 from smart_unpacker.passwords.session import PasswordSession
-from smart_unpacker.passwords.verifier import PasswordBatchVerification, PasswordVerifier, SevenZipDllVerifier
+from smart_unpacker.passwords.verifier import (
+    PasswordBatchVerification,
+    PasswordVerifier,
+    PasswordVerifierChain,
+    PasswordVerifierRegistry,
+    RarFastVerifier,
+    SevenZipFastVerifier,
+    SevenZipDllVerifier,
+    VerifierStatus,
+    ZipFastVerifier,
+)
 
 
 __all__ = [
@@ -35,6 +45,12 @@ __all__ = [
     "PasswordSession",
     "PasswordStore",
     "PasswordVerifier",
+    "PasswordVerifierChain",
+    "PasswordVerifierRegistry",
+    "RarFastVerifier",
     "read_password_file",
+    "SevenZipFastVerifier",
     "SevenZipDllVerifier",
+    "VerifierStatus",
+    "ZipFastVerifier",
 ]

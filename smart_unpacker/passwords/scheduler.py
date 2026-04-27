@@ -8,7 +8,10 @@ from smart_unpacker.passwords.cache import PasswordAttemptCache
 from smart_unpacker.passwords.candidates import PasswordCandidate
 from smart_unpacker.passwords.fingerprint import build_archive_fingerprint
 from smart_unpacker.passwords.job import PasswordJob
-from smart_unpacker.passwords.verifier import PasswordVerifier, SevenZipDllVerifier
+from smart_unpacker.passwords.verifier import PasswordVerifier, PasswordVerifierRegistry, SevenZipDllVerifier
+from smart_unpacker.passwords.verifier.rar_fast import RarFastVerifier
+from smart_unpacker.passwords.verifier.seven_zip_fast import SevenZipFastVerifier
+from smart_unpacker.passwords.verifier.zip_fast import ZipFastVerifier
 
 
 @dataclass(frozen=True)
@@ -48,7 +51,12 @@ class PasswordScheduler:
 
     @classmethod
     def from_archive_password_tester(cls, password_tester: object) -> "PasswordScheduler":
-        return cls(SevenZipDllVerifier.from_archive_password_tester(password_tester))
+        final_verifier = SevenZipDllVerifier.from_archive_password_tester(password_tester)
+        registry = PasswordVerifierRegistry(
+            fast_verifiers=[ZipFastVerifier(), RarFastVerifier(), SevenZipFastVerifier()],
+            final_verifier=final_verifier,
+        )
+        return cls(registry.build())
 
     def run(self, job: PasswordJob) -> PasswordSearchResult:
         started_at = time.monotonic()

@@ -39,6 +39,7 @@ class SevenZipDllVerifier:
                 self.password_tester.add_recent_password(password)
             return PasswordBatchVerification(
                 ok=True,
+                status="match",
                 matched_index=native_attempt.matched_index,
                 attempts=native_attempt.attempts,
                 test_result=native_result,
@@ -47,6 +48,7 @@ class SevenZipDllVerifier:
             )
         return PasswordBatchVerification(
             ok=False,
+            status="no_match",
             matched_index=-1,
             attempts=native_attempt.attempts,
             test_result=native_result,

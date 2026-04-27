@@ -4,7 +4,7 @@ from smart_unpacker.passwords.cache import PasswordAttemptCache
 from smart_unpacker.passwords.candidates import PasswordCandidatePipeline
 from smart_unpacker.passwords.job import PasswordJob
 from smart_unpacker.passwords.scheduler import PasswordScheduler
-from smart_unpacker.passwords.verifier import PasswordBatchVerification
+from smart_unpacker.passwords.verifier import PasswordBatchVerification, PasswordVerifierChain
 
 
 class FakeVerifier:
@@ -27,6 +27,16 @@ class FakeVerifier:
             test_result=SimpleNamespace(returncode=2),
             error_text="wrong password",
         )
+
+
+class StaticVerifier:
+    def __init__(self, outcome: PasswordBatchVerification):
+        self.outcome = outcome
+        self.batches: list[list[str]] = []
+
+    def verify_batch(self, archive_path, passwords, *, part_paths=None):
+        self.batches.append(list(passwords))
+        return self.outcome
 
 
 def test_password_scheduler_batches_lazy_candidates_and_stops_on_match(tmp_path):
@@ -127,3 +137,51 @@ def test_password_scheduler_honors_timeout_before_verifying_more_candidates(tmp_
     assert result.password is None
     assert result.stopped_reason == "timeout"
     assert verifier.batches == []
+
+
+def test_verifier_chain_confirms_fast_match_with_final_verifier():
+    fast = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=1,
+        attempts=2,
+    ))
+    final = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=0,
+        attempts=1,
+        test_result=SimpleNamespace(returncode=0),
+        terminal=True,
+    ))
+    chain = PasswordVerifierChain([fast], final)
+
+    outcome = chain.verify_batch("sample.zip", ["bad", "secret", "unused"])
+
+    assert outcome.ok is True
+    assert outcome.matched_index == 1
+    assert fast.batches == [["bad", "secret", "unused"]]
+    assert final.batches == [["secret"]]
+
+
+def test_verifier_chain_falls_back_when_fast_verifier_is_unknown():
+    fast = StaticVerifier(PasswordBatchVerification(
+        ok=False,
+        status="unknown_need_fallback",
+        attempts=0,
+    ))
+    final = StaticVerifier(PasswordBatchVerification(
+        ok=True,
+        status="match",
+        matched_index=2,
+        attempts=3,
+        test_result=SimpleNamespace(returncode=0),
+        terminal=True,
+    ))
+    chain = PasswordVerifierChain([fast], final)
+
+    outcome = chain.verify_batch("sample.rar", ["bad1", "bad2", "secret"])
+
+    assert outcome.ok is True
+    assert outcome.matched_index == 2
+    assert final.batches == [["bad1", "bad2", "secret"]]
