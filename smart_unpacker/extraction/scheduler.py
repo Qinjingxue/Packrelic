@@ -22,6 +22,7 @@ class ExtractionScheduler:
         ensure_space: Optional[Callable[[int], bool]] = None,
         max_retries: int = 3,
         process_config: dict | None = None,
+        output_config: dict | None = None,
     ):
         self.password_store = PasswordStore.from_sources(
             cli_passwords=cli_passwords or [],
@@ -37,6 +38,7 @@ class ExtractionScheduler:
         self.split_entry_resolver = SplitEntryResolver(self._relations)
         self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)
+        self.output_config = output_config if isinstance(output_config, dict) else None
         self.process_config = {
             key: value
             for key, value in (process_config or {}).items()
@@ -50,7 +52,7 @@ class ExtractionScheduler:
         return self.password_store.recent_passwords
 
     def default_output_dir_for_task(self, task: ArchiveTask) -> str:
-        return default_output_dir_for_task(task)
+        return default_output_dir_for_task(task, self.output_config)
 
     def inspect(self, task: ArchiveTask, out_dir: str):
         return PreExtractInspector(self.password_resolver, self.rename_scheduler).inspect(task, out_dir)

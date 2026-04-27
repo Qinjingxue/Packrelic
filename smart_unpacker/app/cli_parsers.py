@@ -70,6 +70,7 @@ def build_extract_config_override_parser(ctx: CliContext) -> argparse.ArgumentPa
     parser.add_argument("--recur", dest="recursive_extract", type=parse_recursive_extract_value, help=ctx.core_text("recursive_extract"))
     parser.add_argument("--sched", dest="scheduler_profile", choices=sorted(SCHEDULER_PROFILES), help=ctx.core_text("scheduler_profile"))
     parser.add_argument("--cleanup", dest="archive_cleanup_mode", type=parse_archive_cleanup_value, help=ctx.core_text("archive_cleanup_mode"))
+    parser.add_argument("-o", "--out-dir", dest="output_dir", help=ctx.core_text("output_dir"))
     flatten_group = parser.add_mutually_exclusive_group()
     flatten_group.add_argument("--flatten", dest="flatten_single_directory", action="store_true", default=None, help=ctx.core_text("flatten"))
     flatten_group.add_argument("--no-flatten", dest="flatten_single_directory", action="store_false", help=ctx.core_text("no_flatten"))

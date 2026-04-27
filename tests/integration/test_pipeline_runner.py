@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from smart_unpacker.coordinator.runner import PipelineRunner
 from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.extraction.result import ExtractionResult
@@ -116,3 +118,44 @@ def test_batch_skips_stale_nested_output_tasks_in_same_round(tmp_path, monkeypat
     runner.batch_runner.execute([task_for(archive), task_for(nested)])
 
     assert extracted == [str(archive)]
+
+
+def test_output_root_preserves_tree_and_recursive_scan_uses_success_outputs(tmp_path, monkeypatch):
+    input_root = tmp_path / "input"
+    archive = input_root / "sub" / "payload.zip"
+    output_root = tmp_path / "out"
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b"parent")
+
+    config = normalize_config(with_detection_pipeline({
+        "recursive_extract": "2",
+        "output": {
+            "root": str(output_root),
+            "common_root": str(input_root),
+        },
+        "post_extract": {
+            "archive_cleanup_mode": "k",
+            "flatten_single_directory": False,
+        },
+    }, scoring=[
+        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
+    ]))
+    runner = PipelineRunner(config)
+    task = ArchiveTask(fact_bag=FactBag(), score=10, main_path=str(archive), all_parts=[str(archive)], logical_name="payload")
+
+    monkeypatch.setattr(runner.extractor, "inspect", lambda *_args, **_kwargs: type("Preflight", (), {"skip_result": None})())
+    monkeypatch.setattr(runner.batch_runner.resource_inspector, "inspect", lambda item: item)
+
+    def fake_extract(item, out_dir, runtime_scheduler=None):
+        nested = Path(out_dir) / "nested.zip"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_bytes(b"nested")
+        return ExtractionResult(success=True, archive=item.main_path, out_dir=out_dir, all_parts=item.all_parts)
+
+    monkeypatch.setattr(runner.extractor, "extract", fake_extract)
+
+    scan_roots = runner.batch_runner.execute([task])
+
+    expected_out_dir = output_root / "sub" / "payload"
+    assert expected_out_dir.exists()
+    assert scan_roots == [str(expected_out_dir)]

@@ -39,6 +39,7 @@ class PipelineRunner:
             ensure_space=self.ensure_space,
             max_retries=config.get("max_retries", 3),
             process_config=performance_config,
+            output_config=config.get("output", {}),
         )
         self.output_scan_policy = NestedOutputScanPolicy(config)
         

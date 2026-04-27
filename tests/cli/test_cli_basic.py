@@ -110,6 +110,7 @@ class CliBasicTests(unittest.TestCase):
         self.assertIn("--recur", result.stdout)
         self.assertIn("--sched", result.stdout)
         self.assertIn("--cleanup", result.stdout)
+        self.assertIn("--out-dir", result.stdout)
         self.assertNotIn("--min-size", result.stdout)
 
     def test_passwords_help_only_shows_password_relevant_options(self):

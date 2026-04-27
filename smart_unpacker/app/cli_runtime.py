@@ -137,6 +137,13 @@ def apply_runtime_config_overrides(config: dict, args) -> dict:
             ("post_extract", "archive_cleanup_mode"),
             args.archive_cleanup_mode,
         )
+    output_dir = getattr(args, "output_dir", None)
+    output_root = os.path.abspath(os.path.normpath(output_dir or "."))
+    overrides["output_dir"] = output_root
+    config["output"] = {
+        **(config.get("output", {}) if isinstance(config.get("output"), dict) else {}),
+        "root": output_root,
+    }
     if getattr(args, "flatten_single_directory", None) is not None:
         overrides["flatten_single_directory"] = args.flatten_single_directory
         config.setdefault("post_extract", {})["flatten_single_directory"] = args.flatten_single_directory

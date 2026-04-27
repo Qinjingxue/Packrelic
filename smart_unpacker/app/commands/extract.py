@@ -72,6 +72,7 @@ def handle(args, ctx):
     config = load_config()
     config_overrides = apply_runtime_config_overrides(config, args)
     common_root = resolve_common_root(target_paths)
+    config.setdefault("output", {})["common_root"] = common_root
 
     reporter.info(ctx.t(TEXTS, "target_paths"))
     for path in target_paths:

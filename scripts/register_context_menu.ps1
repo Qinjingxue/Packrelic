@@ -77,15 +77,16 @@ function New-CommandString {
     param(
         [hashtable]$Launcher,
         [string]$TargetToken,
+        [string]$OutDirToken,
         [bool]$PromptPasswords
     )
 
     $passwordArg = if ($PromptPasswords) { " --ask-pw" } else { "" }
     if ($Launcher.Mode -eq "app") {
-        return ('"{0}" extract "{1}"{2} --pause' -f $Launcher.AppPath, $TargetToken, $passwordArg)
+        return ('"{0}" extract "{1}" --out-dir "{2}"{3} --pause' -f $Launcher.AppPath, $TargetToken, $OutDirToken, $passwordArg)
     }
 
-    return ('"{0}" "{1}" extract "{2}"{3} --pause' -f $Launcher.AppPath, $Launcher.ScriptPath, $TargetToken, $passwordArg)
+    return ('"{0}" "{1}" extract "{2}" --out-dir "{3}"{4} --pause' -f $Launcher.AppPath, $Launcher.ScriptPath, $TargetToken, $OutDirToken, $passwordArg)
 }
 
 function Set-ContextMenuParent {
@@ -174,10 +175,10 @@ $folderKey = "HKCU:\Software\Classes\Directory\shell\SmartUnpacker"
 $backgroundKey = "HKCU:\Software\Classes\Directory\Background\shell\SmartUnpacker"
 $subMenuTexts = Get-SubMenuTexts -MenuText $resolvedMenuText
 
-$folderPromptCommand = New-CommandString -Launcher $launcher -TargetToken "%1" -PromptPasswords $true
-$folderDirectCommand = New-CommandString -Launcher $launcher -TargetToken "%1" -PromptPasswords $false
-$backgroundPromptCommand = New-CommandString -Launcher $launcher -TargetToken "%V" -PromptPasswords $true
-$backgroundDirectCommand = New-CommandString -Launcher $launcher -TargetToken "%V" -PromptPasswords $false
+$folderPromptCommand = New-CommandString -Launcher $launcher -TargetToken "%1" -OutDirToken "%1" -PromptPasswords $true
+$folderDirectCommand = New-CommandString -Launcher $launcher -TargetToken "%1" -OutDirToken "%1" -PromptPasswords $false
+$backgroundPromptCommand = New-CommandString -Launcher $launcher -TargetToken "%V" -OutDirToken "%V" -PromptPasswords $true
+$backgroundDirectCommand = New-CommandString -Launcher $launcher -TargetToken "%V" -OutDirToken "%V" -PromptPasswords $false
 
 Set-ContextMenuParent -KeyPath $folderKey -MenuLabel $resolvedMenuText -IconValue $resolvedIconPath
 Set-ContextMenuCommand -ParentKeyPath $folderKey -CommandName "PromptPassword" -MenuLabel $subMenuTexts.Prompt -CommandLine $folderPromptCommand -IconValue $resolvedIconPath
