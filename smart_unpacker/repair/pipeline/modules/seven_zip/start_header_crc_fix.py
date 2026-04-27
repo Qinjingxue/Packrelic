@@ -3,7 +3,10 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec
-from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
+from pathlib import Path
+import struct
+
+from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, patch_file, write_candidate
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -33,7 +36,15 @@ class SevenZipStartHeaderCrcFix:
             return RepairResult(status="unrepairable", confidence=0.0, format="7z", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="7z start header fields are not safely parseable")
         if header.start_crc_ok:
             return RepairResult(status="unrepairable", confidence=0.0, format="7z", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="7z start header CRC is already valid")
-        path = write_candidate(rewrite_start_crc(data, header), workspace, "seven_zip_start_header_crc_fix.7z")
+        output_path = str(Path(workspace) / "seven_zip_start_header_crc_fix.7z")
+        if str(job.source_input.get("kind") or "file") == "file":
+            path = patch_file(
+                str(job.source_input["path"]),
+                [{"offset": 8, "data": struct.pack("<I", header.computed_start_crc)}],
+                output_path,
+            )
+        else:
+            path = write_candidate(rewrite_start_crc(data, header), workspace, "seven_zip_start_header_crc_fix.7z")
         warnings = [] if header.next_header_crc_ok else ["next header CRC is still invalid after start header CRC repair"]
         return RepairResult(
             status="repaired",

@@ -68,3 +68,39 @@ def test_patch_file_streaming_helper(tmp_path):
 
     assert path == str(output)
     assert output.read_bytes() == b"abZZef"
+
+
+def test_copy_source_prefix_to_file_supports_file_range(tmp_path):
+    source = tmp_path / "source.bin"
+    output = tmp_path / "output.bin"
+    source.write_bytes(b"0123456789")
+
+    path = _common.copy_source_prefix_to_file(
+        {"kind": "file_range", "path": str(source), "start": 2, "end": 9},
+        4,
+        str(output),
+    )
+
+    assert path == str(output)
+    assert output.read_bytes() == b"2345"
+
+
+def test_copy_source_prefix_to_file_supports_concat_ranges(tmp_path):
+    source = tmp_path / "source.bin"
+    output = tmp_path / "output.bin"
+    source.write_bytes(b"abcdefghij")
+
+    path = _common.copy_source_prefix_to_file(
+        {
+            "kind": "concat_ranges",
+            "ranges": [
+                {"path": str(source), "start": 0, "end": 3},
+                {"path": str(source), "start": 7},
+            ],
+        },
+        5,
+        str(output),
+    )
+
+    assert path == str(output)
+    assert output.read_bytes() == b"abchi"

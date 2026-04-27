@@ -3,11 +3,13 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec
-from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
+from pathlib import Path
+
+from smart_unpacker.repair.pipeline.modules._common import copy_source_prefix_to_file, load_source_bytes
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
-from ._directory import find_eocd, trim_to_eocd
+from ._directory import find_eocd
 
 
 class ZipTrailingJunkTrim:
@@ -38,8 +40,7 @@ class ZipTrailingJunkTrim:
                 diagnosis=diagnosis.as_dict(),
                 message="EOCD was not found",
             )
-        repaired = trim_to_eocd(data, eocd)
-        if len(repaired) == len(data):
+        if eocd.end == len(data):
             return RepairResult(
                 status="unrepairable",
                 confidence=0.0,
@@ -48,7 +49,11 @@ class ZipTrailingJunkTrim:
                 diagnosis=diagnosis.as_dict(),
                 message="no trailing bytes after EOCD",
             )
-        path = write_candidate(repaired, workspace, "zip_trailing_junk_trim.zip")
+        path = copy_source_prefix_to_file(
+            job.source_input,
+            eocd.end,
+            str(Path(workspace) / "zip_trailing_junk_trim.zip"),
+        )
         return RepairResult(
             status="repaired",
             confidence=0.88,

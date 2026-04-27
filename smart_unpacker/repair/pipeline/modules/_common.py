@@ -117,6 +117,24 @@ def patch_file(source_path: str, patches: list[dict[str, Any]], output_path: str
     return str(output)
 
 
+def copy_source_prefix_to_file(source_input: dict[str, Any], length: int, output_path: str) -> str:
+    length = max(0, int(length))
+    kind = str(source_input.get("kind") or "file")
+    if kind == "file":
+        return copy_range_to_file(str(source_input["path"]), 0, length, output_path)
+    if kind == "file_range":
+        start = int(source_input.get("start") or 0)
+        declared_end = source_input.get("end")
+        end = start + length
+        if declared_end is not None:
+            end = min(end, int(declared_end))
+        return copy_range_to_file(str(source_input["path"]), start, end, output_path)
+    if kind == "concat_ranges":
+        ranges = _take_concat_prefix(list(source_input.get("ranges") or []), length)
+        return concat_ranges_to_file(ranges, output_path)
+    raise ValueError(f"unsupported repair input kind: {kind}")
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.tmp")
@@ -145,3 +163,22 @@ def _replace(temp: Path, output: Path) -> None:
     if output.exists():
         output.unlink()
     temp.replace(output)
+
+
+def _take_concat_prefix(ranges: list[dict[str, Any]], length: int) -> list[dict[str, Any]]:
+    result = []
+    remaining = length
+    for item in ranges:
+        if remaining <= 0:
+            break
+        start = int(item.get("start") or 0)
+        end = item.get("end")
+        if end is None:
+            take_end = start + remaining
+        else:
+            available = max(0, int(end) - start)
+            take_end = start + min(available, remaining)
+        if take_end > start:
+            result.append({**item, "start": start, "end": take_end})
+            remaining -= take_end - start
+    return result

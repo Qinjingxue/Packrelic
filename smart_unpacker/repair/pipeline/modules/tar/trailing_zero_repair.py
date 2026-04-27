@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec
-from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
+from smart_unpacker.repair.pipeline.modules._common import copy_source_prefix_to_file, load_source_bytes, write_candidate
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -32,12 +33,19 @@ class TarTrailingZeroBlockRepair:
         if payload_end is None:
             return RepairResult(status="unrepairable", confidence=0.0, format="tar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="TAR entries could not be walked safely")
         end = _canonical_tar_end(data, payload_end)
-        repaired = data[:end]
-        if not repaired.endswith(b"\0" * 1024):
-            repaired += b"\0" * (1024 - min(1024, len(repaired) - payload_end))
-        if repaired == data:
+        zero_bytes_present = max(0, end - payload_end)
+        missing_zeros = max(0, 1024 - min(1024, zero_bytes_present))
+        if end == len(data) and missing_zeros == 0:
             return RepairResult(status="unrepairable", confidence=0.0, format="tar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="TAR already has canonical zero block ending")
-        path = write_candidate(repaired, workspace, "tar_trailing_zero_block_repair.tar")
+        if missing_zeros == 0:
+            path = copy_source_prefix_to_file(
+                job.source_input,
+                end,
+                str(Path(workspace) / "tar_trailing_zero_block_repair.tar"),
+            )
+        else:
+            repaired = data[:end] + (b"\0" * missing_zeros)
+            path = write_candidate(repaired, workspace, "tar_trailing_zero_block_repair.tar")
         return RepairResult(
             status="repaired",
             confidence=0.84,
