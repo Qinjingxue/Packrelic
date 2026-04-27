@@ -1,14 +1,12 @@
 import os
+from types import SimpleNamespace
 
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.scheduling.resource_model import build_resource_profile_key, estimate_resource_demand
 from smart_unpacker.passwords import PasswordSession
 from smart_unpacker.rename.scheduler import RenameScheduler
-from smart_unpacker.support.sevenzip_native import (
-    STATUS_BACKEND_UNAVAILABLE,
-    STATUS_UNSUPPORTED,
-    cached_analyze_archive_resources,
-)
+
+cached_analyze_archive_resources = None
 
 
 class ResourcePreflightInspector:
@@ -23,30 +21,23 @@ class ResourcePreflightInspector:
         self.precise_resource_min_size_bytes = max(0, int(precise_resource_min_size_mb or 0)) * 1024 * 1024
 
     def inspect(self, task: ArchiveTask) -> ArchiveTask:
-        health = task.fact_bag.get("resource.health") or {}
-        if health.get("status") in {STATUS_BACKEND_UNAVAILABLE, STATUS_UNSUPPORTED}:
-            return self._record_unknown(task)
-
-        archive_size = self._archive_size(task)
-        if archive_size < self.precise_resource_min_size_bytes:
-            return self.record_estimated_profile(task, reason="estimated small-archive resource profile", archive_size=archive_size)
-
-        try:
-            staged = self.rename_scheduler.normalize_archive_paths(
-                task.main_path,
-                list(task.all_parts or [task.main_path]),
-                volume_entries=list(task.split_info.volumes or []),
-            )
-        except TypeError:
-            staged = self.rename_scheduler.normalize_archive_paths(task.main_path, list(task.all_parts or [task.main_path]))
-        try:
-            password = self._password_for(task)
-            analysis = cached_analyze_archive_resources(staged.archive, password=password, part_paths=staged.run_parts)
-            self._record_analysis(task, analysis)
+        existing_analysis = task.fact_bag.get("resource.analysis")
+        if isinstance(existing_analysis, dict):
+            analysis = SimpleNamespace(ok=not bool(existing_analysis.get("is_broken")), **existing_analysis)
             self.record_resource_demand(task, analysis)
-        finally:
-            self.rename_scheduler.cleanup_normalized_split_group(staged)
-        return task
+            return task
+        archive_size = self._archive_size(task)
+        if archive_size >= self.precise_resource_min_size_bytes and callable(cached_analyze_archive_resources):
+            analysis = cached_analyze_archive_resources(task.main_path, password=self._password_for(task), part_paths=list(task.all_parts or [task.main_path]))
+            self._record_legacy_analysis(task, analysis)
+            self.record_resource_demand(task, analysis)
+            return task
+        reason = (
+            "estimated small-archive resource profile"
+            if archive_size < self.precise_resource_min_size_bytes
+            else "estimated resource profile; archive analysis is owned by analysis layer"
+        )
+        return self.record_estimated_profile(task, reason=reason, archive_size=archive_size)
 
     def record_resource_demand(self, task: ArchiveTask, analysis) -> None:
         demand = estimate_resource_demand(analysis)
@@ -134,7 +125,7 @@ class ResourcePreflightInspector:
             io = 2
         return {"cpu": 1, "io": io, "memory": 1}
 
-    def _record_analysis(self, task: ArchiveTask, analysis) -> None:
+    def _record_legacy_analysis(self, task: ArchiveTask, analysis) -> None:
         task.fact_bag.set("resource.analysis", {
             "status": analysis.status,
             "is_archive": analysis.is_archive,

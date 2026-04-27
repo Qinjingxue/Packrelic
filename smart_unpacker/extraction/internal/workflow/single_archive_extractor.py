@@ -100,10 +100,7 @@ class SingleArchiveExtractor:
                         shutil.rmtree(out_dir, ignore_errors=True)
                         return self._failed(archive, out_dir, run_parts, "密码错误或未知密码")
 
-                metadata_scan = self.metadata_scanner.scan(run_archive, password=correct_pwd, part_paths=run_parts)
-                if metadata_scan and metadata_scan.selected_codepage:
-                    selected_codepage = metadata_scan.selected_codepage
-                    print(f"[META] 文件名编码修正: -mcp={selected_codepage}")
+                selected_codepage = self._codepage_from_facts(task)
 
                 if correct_pwd is None:
                     err = test_err
@@ -166,6 +163,9 @@ class SingleArchiveExtractor:
                 return PasswordResolution(password=str(known_password), archive_key=task.key)
             if not self._facts_require_password(fact_bag):
                 return PasswordResolution(password="", archive_key=task.key, encrypted=False)
+        password_tester = getattr(self.password_resolver, "password_tester", None)
+        if password_tester is not None and not getattr(password_tester, "passwords", []):
+            return PasswordResolution(password="", archive_key=task.key, encrypted=False)
         try:
             return self.password_resolver.resolve(
                 archive_path,
@@ -175,6 +175,20 @@ class SingleArchiveExtractor:
             )
         except TypeError:
             return self.password_resolver.resolve(archive_path, task.fact_bag, part_paths=part_paths)
+
+    @staticmethod
+    def _codepage_from_facts(task: ArchiveTask) -> str | None:
+        fact_bag = getattr(task, "fact_bag", None)
+        if fact_bag is None or not hasattr(fact_bag, "get"):
+            return None
+        for key in ("archive.codepage", "metadata.codepage", "analysis.codepage"):
+            value = fact_bag.get(key)
+            if value:
+                return str(value)
+        metadata = fact_bag.get("archive.metadata") or fact_bag.get("analysis.metadata") or {}
+        if isinstance(metadata, dict) and metadata.get("selected_codepage"):
+            return str(metadata.get("selected_codepage"))
+        return None
 
     @staticmethod
     def _facts_require_password(fact_bag) -> bool:

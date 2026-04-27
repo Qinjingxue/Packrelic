@@ -1951,6 +1951,36 @@ bool strict_zip_stored_entries_ok(const std::wstring& path) {
     return cursor == static_cast<std::size_t>(cd_offset) + cd_size;
 }
 
+bool strict_seven_zip_headers_ok(const std::wstring& path) {
+    std::vector<unsigned char> data;
+    if (!read_file_bytes(path, data) || data.size() < 32) {
+        return false;
+    }
+    const unsigned char signature[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
+    if (!std::equal(std::begin(signature), std::end(signature), data.begin())) {
+        return false;
+    }
+    const UInt32 stored_start_crc = le32_at(data, 8);
+    if (crc32_bytes(data.data() + 12, 20) != stored_start_crc) {
+        return false;
+    }
+    const UInt64 next_offset =
+        static_cast<UInt64>(le32_at(data, 12)) |
+        (static_cast<UInt64>(le32_at(data, 16)) << 32);
+    const UInt64 next_size =
+        static_cast<UInt64>(le32_at(data, 20)) |
+        (static_cast<UInt64>(le32_at(data, 24)) << 32);
+    const UInt32 next_crc = le32_at(data, 28);
+    const UInt64 next_start = 32u + next_offset;
+    if (next_start > data.size() || next_size > data.size() || next_start + next_size > data.size()) {
+        return false;
+    }
+    if (next_size == 0) {
+        return true;
+    }
+    return crc32_bytes(data.data() + next_start, static_cast<std::size_t>(next_size)) == next_crc;
+}
+
 ExtractArchiveResult extract_archive_internal(
     CreateObjectFunc create_object,
     const std::wstring& archive_path,
@@ -2091,6 +2121,12 @@ ExtractArchiveResult extract_archive_internal(
         result.status = PasswordTestStatus::Unsupported;
         result.message = "7z.dll did not create a supported archive handler";
     } else if (!any_opened) {
+        if (password.empty() && input_ranges.empty() && lower_extension(archive_path) == L".7z" && !strict_seven_zip_headers_ok(archive_path)) {
+            result.status = PasswordTestStatus::Damaged;
+            result.damaged = true;
+            result.message = "7z structure or header checksum error";
+            return result;
+        }
         if (password.empty() && (last_op_res == kOpDataError || last_op_res == kOpCrcError || last_op_res == kOpHeadersError || last_op_res == kOpUnexpectedEnd)) {
             result.status = PasswordTestStatus::Damaged;
             result.damaged = true;
