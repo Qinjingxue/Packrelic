@@ -1,6 +1,9 @@
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.passwords.archive_tester import ArchivePasswordTester
+from smart_unpacker.passwords.candidates import PasswordCandidatePipeline
+from smart_unpacker.passwords.job import PasswordJob
 from smart_unpacker.passwords.result import PasswordResolution
+from smart_unpacker.passwords.scheduler import PasswordScheduler
 from smart_unpacker.passwords.session import PasswordSession
 from smart_unpacker.support.archive_error_signals import has_archive_damage_signals, has_definite_wrong_password
 
@@ -10,9 +13,15 @@ class PasswordResolver:
         self,
         password_tester: ArchivePasswordTester,
         password_session: PasswordSession | None = None,
+        password_scheduler: PasswordScheduler | None = None,
     ):
         self.password_tester = password_tester
         self.password_session = password_session or PasswordSession()
+        self.password_scheduler = (
+            password_scheduler
+            or getattr(password_tester, "password_scheduler", None)
+            or PasswordScheduler.from_archive_password_tester(password_tester)
+        )
 
     def resolve(
         self,
@@ -35,7 +44,8 @@ class PasswordResolver:
             return self._remember(archive_key, "", encrypted=False)
 
         if self._facts_require_password(fact_bag):
-            password, result, error = self.password_tester.find_working_password(archive_path, part_paths=part_paths)
+            search = self._run_password_search(archive_path, part_paths=part_paths)
+            password, result, error = search.password, search.test_result, search.error_text
             if password is None:
                 test_result, error_text = self.password_tester.test_without_password(archive_path, part_paths=part_paths)
                 if has_archive_damage_signals(error_text) and not has_definite_wrong_password(error_text):
@@ -59,7 +69,8 @@ class PasswordResolver:
             return self._remember(archive_key, "", test_result=test_result, encrypted=False)
 
         if has_definite_wrong_password(error_text) or "cannot open encrypted archive" in error_text:
-            password, result, error = self.password_tester.find_working_password(archive_path, part_paths=part_paths)
+            search = self._run_password_search(archive_path, part_paths=part_paths)
+            password, result, error = search.password, search.test_result, search.error_text
             return self._remember(
                 archive_key,
                 password,
@@ -69,7 +80,8 @@ class PasswordResolver:
                 remember_only_on_success=True,
             )
 
-        password, result, error = self.password_tester.find_working_password(archive_path, part_paths=part_paths)
+        search = self._run_password_search(archive_path, part_paths=part_paths)
+        password, result, error = search.password, search.test_result, search.error_text
         if password is None and has_archive_damage_signals(error_text):
             return PasswordResolution(
                 password=None,
@@ -85,6 +97,18 @@ class PasswordResolver:
             encrypted=True if password else None,
             remember_only_on_success=True,
         )
+
+    def _run_password_search(self, archive_path: str, part_paths: list[str] | None = None):
+        password_store = getattr(self.password_tester, "password_store", None)
+        if password_store is not None:
+            candidates = PasswordCandidatePipeline.from_password_store(password_store)
+        else:
+            candidates = PasswordCandidatePipeline.from_values(getattr(self.password_tester, "passwords", []), source="legacy")
+        return self.password_scheduler.run(PasswordJob(
+            archive_path=archive_path,
+            part_paths=part_paths,
+            candidates=candidates,
+        ))
 
     def _remember(
         self,

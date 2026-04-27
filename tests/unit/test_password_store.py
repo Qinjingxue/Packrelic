@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
 from smart_unpacker.contracts.detection import FactBag
+from smart_unpacker.passwords.job import PasswordJob
+from smart_unpacker.passwords.scheduler import PasswordSearchResult
 from smart_unpacker.passwords import PasswordResolver, PasswordSession, PasswordStore
 
 
@@ -32,15 +34,17 @@ class FakePasswordTester:
 
     def __init__(self):
         self.test_without_password_calls = 0
-        self.find_working_password_calls = 0
+        self.search_calls = 0
+        self.password_store = PasswordStore.from_sources(cli_passwords=["secret"], builtin_passwords=[])
+        self.password_scheduler = FakePasswordScheduler(self)
 
     def test_without_password(self, archive_path, part_paths=None):
         self.test_without_password_calls += 1
         return SimpleNamespace(returncode=2), "wrong password"
 
-    def find_working_password(self, archive_path, part_paths=None):
-        self.find_working_password_calls += 1
-        return "secret", SimpleNamespace(returncode=0), ""
+    def search_passwords(self, job: PasswordJob):
+        self.search_calls += 1
+        return PasswordSearchResult(password="secret", test_result=SimpleNamespace(returncode=0), error_text="")
 
 
 class FakeFailingPasswordTester(FakePasswordTester):
@@ -48,9 +52,17 @@ class FakeFailingPasswordTester(FakePasswordTester):
         self.test_without_password_calls += 1
         return SimpleNamespace(returncode=2), "headers error"
 
-    def find_working_password(self, archive_path, part_paths=None):
-        self.find_working_password_calls += 1
-        return None, SimpleNamespace(returncode=2), "wrong password"
+    def search_passwords(self, job: PasswordJob):
+        self.search_calls += 1
+        return PasswordSearchResult(password=None, test_result=SimpleNamespace(returncode=2), error_text="wrong password")
+
+
+class FakePasswordScheduler:
+    def __init__(self, tester):
+        self.tester = tester
+
+    def run(self, job: PasswordJob):
+        return self.tester.search_passwords(job)
 
 
 def test_password_resolver_records_archive_password_in_session():
@@ -81,7 +93,7 @@ def test_password_resolver_trusts_unencrypted_resource_health_without_retesting(
     assert result.encrypted is False
     assert session.get_resolved("archive-key") == ""
     assert tester.test_without_password_calls == 0
-    assert tester.find_working_password_calls == 0
+    assert tester.search_calls == 0
     assert result.archive_key == "archive-key"
 
 
@@ -100,7 +112,7 @@ def test_password_resolver_trusts_encrypted_resource_health_without_empty_passwo
 
     assert result.password == "secret"
     assert tester.test_without_password_calls == 0
-    assert tester.find_working_password_calls == 1
+    assert tester.search_calls == 1
 
 
 def test_password_resolver_rechecks_failed_encrypted_resolution_for_damage():
@@ -118,7 +130,7 @@ def test_password_resolver_rechecks_failed_encrypted_resolution_for_damage():
 
     assert result.password is None
     assert result.error_text == "headers error"
-    assert tester.find_working_password_calls == 1
+    assert tester.search_calls == 1
     assert tester.test_without_password_calls == 1
 
 

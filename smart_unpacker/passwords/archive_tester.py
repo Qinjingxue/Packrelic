@@ -2,7 +2,10 @@ import subprocess
 from typing import List, Optional, Tuple
 
 from smart_unpacker.support.sevenzip_native import cached_test_archive, get_native_password_tester
+from smart_unpacker.passwords.candidates import PasswordCandidatePipeline
 from smart_unpacker.passwords.internal.store import PasswordStore
+from smart_unpacker.passwords.job import PasswordJob
+from smart_unpacker.passwords.scheduler import PasswordScheduler
 
 
 class ArchivePasswordTester:
@@ -19,6 +22,7 @@ class ArchivePasswordTester:
             builtin_passwords_file=builtin_passwords_file,
         )
         self.native_password_tester = get_native_password_tester()
+        self.password_scheduler = PasswordScheduler.from_archive_password_tester(self)
 
     @property
     def recent_passwords(self) -> List[str]:
@@ -48,17 +52,13 @@ class ArchivePasswordTester:
         return self.test_password(archive_path, "", part_paths=part_paths)
 
     def find_working_password(self, archive_path: str, part_paths: list[str] | None = None) -> Tuple[Optional[str], subprocess.CompletedProcess, str]:
-        passwords_to_try = self.get_passwords_to_try()
-        if not passwords_to_try:
-            passwords_to_try = [""]
-
-        native_attempt = self.native_password_tester.try_passwords(archive_path, passwords_to_try, part_paths=part_paths)
-        native_result = native_attempt.as_completed_process(archive_path)
-        if native_attempt.ok:
-            pwd = passwords_to_try[native_attempt.matched_index]
-            self.password_store.remember_success(pwd)
-            return pwd, native_result, ""
-        return None, native_result, native_attempt.message.lower() or "wrong password"
+        pipeline = PasswordCandidatePipeline.from_password_store(self.password_store)
+        result = self.password_scheduler.run(PasswordJob(
+            archive_path=archive_path,
+            part_paths=part_paths,
+            candidates=pipeline,
+        ))
+        return result.password, result.test_result, result.error_text
 
 
 PasswordManager = ArchivePasswordTester
