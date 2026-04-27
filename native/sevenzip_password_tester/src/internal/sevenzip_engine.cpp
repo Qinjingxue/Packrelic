@@ -12,6 +12,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <optional>
 #include <string>
@@ -28,6 +29,7 @@ using Int64 = std::int64_t;
 
 constexpr Int32 kAllItems = -1;
 constexpr Int32 kTestMode = 1;
+constexpr Int32 kExtractMode = 0;
 
 constexpr Int32 kOpOk = 0;
 constexpr Int32 kOpUnsupportedMethod = 1;
@@ -40,6 +42,7 @@ constexpr Int32 kOpIsNotArc = 7;
 constexpr Int32 kOpHeadersError = 8;
 constexpr Int32 kOpWrongPassword = 9;
 
+constexpr UInt32 kpidPath = 3;
 constexpr UInt32 kpidName = 4;
 constexpr UInt32 kpidIsDir = 6;
 constexpr UInt32 kpidSize = 7;
@@ -50,8 +53,16 @@ constexpr UInt32 kpidDictionarySize = 18;
 constexpr UInt32 kpidCRC = 19;
 constexpr UInt32 kpidMethod = 22;
 
+bool prop_bool(const PROPVARIANT& value);
+UInt64 prop_u64(const PROPVARIANT& value);
+std::wstring prop_text(const PROPVARIANT& value);
+void clear_prop(PROPVARIANT& value);
+std::wstring archive_type_for_path(const std::wstring& path);
+
 const GUID IID_ISequentialInStream = {
     0x23170F69, 0x40C1, 0x278A, {0x00, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00}};
+const GUID IID_ISequentialOutStream = {
+    0x23170F69, 0x40C1, 0x278A, {0x00, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00, 0x00}};
 const GUID IID_IInStream = {
     0x23170F69, 0x40C1, 0x278A, {0x00, 0x00, 0x00, 0x03, 0x00, 0x03, 0x00, 0x00}};
 const GUID IID_IProgress = {
@@ -120,6 +131,8 @@ struct IInArchive : public IUnknown {
     virtual HRESULT STDMETHODCALLTYPE GetNumberOfArchiveProperties(UInt32* numProps) = 0;
     virtual HRESULT STDMETHODCALLTYPE GetArchivePropertyInfo(UInt32 index, BSTR* name, UInt32* propID, VARTYPE* varType) = 0;
 };
+
+bool get_item_property(IInArchive* archive, UInt32 index, UInt32 prop_id, PROPVARIANT& value);
 
 using CreateObjectFunc = HRESULT(WINAPI*)(const GUID* clsid, const GUID* iid, void** outObject);
 
@@ -681,6 +694,256 @@ private:
     LONG refs_ = 1;
     std::wstring password_;
     Int32 operation_result_ = kOpOk;
+};
+
+class FileOutStream final : public ISequentialOutStream {
+public:
+    explicit FileOutStream(const std::wstring& path)
+        : handle_(CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
+    ~FileOutStream() {
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+        }
+    }
+    bool is_open() const { return handle_ != INVALID_HANDLE_VALUE; }
+    UInt64 bytes_written() const { return bytes_written_; }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (!object) {
+            return E_POINTER;
+        }
+        *object = nullptr;
+        if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_ISequentialOutStream)) {
+            *object = static_cast<IUnknown*>(this);
+        } else {
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG refs = InterlockedDecrement(&refs_);
+        if (refs == 0) {
+            delete this;
+        }
+        return refs;
+    }
+    HRESULT STDMETHODCALLTYPE Write(const void* data, UInt32 size, UInt32* processedSize) override {
+        if (processedSize) {
+            *processedSize = 0;
+        }
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            return E_FAIL;
+        }
+        DWORD written = 0;
+        if (!WriteFile(handle_, data, size, &written, nullptr)) {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+        bytes_written_ += written;
+        if (processedSize) {
+            *processedSize = written;
+        }
+        return S_OK;
+    }
+
+private:
+    LONG refs_ = 1;
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    UInt64 bytes_written_ = 0;
+};
+
+std::optional<std::filesystem::path> safe_relative_item_path(const std::wstring& raw_name) {
+    if (raw_name.empty()) {
+        return std::nullopt;
+    }
+    std::filesystem::path candidate(raw_name);
+    if (candidate.is_absolute() || candidate.has_root_name() || candidate.has_root_directory()) {
+        return std::nullopt;
+    }
+    std::filesystem::path normalized;
+    for (const auto& part : candidate) {
+        const auto text = part.wstring();
+        if (text.empty() || text == L"." || text == L"/" || text == L"\\") {
+            continue;
+        }
+        if (text == L"..") {
+            return std::nullopt;
+        }
+        normalized /= part;
+    }
+    if (normalized.empty()) {
+        return std::nullopt;
+    }
+    return normalized;
+}
+
+class ExtractToDiskCallback final : public IArchiveExtractCallback, public ICryptoGetTextPassword {
+public:
+    ExtractToDiskCallback(
+        IInArchive* archive,
+        std::wstring password,
+        std::wstring output_dir,
+        ExtractProgressCallback progress
+    ) : archive_(archive),
+        password_(std::move(password)),
+        output_dir_(std::move(output_dir)),
+        progress_(std::move(progress)) {}
+
+    Int32 operation_result() const { return operation_result_; }
+    UInt32 files_written() const { return files_written_; }
+    UInt32 dirs_written() const { return dirs_written_; }
+    UInt64 bytes_written() const { return bytes_written_; }
+    UInt64 completed_bytes() const { return completed_bytes_; }
+    const std::wstring& failed_item() const { return failed_item_; }
+    bool output_error() const { return output_error_; }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (!object) {
+            return E_POINTER;
+        }
+        *object = nullptr;
+        if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_IProgress) || IsEqualGUID(iid, IID_IArchiveExtractCallback)) {
+            *object = static_cast<IArchiveExtractCallback*>(this);
+        } else if (IsEqualGUID(iid, IID_ICryptoGetTextPassword)) {
+            *object = static_cast<ICryptoGetTextPassword*>(this);
+        } else {
+            return E_NOINTERFACE;
+        }
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG refs = InterlockedDecrement(&refs_);
+        if (refs == 0) {
+            delete this;
+        }
+        return refs;
+    }
+    HRESULT STDMETHODCALLTYPE SetTotal(UInt64 total) override {
+        total_bytes_ = total;
+        emit("total", 0, L"");
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE SetCompleted(const UInt64* completeValue) override {
+        if (completeValue) {
+            completed_bytes_ = *completeValue;
+            emit("progress", current_index_, current_item_);
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetStream(UInt32 index, ISequentialOutStream** outStream, Int32 askExtractMode) override {
+        if (!outStream) {
+            return E_POINTER;
+        }
+        *outStream = nullptr;
+        current_index_ = index;
+        current_item_.clear();
+        if (askExtractMode != kExtractMode) {
+            return S_OK;
+        }
+
+        PROPVARIANT value{};
+        bool is_dir = false;
+        if (get_item_property(archive_, index, kpidIsDir, value)) {
+            is_dir = prop_bool(value);
+        }
+        clear_prop(value);
+
+        std::wstring name;
+        if (get_item_property(archive_, index, kpidPath, value)) {
+            name = prop_text(value);
+        }
+        clear_prop(value);
+        if (name.empty() && get_item_property(archive_, index, kpidName, value)) {
+            name = prop_text(value);
+        }
+        clear_prop(value);
+        if (name.empty()) {
+            name = L"#" + std::to_wstring(index);
+        }
+        current_item_ = name;
+
+        const auto safe_path = safe_relative_item_path(name);
+        if (!safe_path.has_value()) {
+            failed_item_ = name;
+            output_error_ = true;
+            return E_INVALIDARG;
+        }
+        const auto target = std::filesystem::path(output_dir_) / safe_path.value();
+        emit("item_start", index, name);
+        try {
+            if (is_dir) {
+                std::filesystem::create_directories(target);
+                dirs_written_ += 1;
+                return S_OK;
+            }
+            std::filesystem::create_directories(target.parent_path());
+        } catch (...) {
+            failed_item_ = name;
+            output_error_ = true;
+            return E_FAIL;
+        }
+
+        auto* stream = new FileOutStream(target.wstring());
+        if (!stream->is_open()) {
+            stream->Release();
+            failed_item_ = name;
+            output_error_ = true;
+            return E_FAIL;
+        }
+        *outStream = stream;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE PrepareOperation(Int32) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE SetOperationResult(Int32 opRes) override {
+        operation_result_ = opRes;
+        if (opRes == kOpOk && !current_item_.empty()) {
+            files_written_ += 1;
+        } else if (opRes != kOpOk && failed_item_.empty()) {
+            failed_item_ = current_item_;
+        }
+        emit(opRes == kOpOk ? "item_done" : "item_failed", current_index_, current_item_);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE CryptoGetTextPassword(BSTR* password) override {
+        if (!password) {
+            return E_POINTER;
+        }
+        *password = SysAllocString(password_.c_str());
+        return *password ? S_OK : E_OUTOFMEMORY;
+    }
+
+private:
+    void emit(const std::string& event, UInt32 item_index, const std::wstring& item_path) {
+        if (!progress_) {
+            return;
+        }
+        ExtractProgressEvent progress;
+        progress.event = event;
+        progress.completed_bytes = completed_bytes_;
+        progress.total_bytes = total_bytes_;
+        progress.item_index = item_index;
+        progress.item_path = item_path;
+        progress_(progress);
+    }
+
+    LONG refs_ = 1;
+    IInArchive* archive_ = nullptr;
+    std::wstring password_;
+    std::wstring output_dir_;
+    ExtractProgressCallback progress_;
+    UInt64 completed_bytes_ = 0;
+    UInt64 total_bytes_ = 0;
+    UInt64 bytes_written_ = 0;
+    UInt32 current_index_ = 0;
+    UInt32 files_written_ = 0;
+    UInt32 dirs_written_ = 0;
+    std::wstring current_item_;
+    std::wstring failed_item_;
+    Int32 operation_result_ = kOpOk;
+    bool output_error_ = false;
 };
 
 std::wstring lower_extension(const std::wstring& path) {
@@ -1386,6 +1649,121 @@ CrcManifestResult read_archive_crc_manifest_internal(
     return result;
 }
 
+ExtractArchiveResult extract_archive_internal(
+    CreateObjectFunc create_object,
+    const std::wstring& archive_path,
+    const std::wstring& password,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& output_dir,
+    ExtractProgressCallback progress
+) {
+    ExtractArchiveResult result;
+    result.backend_available = true;
+    bool any_format_created = false;
+    bool any_opened = false;
+    HRESULT last_hr = E_FAIL;
+    Int32 last_op_res = kOpOk;
+
+    try {
+        std::filesystem::create_directories(output_dir);
+    } catch (...) {
+        result.status = PasswordTestStatus::Error;
+        result.message = "output directory could not be created";
+        return result;
+    }
+
+    for (const GUID& format : candidate_formats(archive_path, part_paths)) {
+        ComPtr<IInArchive> archive;
+        HRESULT hr = create_object(&format, &IID_IInArchive, reinterpret_cast<void**>(archive.out()));
+        if (hr != S_OK || !archive) {
+            last_hr = hr;
+            continue;
+        }
+        any_format_created = true;
+
+        bool stream_opened = false;
+        ComPtr<IInStream> stream = open_archive_stream(archive_path, part_paths, stream_opened);
+        if (!stream_opened) {
+            result.status = PasswordTestStatus::Error;
+            result.message = "archive file could not be opened";
+            return result;
+        }
+
+        ComPtr<IArchiveOpenCallback> open_callback(new OpenCallback(password, callback_archive_path(archive_path, part_paths), part_paths));
+        hr = archive->Open(stream.get(), nullptr, open_callback.get());
+        if (hr != S_OK) {
+            last_hr = hr;
+            continue;
+        }
+        any_opened = true;
+
+        UInt32 num_items = 0;
+        if (archive->GetNumberOfItems(&num_items) == S_OK) {
+            result.item_count = num_items;
+        }
+
+        result.archive_type = archive_type_for_path(archive_path);
+        auto* raw_extract_callback = new ExtractToDiskCallback(archive.get(), password, output_dir, std::move(progress));
+        ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
+        hr = archive->Extract(nullptr, static_cast<UInt32>(kAllItems), 0, extract_callback.get());
+        last_hr = hr;
+        last_op_res = raw_extract_callback->operation_result();
+        result.operation_result = last_op_res;
+        result.files_written = raw_extract_callback->files_written();
+        result.dirs_written = raw_extract_callback->dirs_written();
+        result.bytes_written = raw_extract_callback->completed_bytes();
+        result.failed_item = raw_extract_callback->failed_item();
+        archive->Close();
+
+        if (hr == S_OK && last_op_res == kOpOk) {
+            result.status = PasswordTestStatus::Ok;
+            result.command_ok = true;
+            result.message = "archive extracted";
+            return result;
+        }
+        if (raw_extract_callback->output_error()) {
+            result.status = PasswordTestStatus::Error;
+            result.message = "archive item could not be written safely";
+            return result;
+        }
+        if (looks_wrong_password(hr, last_op_res)) {
+            result.status = PasswordTestStatus::WrongPassword;
+            result.encrypted = true;
+            result.wrong_password = true;
+            result.checksum_error = last_op_res == kOpCrcError;
+            result.message = "archive is encrypted or password is wrong";
+            return result;
+        }
+        if (looks_missing_volume(archive_path, last_op_res)) {
+            result.status = PasswordTestStatus::Damaged;
+            result.damaged = true;
+            result.missing_volume = true;
+            result.message = "archive split volume appears incomplete";
+            return result;
+        }
+        if (looks_damaged(last_op_res)) {
+            result.status = PasswordTestStatus::Damaged;
+            result.damaged = true;
+            result.message = "archive appears damaged";
+            return result;
+        }
+        result.status = PasswordTestStatus::Unsupported;
+        result.unsupported_method = last_op_res == kOpUnsupportedMethod;
+        result.message = result.unsupported_method ? "archive uses an unsupported method" : "archive could not be extracted";
+    }
+
+    if (!any_format_created) {
+        result.status = PasswordTestStatus::Unsupported;
+        result.message = "7z.dll did not create a supported archive handler";
+    } else if (!any_opened) {
+        result.status = looks_wrong_password(last_hr, last_op_res) ? PasswordTestStatus::WrongPassword : PasswordTestStatus::Unsupported;
+        result.wrong_password = result.status == PasswordTestStatus::WrongPassword;
+        result.encrypted = result.wrong_password;
+        result.message = result.wrong_password ? "archive is encrypted or password is wrong" : "archive could not be opened by supported handlers";
+    }
+    return result;
+}
+
 PasswordTestResult test_one_password(
     CreateObjectFunc create_object,
     const std::wstring& archive_path,
@@ -1502,6 +1880,46 @@ bool is_backend_available(const std::wstring& seven_zip_dll_path) {
 #else
     (void)seven_zip_dll_path;
     return false;
+#endif
+}
+
+ExtractArchiveResult extract_archive_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& password,
+    const std::wstring& output_dir,
+    ExtractProgressCallback progress
+) {
+#ifdef _WIN32
+    ComModule module(seven_zip_dll_path);
+    auto create_object = module.create_object();
+    if (!create_object) {
+        ExtractArchiveResult result;
+        result.status = PasswordTestStatus::BackendUnavailable;
+        result.message = "7z.dll could not be loaded";
+        return result;
+    }
+    const std::vector<std::wstring> effective_part_paths =
+        part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
+    return extract_archive_internal(
+        create_object,
+        archive_path,
+        password,
+        effective_part_paths,
+        output_dir,
+        std::move(progress));
+#else
+    (void)seven_zip_dll_path;
+    (void)archive_path;
+    (void)part_paths;
+    (void)password;
+    (void)output_dir;
+    (void)progress;
+    ExtractArchiveResult result;
+    result.status = PasswordTestStatus::BackendUnavailable;
+    result.message = "native archive extraction is only implemented on Windows";
+    return result;
 #endif
 }
 

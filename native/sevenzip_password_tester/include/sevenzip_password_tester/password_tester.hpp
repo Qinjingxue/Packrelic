@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <functional>
 
 namespace smart_unpacker::sevenzip {
 
@@ -21,6 +22,36 @@ struct PasswordTestResult {
     int attempts = 0;
     std::string message;
 };
+
+struct ExtractProgressEvent {
+    std::string event;
+    unsigned long long completed_bytes = 0;
+    unsigned long long total_bytes = 0;
+    unsigned int item_index = 0;
+    std::wstring item_path;
+};
+
+struct ExtractArchiveResult {
+    PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
+    bool backend_available = false;
+    bool command_ok = false;
+    bool encrypted = false;
+    bool damaged = false;
+    bool checksum_error = false;
+    bool missing_volume = false;
+    bool wrong_password = false;
+    bool unsupported_method = false;
+    int operation_result = 0;
+    unsigned int item_count = 0;
+    unsigned int files_written = 0;
+    unsigned int dirs_written = 0;
+    unsigned long long bytes_written = 0;
+    std::wstring archive_type;
+    std::wstring failed_item;
+    std::string message;
+};
+
+using ExtractProgressCallback = std::function<void(const ExtractProgressEvent&)>;
 
 bool is_backend_available(const std::wstring& seven_zip_dll_path);
 
@@ -50,6 +81,15 @@ PasswordTestResult test_passwords_with_parts(
     const std::vector<std::wstring>& part_paths,
     const wchar_t* const* passwords,
     int password_count
+);
+
+ExtractArchiveResult extract_archive_with_parts(
+    const std::wstring& seven_zip_dll_path,
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths,
+    const std::wstring& password,
+    const std::wstring& output_dir,
+    ExtractProgressCallback progress = {}
 );
 
 const char* status_name(PasswordTestStatus status);

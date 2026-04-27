@@ -71,5 +71,18 @@ target_link_libraries(sevenzip_password_tester_smoke
     PRIVATE sevenzip_password_tester
 )
 
+add_executable(sevenzip_worker
+    src/sevenzip_worker.cpp
+)
+apply_release_optimizations(sevenzip_worker)
+
+target_link_libraries(sevenzip_worker
+    PRIVATE sevenzip_password_tester
+)
+
+if(WIN32)
+    target_compile_definitions(sevenzip_worker PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+
 enable_testing()
 add_test(NAME sevenzip_password_tester_smoke COMMAND sevenzip_password_tester_smoke)
