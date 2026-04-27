@@ -72,7 +72,7 @@ class ExtractionBatchRunner:
             return []
 
         self.prepare_tasks(tasks)
-        self.analysis_stage.analyze_tasks(tasks)
+        tasks = self.analysis_stage.analyze_tasks(tasks)
         self.repair_stage.repair_medium_confidence_tasks(tasks)
         output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
             tasks,

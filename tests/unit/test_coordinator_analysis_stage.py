@@ -42,6 +42,18 @@ def _report(path, evidence):
     )
 
 
+def _multi_report(path, evidences):
+    return ArchiveAnalysisReport(
+        path=str(path),
+        size=200,
+        evidences=list(evidences),
+        selected=list(evidences),
+        prepass={"formats": [evidence.format for evidence in evidences]},
+        read_bytes=64,
+        cache_hits=1,
+    )
+
+
 def test_analysis_stage_writes_file_range_input(tmp_path):
     archive = tmp_path / "carrier.bin"
     archive.write_bytes(b"junk" + b"PK\x03\x04" + b"x" * 32 + b"tail")
@@ -70,6 +82,45 @@ def test_analysis_stage_writes_file_range_input(tmp_path):
         "segment": {"start": 4, "source": "analysis", "end": 40, "confidence": 0.99},
         "analysis": {"status": "extractable", "confidence": 0.99, "damage_flags": []},
     }
+
+
+def test_analysis_stage_expands_carrier_into_logical_archive_tasks(tmp_path):
+    carrier = tmp_path / "carrier.bin"
+    carrier.write_bytes(b"junk" + b"Rar!\x1a\x07\x01\x00" + b"x" * 20 + b"pad" + b"7z\xbc\xaf\x27\x1c" + b"y" * 20)
+    rar = ArchiveFormatEvidence(
+        format="rar",
+        confidence=0.97,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=4, end_offset=32, confidence=0.97)],
+    )
+    seven = ArchiveFormatEvidence(
+        format="7z",
+        confidence=0.96,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=35, end_offset=61, confidence=0.96)],
+    )
+    task = _task(carrier)
+    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage.enabled = True
+    stage.scheduler = _FakeAnalysisScheduler(_multi_report(carrier, [rar, seven]))
+
+    tasks = stage.analyze_tasks([task])
+
+    assert [item.logical_name for item in tasks] == ["case_01_rar", "case_02_7z"]
+    assert [item.fact_bag.get("analysis.selected_format") for item in tasks] == ["rar", "7z"]
+    assert tasks[0].fact_bag.get("archive.input") == {
+        "kind": "archive_input",
+        "entry_path": str(carrier),
+        "open_mode": "file_range",
+        "format_hint": "rar",
+        "logical_name": "case_01_rar",
+        "parts": [{"path": str(carrier), "role": "main", "start": 4, "end": 32}],
+        "segment": {"start": 4, "source": "analysis", "end": 32, "confidence": 0.97},
+        "analysis": {"status": "extractable", "confidence": 0.97, "damage_flags": []},
+    }
+    assert tasks[1].fact_bag.get("archive.input")["format_hint"] == "7z"
+    assert tasks[1].fact_bag.get("archive.input")["parts"][0]["start"] == 35
+    assert tasks[1].key.endswith("#segment2:7z")
 
 
 def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):

@@ -10,7 +10,8 @@ from smart_unpacker.contracts.archive_input import (
     ArchiveInputRange,
     ArchiveInputSegment,
 )
-from smart_unpacker.contracts.tasks import ArchiveTask
+from smart_unpacker.contracts.detection import FactBag
+from smart_unpacker.contracts.tasks import ArchiveTask, SplitArchiveInfo
 
 
 class ArchiveAnalysisStage:
@@ -23,34 +24,60 @@ class ArchiveAnalysisStage:
     def analyze_tasks(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
         if not self.enabled or self.scheduler is None:
             return tasks
+        expanded_tasks: list[ArchiveTask] = []
         for task in tasks:
-            self.analyze_task(task)
-        return tasks
+            _, task_results = self._analyze_task_to_tasks(task)
+            expanded_tasks.extend(task_results)
+        return expanded_tasks
 
     def analyze_task(self, task: ArchiveTask) -> ArchiveAnalysisReport | None:
+        report, _ = self._analyze_task_to_tasks(task)
+        return report
+
+    def analyze_task_to_tasks(self, task: ArchiveTask) -> list[ArchiveTask]:
+        _, tasks = self._analyze_task_to_tasks(task)
+        return tasks
+
+    def _analyze_task_to_tasks(self, task: ArchiveTask) -> tuple[ArchiveAnalysisReport | None, list[ArchiveTask]]:
         if self.scheduler is None:
-            return None
+            return None, [task]
         try:
             report = self.scheduler.analyze_task(task)
         except Exception as exc:
             task.fact_bag.set("analysis.status", "error")
             task.fact_bag.set("analysis.error", str(exc))
-            return None
+            return None, [task]
 
         self._record_report(task, report)
-        selected = self._select_extractable_evidence(report)
-        if selected is None:
-            return report
+        task.fact_bag.set("analysis.report_path", report.path)
+        candidates = self._extractable_segments(report)
+        if not candidates:
+            return report, [task]
+        if len(candidates) == 1:
+            evidence, segment, _ = candidates[0]
+            self._apply_selected_segment(task, evidence, segment, index=0)
+            return report, [task]
+        return report, [
+            self._child_task_for_segment(task, report, evidence, segment, index=index)
+            for evidence, segment, index in candidates
+        ]
 
-        segment = selected.segments[0]
-        segment_payload = self._segment_payload(task, selected, segment)
-        archive_input = self._archive_input_for_segment(task, selected, segment)
-        task.fact_bag.set("analysis.status", selected.status)
-        task.fact_bag.set("analysis.selected_format", selected.format)
+    def _apply_selected_segment(
+        self,
+        task: ArchiveTask,
+        evidence: ArchiveFormatEvidence,
+        segment: ArchiveSegment,
+        *,
+        index: int,
+    ) -> None:
+        segment_payload = self._segment_payload(task, evidence, segment)
+        archive_input = self._archive_input_for_segment(task, evidence, segment, index=index)
+        task.fact_bag.set("analysis.status", evidence.status)
+        task.fact_bag.set("analysis.selected_format", evidence.format)
+        task.fact_bag.set("analysis.segment_index", index)
         task.fact_bag.set("analysis.segment", segment_payload)
         if archive_input:
             task.fact_bag.set("archive.input", archive_input.to_dict())
-        return report
 
     def _record_report(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> None:
         task.fact_bag.set("analysis.status", "extractable" if report.has_extractable else "not_extractable")
@@ -72,15 +99,20 @@ class ArchiveAnalysisStage:
             ],
         )
 
-    def _select_extractable_evidence(self, report: ArchiveAnalysisReport) -> ArchiveFormatEvidence | None:
-        candidates = [
-            evidence
-            for evidence in report.selected
-            if evidence.segments and evidence.segments[0].end_offset is not None
+    def _extractable_segments(self, report: ArchiveAnalysisReport) -> list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]]:
+        candidates: list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]] = []
+        index = 1
+        for evidence in sorted(report.selected, key=lambda item: item.confidence, reverse=True):
+            for segment in evidence.segments:
+                if segment.end_offset is None:
+                    continue
+                candidates.append((evidence, segment, index))
+                index += 1
+        candidates.sort(key=lambda item: (int(item[1].start_offset), item[0].format, item[2]))
+        return [
+            (evidence, segment, position)
+            for position, (evidence, segment, _) in enumerate(candidates, start=1)
         ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda evidence: evidence.confidence)
 
     def _segment_payload(self, task: ArchiveTask, evidence: ArchiveFormatEvidence, segment: ArchiveSegment) -> dict:
         payload = asdict(segment)
@@ -96,11 +128,11 @@ class ArchiveAnalysisStage:
         task: ArchiveTask,
         evidence: ArchiveFormatEvidence,
         segment: ArchiveSegment,
+        *,
+        index: int = 1,
     ) -> ArchiveInputDescriptor | None:
         parts = self._ordered_parts(task)
         if not parts:
-            return None
-        if evidence.format == "rar":
             return None
         if len(parts) == 1:
             if int(segment.start_offset) <= 0:
@@ -116,7 +148,7 @@ class ArchiveAnalysisStage:
                 entry_path=parts[0],
                 open_mode="file_range",
                 format_hint=evidence.format,
-                logical_name=str(task.logical_name or ""),
+                logical_name=self._segment_logical_name(task, evidence, index),
                 parts=[ArchiveInputPart(path=parts[0], range=archive_range)],
                 segment=ArchiveInputSegment(
                     start=int(segment.start_offset),
@@ -129,6 +161,8 @@ class ArchiveAnalysisStage:
                     "damage_flags": list(segment.damage_flags),
                 },
             )
+        if evidence.format == "rar":
+            return None
         ranges = self._logical_range_to_file_ranges(
             parts,
             int(segment.start_offset),
@@ -140,7 +174,7 @@ class ArchiveAnalysisStage:
             entry_path=task.main_path,
             open_mode="concat_ranges",
             format_hint=evidence.format,
-            logical_name=str(task.logical_name or ""),
+            logical_name=self._segment_logical_name(task, evidence, index),
             ranges=[ArchiveInputRange(path=item["path"], start=item["start"], end=item.get("end")) for item in ranges],
             segment=ArchiveInputSegment(
                 start=int(segment.start_offset),
@@ -210,3 +244,56 @@ class ArchiveAnalysisStage:
                 "end": int(local_end),
             })
         return ranges
+
+    def _child_task_for_segment(
+        self,
+        task: ArchiveTask,
+        report: ArchiveAnalysisReport,
+        evidence: ArchiveFormatEvidence,
+        segment: ArchiveSegment,
+        *,
+        index: int,
+    ) -> ArchiveTask:
+        bag = self._clone_fact_bag(task.fact_bag)
+        child = ArchiveTask(
+            fact_bag=bag,
+            score=task.score,
+            key=f"{task.key}#segment{index}:{evidence.format}",
+            main_path=task.main_path,
+            all_parts=list(task.all_parts or []),
+            logical_name=self._segment_logical_name(task, evidence, index),
+            split_info=SplitArchiveInfo(
+                is_split=task.split_info.is_split,
+                is_sfx_stub=task.split_info.is_sfx_stub,
+                parts=list(task.split_info.parts or []),
+                preferred_entry=task.split_info.preferred_entry,
+                source=task.split_info.source,
+                volumes=list(task.split_info.volumes or []),
+            ),
+            decision=task.decision,
+            stop_reason=task.stop_reason,
+            matched_rules=list(task.matched_rules or []),
+            detected_ext=task.detected_ext,
+        )
+        self._record_report(child, report)
+        child.fact_bag.set("analysis.report_path", report.path)
+        child.fact_bag.set("analysis.carrier_path", task.main_path)
+        child.fact_bag.set("analysis.logical_archive_index", index)
+        child.fact_bag.set("candidate.logical_name", child.logical_name)
+        self._apply_selected_segment(child, evidence, segment, index=index)
+        return child
+
+    def _segment_logical_name(self, task: ArchiveTask, evidence: ArchiveFormatEvidence, index: int) -> str:
+        base = str(task.logical_name or os.path.splitext(os.path.basename(task.main_path))[0] or "archive")
+        if task.fact_bag.get("analysis.logical_archive_index"):
+            return base
+        if index <= 0:
+            return base
+        fmt = str(evidence.format or "archive").replace("/", "_")
+        return f"{base}_{index:02d}_{fmt}"
+
+    def _clone_fact_bag(self, fact_bag: FactBag) -> FactBag:
+        cloned = FactBag()
+        for key, value in fact_bag.to_dict().items():
+            cloned.set(key, value)
+        return cloned
