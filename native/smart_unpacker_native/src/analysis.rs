@@ -22,6 +22,21 @@ const ZSTD: &[u8] = b"\x28\xb5\x2f\xfd";
 const TAR_USTAR: &[u8] = b"ustar";
 const TAR_BLOCK_SIZE: usize = 512;
 
+const ANALYSIS_SIGNATURES_P: &[(&str, &[u8])] = &[
+    ("zip_local", ZIP_LOCAL),
+    ("zip_eocd", ZIP_EOCD),
+];
+const ANALYSIS_SIGNATURES_R: &[(&str, &[u8])] = &[
+    ("rar4", RAR4),
+    ("rar5", RAR5),
+];
+const ANALYSIS_SIGNATURES_7: &[(&str, &[u8])] = &[("7z", SEVEN_ZIP)];
+const ANALYSIS_SIGNATURES_GZIP: &[(&str, &[u8])] = &[("gzip", GZIP)];
+const ANALYSIS_SIGNATURES_BZIP2: &[(&str, &[u8])] = &[("bzip2", BZIP2)];
+const ANALYSIS_SIGNATURES_XZ: &[(&str, &[u8])] = &[("xz", XZ)];
+const ANALYSIS_SIGNATURES_ZSTD: &[(&str, &[u8])] = &[("zstd", ZSTD)];
+const ANALYSIS_SIGNATURES_TAR: &[(&str, &[u8])] = &[("tar_ustar", TAR_USTAR)];
+
 #[pyclass]
 pub(crate) struct AnalysisBinaryView {
     inner: Mutex<AnalysisBinaryViewInner>,
@@ -440,30 +455,26 @@ impl AnalysisBinaryView {
         let head_len = head_bytes.min(size as usize);
         let tail_len = tail_bytes.min(size as usize);
         let tail_start = size.saturating_sub(tail_len as u64);
-        let head = self.read_at_bytes(0, head_len)?;
-        let tail = self.read_at_bytes(tail_start, tail_len)?;
+        let head_end = head_len as u64;
+        let scan_start = 0u64;
+        let tail_end = size;
+        let (scan_start, scan_len, scanned_head, scanned_tail) = if tail_start <= head_end {
+            let end = head_end.max(tail_end);
+            (scan_start, end.saturating_sub(scan_start) as usize, head_len, tail_len)
+        } else {
+            (0u64, head_len, head_len, 0usize)
+        };
 
         let mut hits = Vec::new();
-        collect_hits(&mut hits, "zip_local", 0, &head, ZIP_LOCAL);
-        collect_hits(&mut hits, "zip_eocd", 0, &head, ZIP_EOCD);
-        collect_hits(&mut hits, "rar4", 0, &head, RAR4);
-        collect_hits(&mut hits, "rar5", 0, &head, RAR5);
-        collect_hits(&mut hits, "7z", 0, &head, SEVEN_ZIP);
-        collect_hits(&mut hits, "gzip", 0, &head, GZIP);
-        collect_hits(&mut hits, "bzip2", 0, &head, BZIP2);
-        collect_hits(&mut hits, "xz", 0, &head, XZ);
-        collect_hits(&mut hits, "zstd", 0, &head, ZSTD);
-        collect_hits(&mut hits, "tar_ustar", 0, &head, TAR_USTAR);
-        collect_hits(&mut hits, "zip_local", tail_start, &tail, ZIP_LOCAL);
-        collect_hits(&mut hits, "zip_eocd", tail_start, &tail, ZIP_EOCD);
-        collect_hits(&mut hits, "rar4", tail_start, &tail, RAR4);
-        collect_hits(&mut hits, "rar5", tail_start, &tail, RAR5);
-        collect_hits(&mut hits, "7z", tail_start, &tail, SEVEN_ZIP);
-        collect_hits(&mut hits, "gzip", tail_start, &tail, GZIP);
-        collect_hits(&mut hits, "bzip2", tail_start, &tail, BZIP2);
-        collect_hits(&mut hits, "xz", tail_start, &tail, XZ);
-        collect_hits(&mut hits, "zstd", tail_start, &tail, ZSTD);
-        collect_hits(&mut hits, "tar_ustar", tail_start, &tail, TAR_USTAR);
+        if tail_start <= head_end {
+            let data = self.read_at_bytes(scan_start, scan_len)?;
+            collect_signature_hits(&mut hits, scan_start, &data);
+        } else {
+            let head = self.read_at_bytes(0, head_len)?;
+            collect_signature_hits(&mut hits, 0, &head);
+            let tail = self.read_at_bytes(tail_start, tail_len)?;
+            collect_signature_hits(&mut hits, tail_start, &tail);
+        }
         hits.sort_by_key(|(_, offset)| *offset);
         hits.dedup();
 
@@ -483,8 +494,8 @@ impl AnalysisBinaryView {
         formats.sort();
         dict.set_item("hits", py_hits)?;
         dict.set_item("formats", formats)?;
-        dict.set_item("head_bytes", head.len())?;
-        dict.set_item("tail_bytes", tail.len())?;
+        dict.set_item("head_bytes", scanned_head)?;
+        dict.set_item("tail_bytes", if scanned_tail == 0 { tail_len } else { scanned_tail })?;
         Ok(dict.unbind())
     }
 }
@@ -1012,23 +1023,36 @@ impl Drop for ReadPermit<'_> {
     }
 }
 
-fn collect_hits(target: &mut Vec<(&'static str, u64)>, name: &'static str, base: u64, data: &[u8], needle: &[u8]) {
-    if needle.is_empty() || data.len() < needle.len() {
+fn collect_signature_hits(target: &mut Vec<(&'static str, u64)>, base: u64, data: &[u8]) {
+    if data.is_empty() {
         return;
     }
-    let mut start = 0usize;
-    while let Some(index) = find_bytes(&data[start..], needle) {
-        let absolute = start + index;
-        target.push((name, base + absolute as u64));
-        start = absolute + 1;
-        if start >= data.len() {
-            break;
+    for (index, byte) in data.iter().enumerate() {
+        let candidates = signatures_for_first_byte(*byte);
+        if candidates.is_empty() {
+            continue;
+        }
+        for (name, signature) in candidates {
+            let end = index + signature.len();
+            if end <= data.len() && &data[index..end] == *signature {
+                target.push((*name, base + index as u64));
+            }
         }
     }
 }
 
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|window| window == needle)
+fn signatures_for_first_byte(byte: u8) -> &'static [(&'static str, &'static [u8])] {
+    match byte {
+        b'P' => ANALYSIS_SIGNATURES_P,
+        b'R' => ANALYSIS_SIGNATURES_R,
+        b'7' => ANALYSIS_SIGNATURES_7,
+        0x1f => ANALYSIS_SIGNATURES_GZIP,
+        b'B' => ANALYSIS_SIGNATURES_BZIP2,
+        0xfd => ANALYSIS_SIGNATURES_XZ,
+        b'(' => ANALYSIS_SIGNATURES_ZSTD,
+        b'u' => ANALYSIS_SIGNATURES_TAR,
+        _ => &[],
+    }
 }
 
 fn format_for_hit(name: &str) -> &'static str {

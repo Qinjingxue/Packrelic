@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Any
 
@@ -24,11 +25,39 @@ class ArchiveAnalysisStage:
     def analyze_tasks(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
         if not self.enabled or self.scheduler is None:
             return tasks
+        max_workers = self._task_max_workers(len(tasks))
+        if max_workers > 1:
+            grouped_results: list[list[ArchiveTask]] = [[] for _ in tasks]
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(self._analyze_task_to_tasks, task): index
+                    for index, task in enumerate(tasks)
+                }
+                for future in as_completed(futures):
+                    index = futures[future]
+                    _, task_results = future.result()
+                    grouped_results[index] = task_results
+            return [
+                task_result
+                for task_results in grouped_results
+                for task_result in task_results
+            ]
         expanded_tasks: list[ArchiveTask] = []
         for task in tasks:
             _, task_results = self._analyze_task_to_tasks(task)
             expanded_tasks.extend(task_results)
         return expanded_tasks
+
+    def _task_max_workers(self, task_count: int) -> int:
+        if task_count <= 1:
+            return 1
+        analysis_config = self.config.get("analysis") if isinstance(self.config.get("analysis"), dict) else {}
+        if not bool(analysis_config.get("task_parallel", True)):
+            return 1
+        configured = analysis_config.get("task_max_workers")
+        if configured is None:
+            configured = min(4, os.cpu_count() or 1)
+        return max(1, min(int(configured or 1), task_count))
 
     def analyze_task(self, task: ArchiveTask) -> ArchiveAnalysisReport | None:
         report, _ = self._analyze_task_to_tasks(task)
