@@ -298,8 +298,17 @@ impl AnalysisBinaryView {
         let next_header_offset = u64_le(start_header, 0);
         let next_header_size = u64_le(start_header, 8);
         let next_header_crc = u32_le(start_header, 16);
-        let next_header_start = start_offset + 32 + next_header_offset;
-        let segment_end = next_header_start + next_header_size;
+        let Some(next_header_start) = start_offset
+            .checked_add(32)
+            .and_then(|value| value.checked_add(next_header_offset))
+        else {
+            result.set_item("error", "next_header_out_of_range")?;
+            return Ok(result.unbind());
+        };
+        let Some(segment_end) = next_header_start.checked_add(next_header_size) else {
+            result.set_item("error", "next_header_out_of_range")?;
+            return Ok(result.unbind());
+        };
         result.set_item("next_header_offset", next_header_offset)?;
         result.set_item("next_header_size", next_header_size)?;
         result.set_item("segment_end", segment_end)?;

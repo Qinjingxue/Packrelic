@@ -64,6 +64,11 @@ def _seven_zip_bytes() -> bytes:
     return b"7z\xbc\xaf\x27\x1c" + b"\x00\x04" + crc32(start_header).to_bytes(4, "little") + start_header + gap + next_header
 
 
+def _write_bytes(path, data: bytes):
+    path.write_bytes(data)
+    return path
+
+
 def test_analysis_scheduler_finds_embedded_archive_segments(tmp_path):
     zip_start = len(b"shell-a")
     zip_data = _zip_bytes(tmp_path)
@@ -106,6 +111,33 @@ def test_zip_embedded_local_header_without_eocd_keeps_embedded_start(tmp_path):
     assert zip_evidence.status == "damaged"
     assert zip_evidence.segments[0].start_offset == len(b"MZstub")
     assert zip_evidence.segments[0].end_offset is None
+
+
+def test_zip_crc_mismatch_marks_content_integrity(tmp_path):
+    data = bytearray(_zip_bytes(tmp_path))
+    data[14] ^= 0xFF
+    path = _write_bytes(tmp_path / "crc_bad.zip", bytes(data))
+
+    zip_evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["zip"]
+
+    assert zip_evidence.status == "extractable"
+    assert "content_integrity_bad_or_unknown" in zip_evidence.segments[0].damage_flags
+    assert zip_evidence.details["integrity_confidence"] == "low"
+
+
+def test_zip_bad_central_directory_recovers_from_local_header(tmp_path):
+    data = bytearray(_zip_bytes(tmp_path))
+    cd_offset = data.index(b"PK\x01\x02")
+    data[cd_offset:cd_offset + 2] = b"XX"
+    path = _write_bytes(tmp_path / "cd_bad.zip", bytes(data))
+
+    zip_evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["zip"]
+
+    assert zip_evidence.status == "damaged"
+    assert zip_evidence.confidence == 0.70
+    assert zip_evidence.segments[0].end_offset is None
+    assert "local_header_recovery" in zip_evidence.segments[0].damage_flags
+    assert zip_evidence.details["recovery_strategy"] == "local_header_scan"
 
 
 def test_analysis_scheduler_prefers_structural_boundary_over_next_signature(tmp_path):
@@ -158,6 +190,32 @@ def test_analysis_scheduler_walks_rar5_blocks_to_endarc(tmp_path):
     assert rar.details["end_block_found"] is True
 
 
+def test_rar_missing_end_block_is_probably_truncated(tmp_path):
+    rar_data = _rar5_bytes()[:-len(_rar5_block(5))]
+    path = _write_bytes(tmp_path / "truncated.rar", rar_data)
+
+    rar = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["rar"]
+
+    assert rar.status == "damaged"
+    assert rar.confidence == 0.82
+    assert rar.segments[0].end_offset is None
+    assert "probably_truncated" in rar.segments[0].damage_flags
+    assert rar.details["boundary_confidence"] == "low"
+
+
+def test_rar_missing_main_header_marks_encrypted_unwalkable(tmp_path):
+    rar_data = b"Rar!\x1a\x07\x01\x00" + _rar5_block(4)
+    path = _write_bytes(tmp_path / "header_encrypted_like.rar", rar_data)
+
+    rar = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["rar"]
+
+    assert rar.status == "damaged"
+    assert rar.confidence == 0.72
+    assert rar.segments[0].end_offset is None
+    assert "valid_encrypted_but_unwalkable" in rar.segments[0].damage_flags
+    assert rar.details["password_required"] is True
+
+
 def test_analysis_scheduler_uses_7z_start_header_for_segment_end(tmp_path):
     seven_data = _seven_zip_bytes()
     payload = b"shell" + seven_data + b"tail-shell"
@@ -173,6 +231,34 @@ def test_analysis_scheduler_uses_7z_start_header_for_segment_end(tmp_path):
     assert seven.segments[0].end_offset == len(b"shell") + len(seven_data)
     assert not seven.warnings
     assert seven.details["next_header_crc_ok"] is True
+
+
+def test_7z_start_header_damage_leaves_only_start_trusted(tmp_path):
+    seven_data = bytearray(_seven_zip_bytes())
+    seven_data[8] ^= 0xFF
+    path = _write_bytes(tmp_path / "start_crc_bad.7z", bytes(seven_data))
+
+    seven = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["7z"]
+
+    assert seven.status == "weak"
+    assert seven.segments[0].start_offset == 0
+    assert seven.segments[0].end_offset is None
+    assert "boundary_unreliable" in seven.segments[0].damage_flags
+    assert seven.details["boundary_confidence"] == "none"
+
+
+def test_7z_next_header_crc_damage_keeps_boundary_but_lowers_integrity(tmp_path):
+    seven_data = bytearray(_seven_zip_bytes())
+    next_offset = int.from_bytes(seven_data[12:20], "little")
+    seven_data[32 + next_offset] ^= 0xFF
+    path = _write_bytes(tmp_path / "next_crc_bad.7z", bytes(seven_data))
+
+    seven = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["7z"]
+
+    assert seven.status == "damaged"
+    assert seven.segments[0].end_offset == len(seven_data)
+    assert "directory_integrity_bad_or_unknown" in seven.segments[0].damage_flags
+    assert seven.details["integrity_confidence"] == "low"
 
 
 def test_analysis_scheduler_reads_zip_across_split_volumes(tmp_path):

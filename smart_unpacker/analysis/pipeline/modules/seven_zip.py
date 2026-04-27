@@ -59,18 +59,31 @@ class SevenZipAnalysisModule:
             status = "weak"
             confidence = 0.35
         damage_flags = []
-        error = native.get("error") or ""
+        error = str(native.get("error") or "")
         if error:
             damage_flags.append(str(error))
+        boundary_unreliable = error in {"start_header_crc_mismatch", "next_header_out_of_range", "invalid_next_header_range"}
+        if boundary_unreliable:
+            damage_flags.append("boundary_unreliable")
+            native["boundary_confidence"] = "none"
+        elif native.get("next_header_crc_checked") and not native.get("next_header_crc_ok"):
+            damage_flags.append("directory_integrity_bad_or_unknown")
+            native["boundary_confidence"] = "medium"
+            native["integrity_confidence"] = "low"
+        else:
+            native.setdefault("boundary_confidence", "high" if strong else "medium")
+            native.setdefault("integrity_confidence", "medium" if strong else "unknown")
         next_header_offset = int(native.get("next_header_offset") or 0)
         next_header_size = int(native.get("next_header_size") or 0)
         end_offset = int(native.get("segment_end") or 0) or (start + 32 + next_header_offset + next_header_size if next_header_size else None)
+        if boundary_unreliable:
+            end_offset = None
         return ArchiveFormatEvidence(
             format="7z",
             confidence=confidence,
             status=status,
-            segments=[ArchiveSegment(start_offset=start, end_offset=end_offset or boundary, confidence=confidence, damage_flags=damage_flags, evidence=evidence)],
-            warnings=[] if end_offset else ["7z segment end inferred from next archive signature or EOF"],
+            segments=[ArchiveSegment(start_offset=start, end_offset=end_offset, confidence=confidence, damage_flags=damage_flags, evidence=evidence)],
+            warnings=[] if end_offset or boundary_unreliable else ["7z segment end inferred from next archive signature or EOF"],
             details=native,
         )
 

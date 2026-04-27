@@ -355,7 +355,8 @@ def _probe_seven_zip_view(view, start_offset: int, max_next_header_check_bytes: 
     next_start = start_offset + 32 + next_offset
     segment_end = next_start + next_size
     result.update({"next_header_offset": next_offset, "next_header_size": next_size, "segment_end": segment_end})
-    if next_size == 0 or segment_end > view.size:
+    if next_size == 0 or next_start < start_offset + 32 or segment_end < next_start or segment_end > view.size:
+        result["segment_end"] = 0
         result["error"] = "next_header_out_of_range"
         return result
     result["plausible"] = True

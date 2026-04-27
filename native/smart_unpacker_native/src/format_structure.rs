@@ -254,12 +254,19 @@ pub(crate) fn inspect_seven_zip_structure(
         result.set_item("error", "start_header_crc_mismatch")?;
         return Ok(result.unbind());
     }
-    let next_header_start = SEVEN_Z_HEADER_SIZE as u64 + next_header_offset;
+    let Some(next_header_start) = (SEVEN_Z_HEADER_SIZE as u64).checked_add(next_header_offset) else {
+        result.set_item("error", "next_header_out_of_range")?;
+        return Ok(result.unbind());
+    };
     if next_header_size == 0 || next_header_start < SEVEN_Z_HEADER_SIZE as u64 {
         result.set_item("error", "invalid_next_header_range")?;
         return Ok(result.unbind());
     }
-    if next_header_start + next_header_size > file_size {
+    let Some(next_header_end) = next_header_start.checked_add(next_header_size) else {
+        result.set_item("error", "next_header_out_of_range")?;
+        return Ok(result.unbind());
+    };
+    if next_header_end > file_size {
         result.set_item("error", "next_header_out_of_range")?;
         return Ok(result.unbind());
     }
