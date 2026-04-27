@@ -1,9 +1,13 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+use bzip2::read::BzDecoder;
+use flate2::read::GzDecoder;
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::{Condvar, Mutex, MutexGuard};
+use xz2::read::XzDecoder;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 const ZIP_LOCAL: &[u8] = b"PK\x03\x04";
 const ZIP_CENTRAL: &[u8] = b"PK\x01\x02";
@@ -11,6 +15,12 @@ const ZIP_EOCD: &[u8] = b"PK\x05\x06";
 const RAR4: &[u8] = b"Rar!\x1a\x07\x00";
 const RAR5: &[u8] = b"Rar!\x1a\x07\x01\x00";
 const SEVEN_ZIP: &[u8] = b"7z\xbc\xaf\x27\x1c";
+const GZIP: &[u8] = b"\x1f\x8b\x08";
+const BZIP2: &[u8] = b"BZh";
+const XZ: &[u8] = b"\xfd7zXZ\x00";
+const ZSTD: &[u8] = b"\x28\xb5\x2f\xfd";
+const TAR_USTAR: &[u8] = b"ustar";
+const TAR_BLOCK_SIZE: usize = 512;
 
 #[pyclass]
 pub(crate) struct AnalysisBinaryView {
@@ -125,6 +135,7 @@ impl AnalysisBinaryView {
         result.set_item("central_directory_entries_checked", 0usize)?;
         result.set_item("local_header_links_ok", false)?;
         result.set_item("local_header_links_checked", 0usize)?;
+        result.set_item("content_integrity_warning", "")?;
         result.set_item("evidence", PyList::empty(py))?;
 
         let eocd = self.read_at_bytes(eocd_offset, 22)?;
@@ -194,6 +205,15 @@ impl AnalysisBinaryView {
         result.set_item("local_header_links_ok", links_ok)?;
         if error.is_empty() {
             result.set_item("plausible", true)?;
+            result.set_item(
+                "content_integrity_warning",
+                self.zip_content_integrity_warning(
+                    archive_offset,
+                    physical_central_offset,
+                    total_entries as usize,
+                    max_cd_entries_to_walk,
+                )?,
+            )?;
             let evidence = PyList::empty(py);
             evidence.append("zip:eocd")?;
             evidence.append("zip:central_directory")?;
@@ -351,6 +371,64 @@ impl AnalysisBinaryView {
         Ok(result.unbind())
     }
 
+    #[pyo3(signature = (start_offset=0, max_entries_to_walk=64))]
+    fn probe_tar(
+        &self,
+        py: Python<'_>,
+        start_offset: u64,
+        max_entries_to_walk: usize,
+    ) -> PyResult<Py<PyDict>> {
+        let result = self.walk_tar(py, start_offset, max_entries_to_walk)?;
+        Ok(result.unbind())
+    }
+
+    fn probe_compression_stream(
+        &self,
+        py: Python<'_>,
+        format: &str,
+    ) -> PyResult<Py<PyDict>> {
+        let result = self.probe_compression(py, format)?;
+        Ok(result.unbind())
+    }
+
+    #[pyo3(signature = (format, max_probe_bytes=4194304))]
+    fn probe_compressed_tar(
+        &self,
+        py: Python<'_>,
+        format: &str,
+        max_probe_bytes: usize,
+    ) -> PyResult<Py<PyDict>> {
+        let stream = self.probe_compression(py, format)?;
+        stream.set_item("container", format)?;
+        stream.set_item("inner_format", "tar")?;
+        stream.set_item("inner_tar_verified", false)?;
+        stream.set_item("tar_plausible", false)?;
+        stream.set_item("tar_probe_error", "")?;
+        if !stream.get_item("magic_matched")?.unwrap().extract::<bool>()? {
+            return Ok(stream.unbind());
+        }
+        let read_size = (self.lock()?.size as usize).min(max_probe_bytes);
+        let data = self.read_at_bytes(0, read_size)?;
+        match decompress_sample(format, &data, TAR_BLOCK_SIZE * 2) {
+            Ok(sample) => {
+                if sample.len() < TAR_BLOCK_SIZE {
+                    stream.set_item("tar_probe_error", "inner_sample_too_small")?;
+                    return Ok(stream.unbind());
+                }
+                let (ok, error, member_size, ustar) = tar_header_plausible(&sample[..TAR_BLOCK_SIZE]);
+                stream.set_item("inner_tar_verified", ok)?;
+                stream.set_item("tar_plausible", ok)?;
+                stream.set_item("tar_probe_error", error)?;
+                stream.set_item("inner_tar_member_size", member_size)?;
+                stream.set_item("inner_tar_ustar", ustar)?;
+            }
+            Err(error) => {
+                stream.set_item("tar_probe_error", error)?;
+            }
+        }
+        Ok(stream.unbind())
+    }
+
     #[pyo3(signature = (head_bytes=1048576, tail_bytes=1048576))]
     fn signature_prepass(
         &self,
@@ -371,11 +449,21 @@ impl AnalysisBinaryView {
         collect_hits(&mut hits, "rar4", 0, &head, RAR4);
         collect_hits(&mut hits, "rar5", 0, &head, RAR5);
         collect_hits(&mut hits, "7z", 0, &head, SEVEN_ZIP);
+        collect_hits(&mut hits, "gzip", 0, &head, GZIP);
+        collect_hits(&mut hits, "bzip2", 0, &head, BZIP2);
+        collect_hits(&mut hits, "xz", 0, &head, XZ);
+        collect_hits(&mut hits, "zstd", 0, &head, ZSTD);
+        collect_hits(&mut hits, "tar_ustar", 0, &head, TAR_USTAR);
         collect_hits(&mut hits, "zip_local", tail_start, &tail, ZIP_LOCAL);
         collect_hits(&mut hits, "zip_eocd", tail_start, &tail, ZIP_EOCD);
         collect_hits(&mut hits, "rar4", tail_start, &tail, RAR4);
         collect_hits(&mut hits, "rar5", tail_start, &tail, RAR5);
         collect_hits(&mut hits, "7z", tail_start, &tail, SEVEN_ZIP);
+        collect_hits(&mut hits, "gzip", tail_start, &tail, GZIP);
+        collect_hits(&mut hits, "bzip2", tail_start, &tail, BZIP2);
+        collect_hits(&mut hits, "xz", tail_start, &tail, XZ);
+        collect_hits(&mut hits, "zstd", tail_start, &tail, ZSTD);
+        collect_hits(&mut hits, "tar_ustar", tail_start, &tail, TAR_USTAR);
         hits.sort_by_key(|(_, offset)| *offset);
         hits.dedup();
 
@@ -442,6 +530,13 @@ impl AnalysisBinaryView {
         Ok(data)
     }
 
+    fn read_tail_bytes(&self, size: usize) -> PyResult<Vec<u8>> {
+        let view_size = self.lock()?.size;
+        let read_size = size.min(view_size as usize);
+        let offset = view_size.saturating_sub(read_size as u64);
+        self.read_at_bytes(offset, read_size)
+    }
+
     fn walk_zip_central_directory(
         &self,
         archive_offset: u64,
@@ -480,6 +575,40 @@ impl AnalysisBinaryView {
             cursor += entry_size;
         }
         Ok((limit, true, links_checked, true, ""))
+    }
+
+    fn zip_content_integrity_warning(
+        &self,
+        archive_offset: u64,
+        physical_central_offset: u64,
+        total_entries: usize,
+        max_entries: usize,
+    ) -> PyResult<&'static str> {
+        let mut cursor = physical_central_offset;
+        for _ in 0..total_entries.min(max_entries).min(8) {
+            let header = self.read_at_bytes(cursor, 46)?;
+            if header.len() < 46 || &header[0..4] != ZIP_CENTRAL {
+                return Ok("");
+            }
+            let cd_crc = u32_le(&header, 16);
+            let filename_len = u16_le(&header, 28) as u64;
+            let extra_len = u16_le(&header, 30) as u64;
+            let comment_len = u16_le(&header, 32) as u64;
+            let local_header_offset = u32_le(&header, 42) as u64;
+            let local = self.read_at_bytes(archive_offset + local_header_offset, 30)?;
+            if local.len() >= 30 && &local[0..4] == ZIP_LOCAL {
+                let flags = u16_le(&local, 6);
+                let local_crc = u32_le(&local, 14);
+                if flags & 0x0008 != 0 {
+                    return Ok("data_descriptor_or_deferred_crc");
+                }
+                if local_crc != cd_crc {
+                    return Ok("local_header_crc_mismatch");
+                }
+            }
+            cursor += 46 + filename_len + extra_len + comment_len;
+        }
+        Ok("")
     }
 
     fn probe_rar4(
@@ -665,6 +794,174 @@ impl AnalysisBinaryView {
         result.set_item("evidence", evidence)?;
         Ok(())
     }
+
+    fn walk_tar<'py>(
+        &self,
+        py: Python<'py>,
+        start_offset: u64,
+        max_entries: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let result = PyDict::new(py);
+        result.set_item("format", "tar")?;
+        result.set_item("plausible", false)?;
+        result.set_item("error", "")?;
+        result.set_item("entries_checked", 0usize)?;
+        result.set_item("entry_walk_ok", false)?;
+        result.set_item("end_zero_blocks", false)?;
+        result.set_item("segment_end", py.None())?;
+        result.set_item("boundary_confidence", "none")?;
+        result.set_item("integrity_confidence", "unknown")?;
+        result.set_item("evidence", PyList::empty(py))?;
+
+        let size = self.lock()?.size;
+        let mut cursor = start_offset;
+        let mut checked = 0usize;
+        let mut zero_blocks = 0usize;
+        while checked < max_entries && cursor + TAR_BLOCK_SIZE as u64 <= size {
+            let header = self.read_at_bytes(cursor, TAR_BLOCK_SIZE)?;
+            if header.len() < TAR_BLOCK_SIZE {
+                result.set_item("error", "short_tar_header")?;
+                break;
+            }
+            if header.iter().all(|byte| *byte == 0) {
+                zero_blocks += 1;
+                cursor += TAR_BLOCK_SIZE as u64;
+                if zero_blocks >= 2 {
+                    result.set_item("plausible", checked > 0)?;
+                    result.set_item("entries_checked", checked)?;
+                    result.set_item("entry_walk_ok", checked > 0)?;
+                    result.set_item("end_zero_blocks", true)?;
+                    result.set_item("segment_end", cursor)?;
+                    result.set_item("boundary_confidence", "high")?;
+                    result.set_item("evidence", PyList::new(py, ["tar:header_checksum", "tar:block_walk", "tar:end_zero_blocks"])?)?;
+                    return Ok(result);
+                }
+                continue;
+            }
+            zero_blocks = 0;
+            let (ok, error, member_size, ustar) = tar_header_plausible(&header);
+            if !ok {
+                result.set_item("entries_checked", checked)?;
+                result.set_item("error", error)?;
+                if checked > 0 {
+                    result.set_item("plausible", true)?;
+                    result.set_item("entry_walk_ok", true)?;
+                    result.set_item("segment_end", cursor)?;
+                    result.set_item("boundary_confidence", "medium")?;
+                    result.set_item("evidence", PyList::new(py, ["tar:header_checksum", "tar:block_walk_prefix"])?)?;
+                }
+                return Ok(result);
+            }
+            checked += 1;
+            cursor += TAR_BLOCK_SIZE as u64 + member_size + tar_padding(member_size);
+            result.set_item(
+                "evidence",
+                PyList::new(py, ["tar:header_checksum", if ustar { "tar:ustar_magic" } else { "tar:v7_header" }])?,
+            )?;
+        }
+        if checked > 0 {
+            result.set_item("plausible", true)?;
+            result.set_item("entries_checked", checked)?;
+            result.set_item("entry_walk_ok", true)?;
+            result.set_item("segment_end", cursor)?;
+            result.set_item("boundary_confidence", "medium")?;
+            result.set_item("error", "tar_end_zero_blocks_not_found")?;
+            result.set_item("evidence", PyList::new(py, ["tar:header_checksum", "tar:block_walk_prefix"])?)?;
+        }
+        Ok(result)
+    }
+
+    fn probe_compression<'py>(&self, py: Python<'py>, format: &str) -> PyResult<Bound<'py, PyDict>> {
+        let result = PyDict::new(py);
+        result.set_item("format", format)?;
+        result.set_item("magic_matched", false)?;
+        result.set_item("plausible", false)?;
+        result.set_item("error", "")?;
+        result.set_item("confidence", 0.0f64)?;
+        result.set_item("boundary_confidence", "medium")?;
+        result.set_item("integrity_confidence", "unknown")?;
+        result.set_item("evidence", PyList::empty(py))?;
+        let header = self.read_at_bytes(0, 64)?;
+        match format {
+            "gzip" => {
+                if !header.starts_with(GZIP) {
+                    result.set_item("error", "gzip_magic_not_found")?;
+                    return Ok(result);
+                }
+                result.set_item("magic_matched", true)?;
+                if header.len() < 10 || header[3] & 0xE0 != 0 {
+                    result.set_item("error", "gzip_reserved_flags_set")?;
+                    return Ok(result);
+                }
+                result.set_item("plausible", true)?;
+                result.set_item("confidence", 0.90f64)?;
+                let evidence = PyList::new(py, ["gzip:magic", "gzip:method:deflate", "gzip:flags_valid"])?;
+                if self.lock()?.size >= 18 {
+                    let tail = self.read_tail_bytes(4)?;
+                    if tail.len() == 4 {
+                        result.set_item("isize", u32_le(&tail, 0))?;
+                        evidence.append("gzip:trailer")?;
+                    }
+                }
+                result.set_item("evidence", evidence)?;
+            }
+            "bzip2" => {
+                if !header.starts_with(BZIP2) {
+                    result.set_item("error", "bzip2_magic_not_found")?;
+                    return Ok(result);
+                }
+                result.set_item("magic_matched", true)?;
+                let ok = header.len() >= 10
+                    && b"123456789".contains(&header[3])
+                    && (&header[4..10] == b"\x31\x41\x59\x26\x53\x59"
+                        || &header[4..10] == b"\x17\x72\x45\x38\x50\x90");
+                if !ok {
+                    result.set_item("error", "bzip2_block_marker_not_found")?;
+                    return Ok(result);
+                }
+                result.set_item("plausible", true)?;
+                result.set_item("confidence", 0.92f64)?;
+                result.set_item("evidence", PyList::new(py, ["bzip2:magic", "bzip2:block_marker"])?)?;
+            }
+            "xz" => {
+                if !header.starts_with(XZ) {
+                    result.set_item("error", "xz_magic_not_found")?;
+                    return Ok(result);
+                }
+                result.set_item("magic_matched", true)?;
+                let footer = self.read_tail_bytes(12)?;
+                if footer.len() == 12 && &footer[10..12] == b"YZ" {
+                    result.set_item("plausible", true)?;
+                    result.set_item("confidence", 0.95f64)?;
+                    result.set_item("boundary_confidence", "high")?;
+                    result.set_item("evidence", PyList::new(py, ["xz:magic", "xz:footer_magic"])?)?;
+                } else {
+                    result.set_item("plausible", true)?;
+                    result.set_item("confidence", 0.72f64)?;
+                    result.set_item("error", "xz_footer_magic_not_found")?;
+                    result.set_item("evidence", PyList::new(py, ["xz:magic"])?)?;
+                }
+            }
+            "zstd" => {
+                if !header.starts_with(ZSTD) {
+                    result.set_item("error", "zstd_magic_not_found")?;
+                    return Ok(result);
+                }
+                result.set_item("magic_matched", true)?;
+                if header.len() < 6 || header[4] & 0x08 != 0 {
+                    result.set_item("error", "zstd_reserved_bit_set")?;
+                    return Ok(result);
+                }
+                result.set_item("plausible", true)?;
+                result.set_item("confidence", 0.88f64)?;
+                result.set_item("evidence", PyList::new(py, ["zstd:magic", "zstd:frame_descriptor"])?)?;
+            }
+            _ => {
+                result.set_item("error", "unsupported_compression_format")?;
+            }
+        }
+        Ok(result)
+    }
 }
 
 impl AnalysisBinaryViewInner {
@@ -739,8 +1036,20 @@ fn format_for_hit(name: &str) -> &'static str {
         "zip"
     } else if name.starts_with("rar") {
         "rar"
-    } else {
+    } else if name == "7z" {
         "7z"
+    } else if name == "tar_ustar" {
+        "tar"
+    } else if name == "gzip" {
+        "gzip"
+    } else if name == "bzip2" {
+        "bzip2"
+    } else if name == "xz" {
+        "xz"
+    } else if name == "zstd" {
+        "zstd"
+    } else {
+        ""
     }
 }
 
@@ -768,6 +1077,71 @@ fn u64_le(bytes: &[u8], offset: usize) -> u64 {
         bytes[offset + 6],
         bytes[offset + 7],
     ])
+}
+
+fn tar_header_plausible(header: &[u8]) -> (bool, &'static str, u64, bool) {
+    if header.len() < TAR_BLOCK_SIZE {
+        return (false, "short_tar_header", 0, false);
+    }
+    let Some(stored_checksum) = parse_octal(&header[148..156]) else {
+        return (false, "invalid_checksum_field", 0, false);
+    };
+    let Some(member_size) = parse_octal(&header[124..136]) else {
+        return (false, "invalid_size_field", 0, false);
+    };
+    if stored_checksum != tar_checksum(header) {
+        return (false, "checksum_mismatch", 0, false);
+    }
+    (
+        true,
+        "",
+        member_size,
+        matches!(&header[257..263], b"ustar\x00" | b"ustar "),
+    )
+}
+
+fn parse_octal(field: &[u8]) -> Option<u64> {
+    let text = field
+        .iter()
+        .copied()
+        .filter(|byte| *byte != 0 && *byte != b' ')
+        .collect::<Vec<_>>();
+    if text.is_empty() {
+        return Some(0);
+    }
+    std::str::from_utf8(&text).ok().and_then(|value| u64::from_str_radix(value.trim(), 8).ok())
+}
+
+fn tar_checksum(header: &[u8]) -> u64 {
+    header[..148].iter().map(|byte| *byte as u64).sum::<u64>()
+        + 32 * 8
+        + header[156..].iter().map(|byte| *byte as u64).sum::<u64>()
+}
+
+fn tar_padding(size: u64) -> u64 {
+    let remainder = size % TAR_BLOCK_SIZE as u64;
+    if remainder == 0 {
+        0
+    } else {
+        TAR_BLOCK_SIZE as u64 - remainder
+    }
+}
+
+fn decompress_sample(format: &str, data: &[u8], max_output: usize) -> Result<Vec<u8>, &'static str> {
+    let cursor = Cursor::new(data);
+    let mut output = Vec::new();
+    let result = match format {
+        "gzip" => GzDecoder::new(cursor).take(max_output as u64).read_to_end(&mut output),
+        "bzip2" => BzDecoder::new(cursor).take(max_output as u64).read_to_end(&mut output),
+        "xz" => XzDecoder::new(cursor).take(max_output as u64).read_to_end(&mut output),
+        "zstd" => {
+            let decoder = ZstdDecoder::new(cursor).map_err(|_| "zstd_decoder_init_failed")?;
+            decoder.take(max_output as u64).read_to_end(&mut output)
+        }
+        _ => return Err("unsupported_compression_format"),
+    };
+    result.map_err(|_| "decompression_probe_failed")?;
+    Ok(output)
 }
 
 fn read_vint(data: &[u8], offset: usize) -> Option<(u64, usize)> {

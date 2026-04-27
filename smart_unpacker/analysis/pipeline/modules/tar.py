@@ -1,0 +1,36 @@
+from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
+from smart_unpacker.analysis.pipeline.registry import register_analysis_module
+from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+
+
+class TarAnalysisModule:
+    spec = AnalysisModuleSpec(name="tar", formats=("tar",), signatures=(b"ustar",), io_profile="head_heavy")
+
+    def analyze(self, view, prepass: dict, config: dict) -> ArchiveFormatEvidence:
+        max_entries = int(config.get("max_entries_to_walk", 64) or 64)
+        candidates = [0]
+        candidates.extend(max(0, int(hit.get("offset") or 0) - 257) for hit in prepass.get("hits", []) if hit.get("name") == "tar_ustar")
+        for start in sorted(set(candidates)):
+            result = view.probe_tar(start_offset=start, max_entries_to_walk=max_entries) if hasattr(view, "probe_tar") else None
+            if result and result.get("plausible"):
+                confidence = 0.94 if result.get("end_zero_blocks") else 0.86
+                return ArchiveFormatEvidence(
+                    format="tar",
+                    confidence=confidence,
+                    status="extractable",
+                    segments=[ArchiveSegment(start_offset=start, end_offset=result.get("segment_end"), confidence=confidence, evidence=list(result.get("evidence") or []))],
+                    details=result,
+                )
+        if any(hit.get("name") == "tar_ustar" for hit in prepass.get("hits", [])):
+            start = min(max(0, int(hit.get("offset") or 0) - 257) for hit in prepass.get("hits", []) if hit.get("name") == "tar_ustar")
+            return ArchiveFormatEvidence(
+                format="tar",
+                confidence=0.35,
+                status="weak",
+                segments=[ArchiveSegment(start_offset=start, end_offset=None, confidence=0.35, damage_flags=["tar_header_unverified"], evidence=["tar:ustar_magic"])],
+                details={"plausible": False, "boundary_confidence": "none"},
+            )
+        return ArchiveFormatEvidence(format="tar", confidence=0.0, status="not_found")
+
+
+register_analysis_module(TarAnalysisModule())

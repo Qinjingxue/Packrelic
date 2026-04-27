@@ -95,7 +95,7 @@ class ZipAnalysisModule:
         error = native.get("error") or ""
         if error:
             damage_flags.append(str(error))
-        crc_warning = self._detect_crc_mismatch(view, native)
+        crc_warning = str(native.get("content_integrity_warning") or "")
         if crc_warning:
             damage_flags.append("content_integrity_bad_or_unknown")
             native["integrity_confidence"] = "low"
@@ -153,34 +153,6 @@ class ZipAnalysisModule:
             details=details,
         )
 
-    def _detect_crc_mismatch(self, view, native: dict) -> str:
-        if not native.get("central_directory_present"):
-            return ""
-        cd_offset = int(native.get("central_directory_offset") or 0)
-        total_entries = int(native.get("total_entries") or 0)
-        archive_offset = int(native.get("archive_offset") or 0)
-        if cd_offset <= 0 or total_entries <= 0:
-            return ""
-        cursor = cd_offset
-        for _ in range(min(total_entries, 8)):
-            header = view.read_at(cursor, 46)
-            if len(header) < 46 or header[:4] != b"PK\x01\x02":
-                return ""
-            cd_crc = int.from_bytes(header[16:20], "little")
-            filename_len = int.from_bytes(header[28:30], "little")
-            extra_len = int.from_bytes(header[30:32], "little")
-            comment_len = int.from_bytes(header[32:34], "little")
-            local_header_offset = int.from_bytes(header[42:46], "little")
-            local = view.read_at(archive_offset + local_header_offset, 30)
-            if len(local) >= 30 and local[:4] == b"PK\x03\x04":
-                flags = int.from_bytes(local[6:8], "little")
-                local_crc = int.from_bytes(local[14:18], "little")
-                if flags & 0x0008:
-                    return "data_descriptor_or_deferred_crc"
-                if local_crc != cd_crc:
-                    return "local_header_crc_mismatch"
-            cursor += 46 + filename_len + extra_len + comment_len
-        return ""
 
 
 register_analysis_module(ZipAnalysisModule())

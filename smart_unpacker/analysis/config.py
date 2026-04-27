@@ -21,6 +21,15 @@ DEFAULT_ANALYSIS_CONFIG = {
         {"name": "zip", "enabled": True},
         {"name": "rar", "enabled": True},
         {"name": "seven_zip", "enabled": True},
+        {"name": "tar", "enabled": True},
+        {"name": "gzip", "enabled": True},
+        {"name": "bzip2", "enabled": True},
+        {"name": "xz", "enabled": True},
+        {"name": "zstd", "enabled": True},
+        {"name": "tar_gz", "enabled": True},
+        {"name": "tar_bz2", "enabled": True},
+        {"name": "tar_xz", "enabled": True},
+        {"name": "tar_zst", "enabled": True},
     ],
 }
 

@@ -11,6 +11,11 @@ KNOWN_SIGNATURES = {
     "rar4": b"Rar!\x1a\x07\x00",
     "rar5": b"Rar!\x1a\x07\x01\x00",
     "7z": b"7z\xbc\xaf\x27\x1c",
+    "gzip": b"\x1f\x8b\x08",
+    "bzip2": b"BZh",
+    "xz": b"\xfd7zXZ\x00",
+    "zstd": b"\x28\xb5\x2f\xfd",
+    "tar_ustar": b"ustar",
 }
 
 
@@ -69,4 +74,14 @@ def _formats_from_hits(hits: list[SignatureHit]) -> set[str]:
             formats.add("rar")
         elif hit.name == "7z":
             formats.add("7z")
+        elif hit.name == "gzip":
+            formats.add("gzip")
+        elif hit.name == "bzip2":
+            formats.add("bzip2")
+        elif hit.name == "xz":
+            formats.add("xz")
+        elif hit.name == "zstd":
+            formats.add("zstd")
+        elif hit.name == "tar_ustar":
+            formats.add("tar")
     return formats

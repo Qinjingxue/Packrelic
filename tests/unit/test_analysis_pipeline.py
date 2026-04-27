@@ -1,6 +1,11 @@
 import time
+import tarfile
 import zipfile
+import bz2
+import gzip
+import lzma
 from binascii import crc32
+from io import BytesIO
 
 import smart_unpacker_native
 
@@ -67,6 +72,16 @@ def _seven_zip_bytes() -> bytes:
 def _write_bytes(path, data: bytes):
     path.write_bytes(data)
     return path
+
+
+def _tar_bytes() -> bytes:
+    buffer = BytesIO()
+    payload = b"tar payload"
+    info = tarfile.TarInfo("payload.txt")
+    info.size = len(payload)
+    with tarfile.open(fileobj=buffer, mode="w") as tf:
+        tf.addfile(info, BytesIO(payload))
+    return buffer.getvalue()
 
 
 def test_analysis_scheduler_finds_embedded_archive_segments(tmp_path):
@@ -318,6 +333,62 @@ def test_analysis_scheduler_accepts_relation_split_group(tmp_path):
     assert report.path == str(first)
     assert zip_evidence.status == "extractable"
     assert zip_evidence.segments[0].end_offset == len(zip_data)
+
+
+def test_analysis_scheduler_detects_tar(tmp_path):
+    tar_data = _tar_bytes()
+    path = _write_bytes(tmp_path / "payload.tar", tar_data)
+
+    report = ArchiveAnalysisScheduler().analyze_path(str(path))
+    tar = {item.format: item for item in report.evidences}["tar"]
+
+    assert tar.status == "extractable"
+    assert tar.confidence >= 0.86
+    assert tar.segments[0].start_offset == 0
+    assert tar.segments[0].end_offset is not None
+    assert tar.details["entry_walk_ok"] is True
+
+
+def test_analysis_scheduler_detects_compression_streams(tmp_path):
+    samples = {
+        "gzip": (tmp_path / "payload.gz", gzip.compress(b"plain payload")),
+        "bzip2": (tmp_path / "payload.bz2", bz2.compress(b"plain payload")),
+        "xz": (tmp_path / "payload.xz", lzma.compress(b"plain payload", format=lzma.FORMAT_XZ)),
+        "zstd": (tmp_path / "payload.zst", b"\x28\xb5\x2f\xfd\x20\x00"),
+    }
+
+    for fmt, (path, data) in samples.items():
+        path.write_bytes(data)
+        evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}[fmt]
+        assert evidence.status == "extractable"
+        assert evidence.confidence >= 0.88
+        assert evidence.segments[0].start_offset == 0
+
+
+def test_analysis_scheduler_detects_compressed_tar_variants(tmp_path):
+    tar_data = _tar_bytes()
+    samples = {
+        "tar.gz": (tmp_path / "payload.tar.gz", gzip.compress(tar_data)),
+        "tar.bz2": (tmp_path / "payload.tar.bz2", bz2.compress(tar_data)),
+        "tar.xz": (tmp_path / "payload.tar.xz", lzma.compress(tar_data, format=lzma.FORMAT_XZ)),
+    }
+
+    for fmt, (path, data) in samples.items():
+        path.write_bytes(data)
+        evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}[fmt]
+        assert evidence.status == "extractable"
+        assert evidence.confidence >= 0.93
+        assert evidence.details["inner_tar_verified"] is True
+
+
+def test_tar_zst_requires_real_zstd_inner_tar(tmp_path):
+    path = tmp_path / "payload.tar.zst"
+    path.write_bytes(b"\x28\xb5\x2f\xfd\x20\x00")
+
+    evidence = {item.format: item for item in ArchiveAnalysisScheduler().analyze_path(str(path)).evidences}["tar.zst"]
+
+    assert evidence.status == "not_found"
+    assert evidence.details["tar_probe_error"]
 
 
 def test_analysis_module_config_can_disable_formats(tmp_path):

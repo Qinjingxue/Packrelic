@@ -31,15 +31,12 @@ class SevenZipAnalysisModule:
                 next_archive_boundary(prepass, start, view.size),
             )
 
-        header = view.read_at(start, min(32, view.size - start))
-        confidence = 0.95 if header.startswith(b"7z\xbc\xaf\x27\x1c") else 0.40
-        status = "extractable" if confidence >= 0.85 else "weak"
         end = next_archive_boundary(prepass, start, view.size)
         return ArchiveFormatEvidence(
             format="7z",
-            confidence=confidence,
-            status=status,
-            segments=[ArchiveSegment(start_offset=start, end_offset=end, confidence=confidence, evidence=["7z:signature", "7z:boundary_inferred"])],
+            confidence=0.45,
+            status="weak",
+            segments=[ArchiveSegment(start_offset=start, end_offset=end, confidence=0.45, evidence=["7z:signature", "7z:boundary_inferred"], damage_flags=["native_probe_unavailable"])],
             warnings=["7z segment end inferred from next archive signature or EOF"] if start > 0 else [],
         )
 
