@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 mod carrier;
+mod analysis;
 mod directory_scan;
 mod file_crc;
 mod format_structure;
@@ -40,6 +41,7 @@ fn scanner_version() -> &'static str {
 fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_available, m)?)?;
     m.add_function(wrap_pyfunction!(scanner_version, m)?)?;
+    m.add_class::<analysis::AnalysisBinaryView>()?;
     m.add_function(wrap_pyfunction!(magic::scan_after_markers, m)?)?;
     m.add_function(wrap_pyfunction!(magic::scan_magics_anywhere, m)?)?;
     m.add_function(wrap_pyfunction!(carrier::scan_carrier_archive, m)?)?;

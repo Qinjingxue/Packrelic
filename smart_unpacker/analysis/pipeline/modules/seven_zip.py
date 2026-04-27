@@ -1,6 +1,12 @@
 from smart_unpacker.analysis.pipeline.module import AnalysisModuleSpec
 from smart_unpacker.analysis.pipeline.registry import register_analysis_module
+from smart_unpacker.analysis.pipeline.modules._boundaries import next_archive_boundary
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
+
+try:
+    from smart_unpacker_native import inspect_seven_zip_structure as _inspect_seven_zip_structure
+except (ImportError, AttributeError):
+    _inspect_seven_zip_structure = None
 
 
 class SevenZipAnalysisModule:
@@ -11,13 +17,61 @@ class SevenZipAnalysisModule:
         if not hits:
             return ArchiveFormatEvidence(format="7z", confidence=0.0, status="not_found")
         start = min(hit["offset"] for hit in hits)
+        if hasattr(view, "probe_seven_zip"):
+            native = view.probe_seven_zip(
+                start_offset=start,
+                max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024),
+            )
+            if native:
+                return self._from_native(dict(native), start, next_archive_boundary(prepass, start, view.size))
+        if _inspect_seven_zip_structure and start == 0:
+            return self._from_native(
+                dict(_inspect_seven_zip_structure(str(view.path), max_next_header_check_bytes=int(config.get("max_next_header_check_bytes", 1024 * 1024) or 1024 * 1024))),
+                start,
+                next_archive_boundary(prepass, start, view.size),
+            )
+
         header = view.read_at(start, min(32, view.size - start))
         confidence = 0.95 if header.startswith(b"7z\xbc\xaf\x27\x1c") else 0.40
+        status = "extractable" if confidence >= 0.85 else "weak"
+        end = next_archive_boundary(prepass, start, view.size)
         return ArchiveFormatEvidence(
             format="7z",
             confidence=confidence,
-            status="extractable" if confidence >= 0.85 else "weak",
-            segments=[ArchiveSegment(start_offset=start, end_offset=None, confidence=confidence, evidence=["7z_signature"])],
+            status=status,
+            segments=[ArchiveSegment(start_offset=start, end_offset=end, confidence=confidence, evidence=["7z:signature", "7z:boundary_inferred"])],
+            warnings=["7z segment end inferred from next archive signature or EOF"] if start > 0 else [],
+        )
+
+    def _from_native(self, native: dict, start: int, boundary: int) -> ArchiveFormatEvidence:
+        if not native.get("magic_matched"):
+            return ArchiveFormatEvidence(format="7z", confidence=0.0, status="not_found", details=native)
+        evidence = list(native.get("evidence") or ["7z:signature"])
+        strong = bool(native.get("strong_accept"))
+        plausible = bool(native.get("plausible"))
+        if strong:
+            status = "extractable"
+            confidence = 0.97
+        elif plausible:
+            status = "damaged"
+            confidence = 0.65
+        else:
+            status = "weak"
+            confidence = 0.35
+        damage_flags = []
+        error = native.get("error") or ""
+        if error:
+            damage_flags.append(str(error))
+        next_header_offset = int(native.get("next_header_offset") or 0)
+        next_header_size = int(native.get("next_header_size") or 0)
+        end_offset = int(native.get("segment_end") or 0) or (start + 32 + next_header_offset + next_header_size if next_header_size else None)
+        return ArchiveFormatEvidence(
+            format="7z",
+            confidence=confidence,
+            status=status,
+            segments=[ArchiveSegment(start_offset=start, end_offset=end_offset or boundary, confidence=confidence, damage_flags=damage_flags, evidence=evidence)],
+            warnings=[] if end_offset else ["7z segment end inferred from next archive signature or EOF"],
+            details=native,
         )
 
 

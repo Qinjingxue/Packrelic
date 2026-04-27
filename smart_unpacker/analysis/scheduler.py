@@ -43,12 +43,9 @@ class ArchiveAnalysisScheduler:
         enabled_configs = enabled_module_configs(self.config)
         registry = get_analysis_module_registry()
         modules = []
-        formats = set(prepass.get("formats") or [])
         for name in enabled_configs:
             module = registry.get(name)
             if module is None:
-                continue
-            if formats and not (set(module.spec.formats) & formats):
                 continue
             modules.append(module)
         return modules

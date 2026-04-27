@@ -24,6 +24,10 @@ def run_signature_prepass(view: SharedBinaryView, config: dict | None = None) ->
     config = config or {}
     head_size = int(config.get("head_bytes", DEFAULT_HEAD_BYTES) or DEFAULT_HEAD_BYTES)
     tail_size = int(config.get("tail_bytes", DEFAULT_TAIL_BYTES) or DEFAULT_TAIL_BYTES)
+    native_result = view.signature_prepass(head_bytes=head_size, tail_bytes=tail_size)
+    if native_result is not None:
+        return native_result
+
     head = view.read_at(0, min(head_size, view.size))
     tail_len = min(tail_size, view.size)
     tail_start = max(0, view.size - tail_len)
