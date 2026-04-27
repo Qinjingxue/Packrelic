@@ -1,11 +1,15 @@
+import bz2
+import gzip
+import lzma
 import random
 import shutil
 import subprocess
+import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tests.helpers.tool_config import get_optional_rar, get_test_tools, require_7z
+from tests.helpers.tool_config import get_optional_rar, get_test_tools, require_7z, require_zstd
 
 
 MINIMAL_JPEG_BYTES = bytes.fromhex(
@@ -34,6 +38,33 @@ MINIMAL_PDF_BYTES = (
 MINIMAL_WEBP_BYTES = b"RIFF" + (16).to_bytes(4, "little") + b"WEBP" + b"VP8 " + (4).to_bytes(4, "little") + b"\0\0\0\0"
 CORRUPT_TRUNCATE_BYTES = 16 * 1024
 SUPPORTED_CARRIERS = {"jpg", "png", "gif", "pdf", "webp"}
+TAR_FORMATS = {"tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst"}
+STREAM_FORMATS = {"gzip", "bzip2", "xz", "zstd"}
+ARCHIVE_EXTENSIONS = {
+    "7z": ".7z",
+    "zip": ".zip",
+    "rar": ".rar",
+    "tar": ".tar",
+    "tar.gz": ".tar.gz",
+    "tar.bz2": ".tar.bz2",
+    "tar.xz": ".tar.xz",
+    "tar.zst": ".tar.zst",
+    "gzip": ".gz",
+    "bzip2": ".bz2",
+    "xz": ".xz",
+    "zstd": ".zst",
+}
+FORMAT_ALIASES = {
+    "Tar": "tar",
+    "TarGz": "tar.gz",
+    "TarBz2": "tar.bz2",
+    "TarXz": "tar.xz",
+    "TarZst": "tar.zst",
+    "Gzip": "gzip",
+    "Bzip2": "bzip2",
+    "Xz": "xz",
+    "Zstd": "zstd",
+}
 
 
 @dataclass
@@ -99,6 +130,7 @@ class ArchiveFixtureFactory:
     ) -> ArchiveCase:
         if carrier and carrier not in SUPPORTED_CARRIERS:
             raise ValueError(f"Unsupported carrier: {carrier}")
+        archive_format = normalize_archive_format(archive_format)
         if split_issue and not split:
             raise ValueError("split_issue requires split=True")
 
@@ -156,6 +188,9 @@ class ArchiveFixtureFactory:
         split: bool,
         sfx: bool,
     ):
+        archive_format = normalize_archive_format(archive_format)
+        if archive_format in TAR_FORMATS | STREAM_FORMATS and (password or split or sfx):
+            raise ValueError(f"{archive_format} fixtures do not support password, split, or sfx variants.")
         if archive_format == "7z":
             archive_path = archive_dir / f"{case_id}{'.exe' if sfx else '.7z'}"
             create_7z_archive(source_dir, archive_path, password=password, split=split, sfx=sfx)
@@ -167,6 +202,15 @@ class ArchiveFixtureFactory:
         if archive_format == "rar":
             archive_path = archive_dir / f"{case_id}{'.exe' if sfx else '.rar'}"
             create_rar_archive(source_dir, archive_path, password=password, split=split, sfx=sfx)
+            return
+        if archive_format in TAR_FORMATS:
+            archive_path = archive_dir / f"{case_id}{ARCHIVE_EXTENSIONS[archive_format]}"
+            create_tar_archive(source_dir, archive_path, archive_format)
+            return
+        if archive_format in STREAM_FORMATS:
+            marker_file = next(source_dir.glob("*.marker.txt"))
+            archive_path = archive_dir / f"{marker_file.name}{ARCHIVE_EXTENSIONS[archive_format]}"
+            create_compression_stream(marker_file, archive_path, archive_format)
             return
         raise ValueError(f"Unsupported archive format: {archive_format}")
 
@@ -237,6 +281,47 @@ def create_rar_archive(source_dir: Path, output_path: Path, password: str | None
     run_cmd(cmd, output_path.parent)
 
 
+def create_tar_archive(source_dir: Path, output_path: Path, archive_format: str):
+    if archive_format == "tar.zst":
+        tar_path = output_path.with_suffix("")
+        create_tar_archive(source_dir, tar_path, "tar")
+        create_compression_stream(tar_path, output_path, "zstd")
+        tar_path.unlink(missing_ok=True)
+        return
+
+    mode_by_format = {
+        "tar": "w",
+        "tar.gz": "w:gz",
+        "tar.bz2": "w:bz2",
+        "tar.xz": "w:xz",
+    }
+    mode = mode_by_format.get(archive_format)
+    if not mode:
+        raise ValueError(f"Unsupported TAR format: {archive_format}")
+    with tarfile.open(output_path, mode) as archive:
+        for path in sorted(source_dir.iterdir()):
+            archive.add(path, arcname=path.name)
+
+
+def create_compression_stream(source_path: Path, output_path: Path, archive_format: str):
+    if archive_format == "gzip":
+        with source_path.open("rb") as src, output_path.open("wb") as raw:
+            with gzip.GzipFile(filename=source_path.name, mode="wb", fileobj=raw) as dst:
+                shutil.copyfileobj(src, dst)
+        return
+    if archive_format == "bzip2":
+        output_path.write_bytes(bz2.compress(source_path.read_bytes()))
+        return
+    if archive_format == "xz":
+        output_path.write_bytes(lzma.compress(source_path.read_bytes(), format=lzma.FORMAT_XZ))
+        return
+    if archive_format == "zstd":
+        zstd_exe = require_zstd()
+        run_cmd([str(zstd_exe), "-q", "-f", str(source_path), "-o", str(output_path)], output_path.parent)
+        return
+    raise ValueError(f"Unsupported compression stream format: {archive_format}")
+
+
 def build_archive_case(
     root: Path,
     case_id: str,
@@ -256,6 +341,7 @@ def build_archive_case(
 
 
 def choose_entry_path(archive_dir: Path, case_id: str, archive_format: str, sfx: bool = False) -> Path:
+    archive_format = normalize_archive_format(archive_format)
     files = sorted(path for path in archive_dir.iterdir() if path.is_file())
     if not files:
         raise RuntimeError(f"No generated files for {case_id}")
@@ -268,11 +354,17 @@ def choose_entry_path(archive_dir: Path, case_id: str, archive_format: str, sfx:
                 return path
     if sfx:
         return archive_dir / f"{case_id}.exe"
+    expected_ext = ARCHIVE_EXTENSIONS.get(archive_format)
     for path in files:
         lower = path.name.lower()
-        if lower.endswith(".001") or lower.endswith(f".{archive_format}"):
+        if lower.endswith(".001") or (expected_ext and lower.endswith(expected_ext)):
             return path
     return files[0]
+
+
+def normalize_archive_format(archive_format: str) -> str:
+    value = str(archive_format or "").strip()
+    return FORMAT_ALIASES.get(value, value.lower())
 
 
 def corrupt_file(path: Path, truncate: bool = False, mode: str | None = None):

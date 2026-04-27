@@ -6,7 +6,7 @@ from smart_unpacker.coordinator.runner import PipelineRunner
 from smart_unpacker.config.schema import normalize_config
 from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
 from tests.helpers.detection_config import with_detection_pipeline
-from tests.helpers.tool_config import get_optional_rar, require_7z
+from tests.helpers.tool_config import get_optional_rar, require_7z, require_zstd
 
 
 PASSWORD = "123"
@@ -28,7 +28,7 @@ def edge_config(passwords: list[str] | None = None) -> dict:
     }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
+        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst", ".001"]}]},
         {"name": "embedded_payload_identity", "enabled": True},
         {"name": "seven_zip_structure_identity", "enabled": True},
         {"name": "rar_structure_identity", "enabled": True},
@@ -110,6 +110,22 @@ def archive_formats():
     return formats
 
 
+def plain_archive_formats():
+    return [
+        "7z",
+        "zip",
+        "tar",
+        "tar.gz",
+        "tar.bz2",
+        "tar.xz",
+        "tar.zst",
+        "gzip",
+        "bzip2",
+        "xz",
+        "zstd",
+    ] + (["rar"] if get_optional_rar() else [])
+
+
 def archive_format_params(default_fast: set[str]):
     return [
         pytest.param(
@@ -118,6 +134,17 @@ def archive_format_params(default_fast: set[str]):
             id=archive_format,
         )
         for archive_format in archive_formats()
+    ]
+
+
+def plain_archive_format_params(default_fast: set[str]):
+    return [
+        pytest.param(
+            archive_format,
+            marks=() if archive_format in default_fast else pytest.mark.slow_real_archive,
+            id=archive_format,
+        )
+        for archive_format in plain_archive_formats()
     ]
 
 
@@ -162,17 +189,21 @@ def carrier_archive_case_params(default_fast: set[tuple[str, str]]):
     ]
 
 
-@pytest.mark.parametrize("archive_format", archive_format_params({"7z", "zip"}))
+@pytest.mark.parametrize("archive_format", plain_archive_format_params({"7z", "zip", "tar", "gzip", "bzip2", "xz"}))
 def test_real_archive_edge_plain_single_archives_extract(tmp_path, archive_format):
     require_7z()
+    if archive_format in {"tar.zst", "zstd"}:
+        require_zstd()
     case = FACTORY.create(tmp_path, f"plain_single_{archive_format}", archive_format)
 
     assert_success(case)
 
 
-@pytest.mark.parametrize("archive_format", archive_format_params({"7z", "zip"}))
+@pytest.mark.parametrize("archive_format", plain_archive_format_params({"7z", "zip", "tar", "gzip", "bzip2", "xz"}))
 def test_real_archive_edge_plain_single_archives_extract_when_detection_disabled(tmp_path, archive_format):
     require_7z()
+    if archive_format in {"tar.zst", "zstd"}:
+        require_zstd()
     case = FACTORY.create(tmp_path, f"plain_single_detection_off_{archive_format}", archive_format)
 
     assert_success_with_detection_disabled(case)

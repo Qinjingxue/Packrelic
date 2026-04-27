@@ -8,7 +8,7 @@ from smart_unpacker.detection.scheduler import DetectionScheduler
 from smart_unpacker.relations.scheduler import RelationsScheduler
 
 
-STANDARD_ARCHIVE_EXTS = {".7z", ".zip", ".rar", ".gz", ".bz2", ".xz"}
+STANDARD_ARCHIVE_EXTS = {".7z", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz", ".zst"}
 
 
 class ArchiveTaskProvider:

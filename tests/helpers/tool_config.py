@@ -30,11 +30,13 @@ def get_test_tools() -> dict[str, Path | None]:
 
     seven_zip = os.environ.get("SMART_UNPACKER_TEST_7Z") or config.get("seven_zip") or "tools/7z.exe"
     seven_zip_sfx = os.environ.get("SMART_UNPACKER_TEST_7Z_SFX") or config.get("seven_zip_sfx") or "tools/7zCon.sfx"
+    zstd_exe = os.environ.get("SMART_UNPACKER_TEST_ZSTD") or config.get("zstd_exe") or "tools/zstd.exe"
     rar_exe = os.environ.get("SMART_UNPACKER_TEST_RAR") or config.get("rar_exe")
 
     return {
         "seven_zip": _resolve_tool(seven_zip, repo_root),
         "seven_zip_sfx": _resolve_tool(seven_zip_sfx, repo_root),
+        "zstd_exe": _resolve_tool(zstd_exe, repo_root),
         "rar_exe": _resolve_tool(rar_exe, repo_root),
     }
 
@@ -44,6 +46,13 @@ def require_7z() -> Path:
     if not seven_zip or not seven_zip.is_file():
         raise FileNotFoundError("7z.exe is required for this test. Configure tests/test_tools.json or SMART_UNPACKER_TEST_7Z.")
     return seven_zip
+
+
+def require_zstd() -> Path:
+    zstd_exe = get_test_tools()["zstd_exe"]
+    if not zstd_exe or not zstd_exe.is_file():
+        raise FileNotFoundError("zstd.exe is required for this test. Configure tests/test_tools.json or SMART_UNPACKER_TEST_ZSTD.")
+    return zstd_exe
 
 
 def get_optional_rar() -> Path | None:
