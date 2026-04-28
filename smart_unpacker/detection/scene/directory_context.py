@@ -6,7 +6,7 @@ from smart_unpacker.detection.scene.markers import collect_scene_markers_from_sn
 from smart_unpacker.contracts.filesystem import DirectorySnapshot
 from smart_unpacker.filesystem.directory_scanner import DirectoryScanner
 from smart_unpacker.support.global_cache_manager import cached_value, directory_identity, stable_fingerprint
-from smart_unpacker.support.path_keys import normalized_path
+from smart_unpacker.support.path_keys import normalized_path, path_key
 
 
 def detect_scene_context_for_directory(
@@ -16,7 +16,10 @@ def detect_scene_context_for_directory(
 ) -> dict[str, Any]:
     effective_rules = rules or RECOMMENDED_SCENE_RULES_PAYLOAD
     norm_target = normalized_path(target_dir)
-    key = (directory_identity(norm_target), stable_fingerprint(effective_rules))
+    key = (
+        _snapshot_directory_identity(snapshot, norm_target) if snapshot is not None else directory_identity(norm_target),
+        stable_fingerprint(effective_rules),
+    )
     return cached_value(
         "scene_context_for_directory",
         key,
@@ -30,3 +33,18 @@ def detect_scene_context_for_directory(
 
 def is_strong_scene_context(context: dict[str, Any]) -> bool:
     return context.get("scene_type") != "generic" and context.get("match_strength") == "strong"
+
+
+def _snapshot_directory_identity(snapshot: DirectorySnapshot, directory: str):
+    root_key = path_key(directory)
+    entries = []
+    for entry in snapshot.entries:
+        if path_key(entry.path.parent) != root_key:
+            continue
+        entries.append((
+            entry.path.name.lower(),
+            bool(entry.is_dir),
+            int(entry.size or 0),
+            int(entry.mtime_ns or 0),
+        ))
+    return root_key, len(entries), tuple(sorted(entries))

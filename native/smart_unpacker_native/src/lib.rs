@@ -16,6 +16,7 @@ mod password_zip;
 mod pe_overlay;
 mod postprocess_ops;
 mod repair_io;
+mod relations;
 mod util;
 mod zip_deep_repair;
 mod zip_names;
@@ -67,6 +68,21 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(directory_scan::scan_directory_entries, m)?)?;
     m.add_function(wrap_pyfunction!(
         directory_scan::list_regular_files_in_directory,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(directory_scan::batch_file_head_facts, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        relations::relations_detect_split_role,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(relations::relations_logical_name, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        relations::relations_parse_numbered_volume,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(relations::relations_split_sort_key, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        relations::relations_build_candidate_groups,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(directory_scan::scan_output_tree, m)?)?;

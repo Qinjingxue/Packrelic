@@ -3,6 +3,7 @@ from typing import Any
 from smart_unpacker_native import inspect_tar_header_structure as _native_inspect_tar_header_structure
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
+from smart_unpacker.detection.pipeline.processors.identity import file_identity_for_context
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 from smart_unpacker.support.global_cache_manager import cached_value, file_identity
 
@@ -10,8 +11,12 @@ from smart_unpacker.support.global_cache_manager import cached_value, file_ident
 DEFAULT_MAX_TAR_ENTRIES_TO_WALK = 8
 
 
-def inspect_tar_header_structure(path: str, max_entries_to_walk: int = DEFAULT_MAX_TAR_ENTRIES_TO_WALK) -> dict[str, Any]:
-    key = (file_identity(path), int(max_entries_to_walk))
+def inspect_tar_header_structure(
+    path: str,
+    max_entries_to_walk: int = DEFAULT_MAX_TAR_ENTRIES_TO_WALK,
+    identity: tuple[str, int, int] | None = None,
+) -> dict[str, Any]:
+    key = (identity or file_identity(path), int(max_entries_to_walk))
     return cached_value(
         "format_tar_header_structure",
         key,
@@ -31,7 +36,9 @@ def inspect_tar_header_structure(path: str, max_entries_to_walk: int = DEFAULT_M
     },
 )
 def process_tar_header_structure(context: FactProcessorContext) -> dict[str, Any]:
+    path = context.fact_bag.get("file.path") or ""
     return inspect_tar_header_structure(
-        context.fact_bag.get("file.path") or "",
+        path,
         int(context.fact_config.get("max_entries_to_walk", DEFAULT_MAX_TAR_ENTRIES_TO_WALK)),
+        file_identity_for_context(context, path),
     )

@@ -3,14 +3,15 @@ from typing import Any
 from smart_unpacker_native import inspect_compression_stream_structure as _native_inspect_compression_stream_structure
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
+from smart_unpacker.detection.pipeline.processors.identity import file_identity_for_context
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 from smart_unpacker.support.global_cache_manager import cached_value, file_identity
 
 
-def inspect_compression_stream_structure(path: str) -> dict[str, Any]:
+def inspect_compression_stream_structure(path: str, identity: tuple[str, int, int] | None = None) -> dict[str, Any]:
     return cached_value(
         "format_compression_stream_structure",
-        (file_identity(path),),
+        (identity or file_identity(path),),
         lambda: dict(_native_inspect_compression_stream_structure(path)),
     )
 
@@ -27,4 +28,5 @@ def inspect_compression_stream_structure(path: str) -> dict[str, Any]:
     },
 )
 def process_compression_stream_structure(context: FactProcessorContext) -> dict[str, Any]:
-    return inspect_compression_stream_structure(context.fact_bag.get("file.path") or "")
+    path = context.fact_bag.get("file.path") or ""
+    return inspect_compression_stream_structure(path, file_identity_for_context(context, path))

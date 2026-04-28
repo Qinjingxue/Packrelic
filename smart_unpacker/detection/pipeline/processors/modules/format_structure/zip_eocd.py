@@ -3,6 +3,7 @@ from typing import Any
 from smart_unpacker_native import inspect_zip_eocd_structure as _native_inspect_zip_eocd_structure
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
+from smart_unpacker.detection.pipeline.processors.identity import file_identity_for_context
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 from smart_unpacker.support.global_cache_manager import cached_value, file_identity
 
@@ -10,8 +11,12 @@ from smart_unpacker.support.global_cache_manager import cached_value, file_ident
 DEFAULT_MAX_CD_ENTRIES_TO_WALK = 16
 
 
-def inspect_zip_eocd_structure(path: str, max_cd_entries_to_walk: int = DEFAULT_MAX_CD_ENTRIES_TO_WALK) -> dict[str, Any]:
-    key = (file_identity(path), int(max_cd_entries_to_walk))
+def inspect_zip_eocd_structure(
+    path: str,
+    max_cd_entries_to_walk: int = DEFAULT_MAX_CD_ENTRIES_TO_WALK,
+    identity: tuple[str, int, int] | None = None,
+) -> dict[str, Any]:
+    key = (identity or file_identity(path), int(max_cd_entries_to_walk))
     return cached_value(
         "format_zip_eocd_structure",
         key,
@@ -31,7 +36,9 @@ def inspect_zip_eocd_structure(path: str, max_cd_entries_to_walk: int = DEFAULT_
     },
 )
 def process_zip_eocd_structure(context: FactProcessorContext) -> dict[str, Any]:
+    path = context.fact_bag.get("file.path") or ""
     return inspect_zip_eocd_structure(
-        context.fact_bag.get("file.path") or "",
+        path,
         int(context.fact_config.get("max_cd_entries_to_walk", DEFAULT_MAX_CD_ENTRIES_TO_WALK)),
+        file_identity_for_context(context, path),
     )

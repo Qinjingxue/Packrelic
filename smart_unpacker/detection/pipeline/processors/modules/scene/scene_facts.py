@@ -2,6 +2,7 @@ import os
 from typing import Any, Dict
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
+from smart_unpacker.detection.pipeline.processors.identity import file_identity_for_context
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 from smart_unpacker.detection.scene.context import context_from_marker_candidates
 from smart_unpacker.detection.scene.definitions import scene_rules
@@ -30,7 +31,7 @@ def _is_under_prefix(rel_path: str, prefixes: list) -> bool:
 def analyze_scene_path(context: FactProcessorContext) -> dict[str, Any]:
     path = context.fact_bag.get("file.path") or ""
     key = (
-        file_identity(path),
+        file_identity_for_context(context, path),
         stable_fingerprint(context.fact_config or {}),
         stable_fingerprint(context.fact_bag.get("scene.context") or {}),
         bool(context.fact_bag.get("relation.is_split_related")),

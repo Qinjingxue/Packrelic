@@ -18,9 +18,27 @@ def collect_scene_directory_markers(context) -> list[dict]:
     rules = scene_rules(context.fact_config)
     start_dir = os.path.dirname(os.path.abspath(base_path)) if os.path.isfile(base_path) else os.path.abspath(base_path)
     max_depth = int((context.fact_config or {}).get("scene_context_max_parent_depth", 4))
+    scan_session = getattr(context, "scan_session", None)
     directories = candidate_directories(start_dir, max_depth)
-    key = (tuple(directory_identity(directory) for directory in directories), stable_fingerprint(rules))
-    return cached_value("scene_marker_candidates", key, lambda: _collect_scene_marker_candidates(directories, rules))
+    snapshots = {
+        directory: _scene_snapshot_for_directory(scan_session, directory, rules)
+        for directory in directories
+    } if scan_session is not None else {}
+    if scan_session is not None:
+        identities = tuple(
+            _snapshot_directory_identity(snapshots.get(directory), directory)
+            if snapshots.get(directory) is not None
+            else scan_session.directory_identity_for_path(directory)
+            for directory in directories
+        )
+    else:
+        identities = tuple(directory_identity(directory) for directory in directories)
+    key = (identities, stable_fingerprint(rules))
+    return cached_value(
+        "scene_marker_candidates",
+        key,
+        lambda: _collect_scene_marker_candidates(directories, rules, snapshots=snapshots),
+    )
 
 
 @register_batch_fact("scene.directory_markers")
@@ -42,7 +60,8 @@ def collect_scene_directory_markers_batch(context):
             cache_key = (path_key(normalized), rules_key)
             markers = directory_markers.get(cache_key)
             if markers is None:
-                markers = cached_scene_markers_for_directory(normalized, rules)
+                snapshot = _scene_snapshot_for_directory(context.scan_session, normalized, rules)
+                markers = cached_scene_markers_for_directory(normalized, rules, snapshot=snapshot)
                 directory_markers[cache_key] = markers
             candidates.append({
                 "target_dir": normalized,
@@ -58,18 +77,18 @@ def _merged_fact_config(fact_configs: dict[str, dict]) -> dict:
     return merged
 
 
-def _collect_scene_marker_candidates(directories: list[str], rules: list[dict]) -> list[dict]:
+def _collect_scene_marker_candidates(directories: list[str], rules: list[dict], snapshots: dict[str, object] | None = None) -> list[dict]:
     candidates = []
     for directory in directories:
         candidates.append({
             "target_dir": normalized_path(directory),
-            "markers": cached_scene_markers_for_directory(directory, rules),
+            "markers": cached_scene_markers_for_directory(directory, rules, snapshot=(snapshots or {}).get(directory)),
         })
     return candidates
 
 
 def cached_scene_markers_for_directory(directory: str, rules: list[dict], snapshot=None) -> list[str]:
-    identity = directory_identity(directory)
+    identity = _snapshot_directory_identity(snapshot, directory) if snapshot is not None else directory_identity(directory)
     rules_fingerprint = stable_fingerprint(rules)
     return cached_value(
         "scene_directory_markers",
@@ -96,3 +115,38 @@ def candidate_directories(start_dir: str, max_depth: int) -> list[str]:
         current = parent
         depth += 1
     return directories
+
+
+def _scene_snapshot_for_directory(scan_session, directory: str, rules: list[dict]):
+    if scan_session is None:
+        return None
+    try:
+        if hasattr(scan_session, "scene_snapshot_for_directory"):
+            return scan_session.scene_snapshot_for_directory(directory, max_depth=_scene_snapshot_depth(rules))
+        return scan_session.shallow_snapshot_for_directory(directory, max_depth=_scene_snapshot_depth(rules))
+    except Exception:
+        return None
+
+
+def _scene_snapshot_depth(rules: list[dict]) -> int:
+    depth = 1
+    for rule in rules:
+        for rel_path in (rule.get("nested_path_markers") or {}):
+            parts = [part for part in str(rel_path or "").replace("\\", "/").split("/") if part]
+            depth = max(depth, len(parts))
+    return depth
+
+
+def _snapshot_directory_identity(snapshot, directory: str):
+    root_key = path_key(directory)
+    entries = []
+    for entry in getattr(snapshot, "entries", []) or []:
+        if path_key(entry.path.parent) != root_key:
+            continue
+        entries.append((
+            entry.path.name.lower(),
+            bool(entry.is_dir),
+            int(entry.size or 0),
+            int(entry.mtime_ns or 0),
+        ))
+    return root_key, len(entries), tuple(sorted(entries))

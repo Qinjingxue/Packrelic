@@ -11,6 +11,7 @@ class FactCollectorContext:
     fact_name: str
     config: dict[str, Any] = field(default_factory=dict)
     fact_config: dict[str, Any] = field(default_factory=dict)
+    scan_session: Any | None = None
 
 
 @dataclass(frozen=True)

@@ -11,12 +11,14 @@ class FactProvider:
         config: dict[str, Any] | None = None,
         fact_configs: dict[str, dict[str, Any]] | None = None,
         enabled_fact_modules: set[str] | None = None,
+        scan_session: Any | None = None,
     ):
         self.base_path = base_path
         self.registry = get_registry()
         self.config = config or {}
         self.fact_configs = fact_configs or {}
         self.enabled_fact_modules = enabled_fact_modules
+        self.scan_session = scan_session
 
     def _collect(self, collector, fact_bag: FactBag, fact_name: str) -> Any:
         if getattr(collector, "_fact_accepts_context", False):
@@ -26,6 +28,7 @@ class FactProvider:
                 fact_name=fact_name,
                 config=self.config,
                 fact_config=self.fact_configs.get(fact_name, {}),
+                scan_session=self.scan_session,
             )
             return collector(context)
         return collector(self.base_path)

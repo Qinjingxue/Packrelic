@@ -107,6 +107,7 @@ class DetectionScheduler:
             config=self.config,
             fact_configs=self._merge_fact_configs(fact_configs),
             enabled_fact_modules=self.enabled_fact_modules,
+            scan_session=getattr(self, "_active_scan_session", None),
         )
 
     def _ensure_pool_facts(

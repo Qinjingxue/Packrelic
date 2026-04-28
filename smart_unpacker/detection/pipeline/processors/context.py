@@ -10,3 +10,4 @@ class FactProcessorContext:
     output_fact: str
     config: dict[str, Any]
     fact_config: dict[str, Any]
+    scan_session: Any | None = None

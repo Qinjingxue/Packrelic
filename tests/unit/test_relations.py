@@ -59,3 +59,18 @@ def test_relation_group_builder_keeps_same_stem_archives_separate(tmp_path):
     assert sorted(Path(group.head_path).name for group in collision_groups) == ["collision.7z", "collision.zip"]
     assert all(group.member_paths == [] for group in collision_groups)
     assert all(group.is_split_candidate is False for group in collision_groups)
+
+
+def test_relation_public_helpers_parse_split_names():
+    scheduler = RelationsScheduler()
+
+    assert scheduler.detect_split_role("game.part01.rar") == "first"
+    assert scheduler.detect_split_role("game.part02.rar") == "member"
+    assert scheduler.logical_name_for_archive("game.7z.001") == "game"
+    assert scheduler.logical_name_for_archive("payload.bin") == "payload"
+    assert scheduler.parse_numbered_volume(r"C:\tmp\game.part001.rar") == {
+        "prefix": r"C:\tmp\game",
+        "number": 1,
+        "style": "rar_part",
+        "width": 3,
+    }

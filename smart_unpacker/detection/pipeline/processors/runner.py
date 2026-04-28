@@ -59,6 +59,7 @@ class ProcessingCoordinator:
             output_fact=fact_name,
             config=self.config,
             fact_config=self.fact_configs.get(fact_name, {}),
+            scan_session=self.provider.scan_session,
         )
         try:
             value = processor.processor(context)

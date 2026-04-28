@@ -6,6 +6,7 @@ from smart_unpacker_native import scan_carrier_archive as _NATIVE_SCAN_CARRIER_A
 from smart_unpacker_native import scan_magics_anywhere as _NATIVE_SCAN_MAGICS_ANYWHERE
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
+from smart_unpacker.detection.pipeline.processors.identity import file_identity_for_context
 from smart_unpacker.detection.pipeline.processors.modules.format_structure.zip_local_header import inspect_zip_local_header
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 from smart_unpacker.support.config_values import bool_value, non_negative_int, optional_positive_int, positive_int
@@ -304,16 +305,27 @@ def _file_size(context: FactProcessorContext) -> int:
     return -1
 
 
-def analyze_embedded_archive(path: str, file_size: int, config: Dict[str, Any]) -> dict[str, Any]:
-    cache_key = (file_identity(path), stable_fingerprint(config or {}))
+def analyze_embedded_archive(
+    path: str,
+    file_size: int,
+    config: Dict[str, Any],
+    identity: tuple[str, int, int] | None = None,
+) -> dict[str, Any]:
+    cache_key = (identity or file_identity(path), stable_fingerprint(config or {}))
     return cached_value(
         "embedded_archive_analysis",
         cache_key,
-        lambda: _analyze_embedded_archive_uncached(path, file_size, config),
+        lambda: _analyze_embedded_archive_uncached(path, file_size, config, identity=identity),
     )
 
 
-def _analyze_embedded_archive_uncached(path: str, file_size: int, config: Dict[str, Any]) -> dict[str, Any]:
+def _analyze_embedded_archive_uncached(
+    path: str,
+    file_size: int,
+    config: Dict[str, Any],
+    *,
+    identity: tuple[str, int, int] | None = None,
+) -> dict[str, Any]:
     ext = os.path.splitext(path)[1].lower()
     carrier_exts = normalize_exts(config.get("carrier_exts"))
     ambiguous_exts = normalize_exts(config.get("ambiguous_resource_exts"))
@@ -340,7 +352,7 @@ def _analyze_embedded_archive_uncached(path: str, file_size: int, config: Dict[s
         "zip_local_header": {},
     }
     if detected_ext == ".zip":
-        result["zip_local_header"] = inspect_zip_local_header(path, offset)
+        result["zip_local_header"] = inspect_zip_local_header(path, offset, identity=identity)
     return result
 
 
@@ -361,6 +373,6 @@ def process_embedded_archive_analysis(context: FactProcessorContext) -> dict[str
     if not path or file_size < 0:
         return _empty_result()
     try:
-        return analyze_embedded_archive(path, file_size, context.fact_config)
+        return analyze_embedded_archive(path, file_size, context.fact_config, file_identity_for_context(context, path))
     except OSError:
         return _empty_result()

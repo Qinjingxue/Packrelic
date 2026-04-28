@@ -44,6 +44,25 @@ class BatchExtractionOutcome:
         return self.verification is None or _verification_accepts(self.verification)
 
 
+@dataclass
+class _IndexedStageTask:
+    index: int
+    task: ArchiveTask
+    resource_token_cost: int = 1
+
+    @property
+    def fact_bag(self):
+        return self.task.fact_bag
+
+    @property
+    def main_path(self) -> str:
+        return self.task.main_path
+
+    @property
+    def all_parts(self) -> list[str]:
+        return self.task.all_parts
+
+
 class ExtractionBatchRunner:
     def __init__(
         self,
@@ -101,9 +120,7 @@ class ExtractionBatchRunner:
     def _execute_ready_tasks(self, tasks: List[ArchiveTask], output_dir_resolver) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
         ready_tasks: list[ArchiveTask] = []
         skipped_results: list[tuple[ArchiveTask, BatchExtractionOutcome]] = []
-        for task in tasks:
-            out_dir = output_dir_resolver(task)
-            preflight = self.extractor.inspect(task, out_dir)
+        for _index, task, _out_dir, preflight in self._inspect_tasks_before_extract(tasks, output_dir_resolver):
             if preflight.skip_result is not None:
                 skipped_results.append((task, BatchExtractionOutcome(preflight.skip_result)))
                 continue
@@ -114,8 +131,7 @@ class ExtractionBatchRunner:
         if len(ready_tasks) == 1:
             self.resource_inspector.record_estimated_single_task_profile(ready_tasks[0])
         else:
-            for task in ready_tasks:
-                self.resource_inspector.inspect(task)
+            self._inspect_resource_profiles(ready_tasks)
 
         initial_limit = self.scheduler_config.get("initial_concurrency_limit", 4)
         scheduler = ConcurrencyScheduler(
@@ -143,24 +159,57 @@ class ExtractionBatchRunner:
         return scheduler_config
 
     def _settle_analysis_repair_loops(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
+        max_workers = self._stage_max_workers(
+            enabled_key="parallel_repair_settle",
+            workers_key="repair_settle_max_workers",
+            task_count=len(tasks),
+            default_workers=2,
+        )
+        if max_workers > 1:
+            indexed = [_IndexedStageTask(index, task) for index, task in enumerate(tasks)]
+            results = self._execute_indexed_stage(
+                indexed,
+                max_workers=max_workers,
+                worker=lambda item: (
+                    item.index,
+                    self._settle_single_analysis_repair_loop(
+                        item.task,
+                        analysis_stage=self._parallel_analysis_stage(),
+                        repair_stage=self._parallel_repair_stage(),
+                    ),
+                ),
+            )
+            settled: list[ArchiveTask] = []
+            for _index, task_group in sorted(results, key=lambda item: item[0]):
+                settled.extend(task_group)
+            return settled
+
         settled: list[ArchiveTask] = []
         for task in tasks:
             settled.extend(self._settle_single_analysis_repair_loop(task))
         return settled
 
-    def _settle_single_analysis_repair_loop(self, task: ArchiveTask) -> list[ArchiveTask]:
+    def _settle_single_analysis_repair_loop(
+        self,
+        task: ArchiveTask,
+        *,
+        analysis_stage: ArchiveAnalysisStage | None = None,
+        repair_stage: ArchiveRepairStage | None = None,
+    ) -> list[ArchiveTask]:
+        analysis_stage = analysis_stage or self.analysis_stage
+        repair_stage = repair_stage or self.repair_stage
         current_tasks = [task]
         settled: list[ArchiveTask] = []
         while current_tasks:
             current = current_tasks.pop(0)
             state = RepairLoopState(current, self.repair_loop_limits)
             while state.can_attempt(trigger="analysis"):
-                repair_result = self.repair_stage.repair_medium_confidence_task(current)
+                repair_result = repair_stage.repair_medium_confidence_task(current)
                 if repair_result is None:
                     break
                 if not state.record_result(repair_result, trigger="analysis"):
                     break
-                analyzed = self.analysis_stage.analyze_task_to_tasks(current)
+                analyzed = analysis_stage.analyze_task_to_tasks(current)
                 if len(analyzed) == 1:
                     current = analyzed[0]
                     state = RepairLoopState(current, self.repair_loop_limits)
@@ -171,6 +220,93 @@ class ExtractionBatchRunner:
             if current is not None:
                 settled.append(current)
         return settled
+
+    def _inspect_tasks_before_extract(self, tasks: list[ArchiveTask], output_dir_resolver) -> list[tuple[int, ArchiveTask, str, Any]]:
+        max_workers = self._stage_max_workers(
+            enabled_key="parallel_preflight_inspect",
+            workers_key="preflight_inspect_max_workers",
+            task_count=len(tasks),
+            default_workers=4,
+        )
+        if max_workers <= 1:
+            results = []
+            for index, task in enumerate(tasks):
+                out_dir = output_dir_resolver(task)
+                results.append((index, task, out_dir, self.extractor.inspect(task, out_dir)))
+            return results
+
+        indexed = [_IndexedStageTask(index, task) for index, task in enumerate(tasks)]
+
+        def inspect_one(item: _IndexedStageTask):
+            out_dir = output_dir_resolver(item.task)
+            return item.index, item.task, out_dir, self.extractor.inspect(item.task, out_dir)
+
+        results = self._execute_indexed_stage(indexed, max_workers=max_workers, worker=inspect_one)
+        return sorted(results, key=lambda item: item[0])
+
+    def _inspect_resource_profiles(self, tasks: list[ArchiveTask]) -> None:
+        max_workers = self._stage_max_workers(
+            enabled_key="parallel_resource_preflight",
+            workers_key="resource_preflight_max_workers",
+            task_count=len(tasks),
+            default_workers=4,
+        )
+        if max_workers <= 1:
+            for task in tasks:
+                self.resource_inspector.inspect(task)
+            return
+
+        indexed = [_IndexedStageTask(index, task) for index, task in enumerate(tasks)]
+        self._execute_indexed_stage(
+            indexed,
+            max_workers=max_workers,
+            worker=lambda item: (item.index, self.resource_inspector.inspect(item.task)),
+        )
+
+    def _execute_indexed_stage(self, tasks: list[_IndexedStageTask], *, max_workers: int, worker) -> list[Any]:
+        scheduler_config = dict(self.scheduler_config)
+        scheduler_config["initial_concurrency_limit"] = max_workers
+        scheduler = ConcurrencyScheduler(
+            scheduler_config,
+            current_limit=max_workers,
+            max_workers=max_workers,
+        )
+        executor = TaskExecutor(scheduler, max_workers=max_workers)
+        return executor.execute_all(tasks, worker)
+
+    def _stage_max_workers(
+        self,
+        *,
+        enabled_key: str,
+        workers_key: str,
+        task_count: int,
+        default_workers: int,
+    ) -> int:
+        if task_count <= 1 or self.max_workers <= 1:
+            return 1
+        performance = self.config.get("performance", {}) if isinstance(self.config.get("performance"), dict) else {}
+        profile = str(performance.get("scheduler_profile") or self.scheduler_config.get("scheduler_profile") or "").lower()
+        resolved_profile = str(self.scheduler_config.get("resolved_scheduler_profile") or "").lower()
+        if profile == "single" or resolved_profile == "single":
+            return 1
+        if not bool(performance.get(enabled_key, True)):
+            return 1
+        configured = performance.get(workers_key)
+        try:
+            worker_limit = int(configured) if configured is not None else int(default_workers)
+        except (TypeError, ValueError):
+            worker_limit = int(default_workers)
+        return max(1, min(int(task_count), int(self.max_workers), max(1, worker_limit)))
+
+    def _parallel_analysis_stage(self):
+        if type(self.analysis_stage) is ArchiveAnalysisStage:
+            return ArchiveAnalysisStage(self.config)
+        return self.analysis_stage
+
+    def _parallel_repair_stage(self):
+        if type(self.repair_stage) is ArchiveRepairStage:
+            return ArchiveRepairStage(self.config)
+        return self.repair_stage
 
     def _extract_verify_with_retries(
         self,

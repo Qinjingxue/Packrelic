@@ -3,6 +3,7 @@ use pyo3::types::{PyDict, PyList};
 use regex::RegexBuilder;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -103,6 +104,25 @@ pub(crate) fn list_regular_files_in_directory(
 }
 
 #[pyfunction]
+#[pyo3(signature = (paths, magic_size=16))]
+pub(crate) fn batch_file_head_facts(
+    py: Python<'_>,
+    paths: Vec<String>,
+    magic_size: usize,
+) -> PyResult<Vec<Py<PyDict>>> {
+    let records = py.detach(|| {
+        paths
+            .into_iter()
+            .map(|path| file_head_record(path, magic_size))
+            .collect::<Vec<_>>()
+    });
+    records
+        .into_iter()
+        .map(|record| record.into_py_dict(py))
+        .collect()
+}
+
+#[pyfunction]
 pub(crate) fn scan_output_tree(py: Python<'_>, output_dir: &str) -> PyResult<Py<PyDict>> {
     let root = PathBuf::from(output_dir);
     let result = PyDict::new(py);
@@ -127,6 +147,53 @@ pub(crate) fn scan_output_tree(py: Python<'_>, output_dir: &str) -> PyResult<Py<
     result.set_item("unreadable_count", stats.unreadable_count)?;
     result.set_item("files", PyList::new(py, stats.files)?)?;
     Ok(result.unbind())
+}
+
+struct FileHeadRecord {
+    path: String,
+    exists: bool,
+    is_file: bool,
+    size: Option<u64>,
+    mtime_ns: Option<u64>,
+    magic: Vec<u8>,
+}
+
+impl FileHeadRecord {
+    fn into_py_dict(self, py: Python<'_>) -> PyResult<Py<PyDict>> {
+        let dict = PyDict::new(py);
+        dict.set_item("path", self.path)?;
+        dict.set_item("exists", self.exists)?;
+        dict.set_item("is_file", self.is_file)?;
+        dict.set_item("size", self.size)?;
+        dict.set_item("mtime_ns", self.mtime_ns)?;
+        dict.set_item("magic", pyo3::types::PyBytes::new(py, &self.magic))?;
+        Ok(dict.unbind())
+    }
+}
+
+fn file_head_record(path: String, magic_size: usize) -> FileHeadRecord {
+    let path_buf = PathBuf::from(&path);
+    let metadata = fs::metadata(&path_buf).ok();
+    let is_file = metadata.as_ref().map(|item| item.is_file()).unwrap_or(false);
+    let mut magic = Vec::new();
+    if is_file && magic_size > 0 {
+        if let Ok(mut handle) = fs::File::open(&path_buf) {
+            let limit = magic_size.min(1024 * 1024);
+            let mut buffer = vec![0u8; limit];
+            if let Ok(count) = handle.read(&mut buffer) {
+                buffer.truncate(count);
+                magic = buffer;
+            }
+        }
+    }
+    FileHeadRecord {
+        path,
+        exists: metadata.is_some(),
+        is_file,
+        size: metadata.as_ref().map(|item| item.len()),
+        mtime_ns: metadata.as_ref().and_then(metadata_mtime_ns),
+        magic,
+    }
 }
 
 #[derive(Default)]

@@ -3,13 +3,19 @@ from typing import Any
 from smart_unpacker_native import inspect_pe_overlay_structure as _native_inspect_pe_overlay_structure
 
 from smart_unpacker.detection.pipeline.processors.context import FactProcessorContext
+from smart_unpacker.detection.pipeline.processors.identity import file_identity_for_context
 from smart_unpacker.detection.pipeline.processors.registry import register_processor
 from smart_unpacker.support.global_cache_manager import cached_value, file_identity
 
 
-def inspect_pe_overlay_structure(path: str, file_size: int | None = None, magic_bytes: bytes | None = None) -> dict[str, Any]:
+def inspect_pe_overlay_structure(
+    path: str,
+    file_size: int | None = None,
+    magic_bytes: bytes | None = None,
+    identity: tuple[str, int, int] | None = None,
+) -> dict[str, Any]:
     effective_magic = magic_bytes or b""
-    key = (file_identity(path), file_size, effective_magic)
+    key = (identity or file_identity(path), file_size, effective_magic)
     return cached_value(
         "format_pe_overlay_structure",
         key,
@@ -30,8 +36,10 @@ def inspect_pe_overlay_structure(path: str, file_size: int | None = None, magic_
 )
 def process_pe_overlay_structure(context: FactProcessorContext) -> dict[str, Any]:
     facts = context.fact_bag
+    path = facts.get("file.path") or ""
     return inspect_pe_overlay_structure(
-        facts.get("file.path") or "",
+        path,
         facts.get("file.size"),
         facts.get("file.magic_bytes") or b"",
+        file_identity_for_context(context, path),
     )
