@@ -9,6 +9,7 @@ from typing import Iterable
 
 from smart_unpacker.watch.scanner import WatchCandidate, looks_like_archive, scan_watch_candidates
 from smart_unpacker.watch.state import WatchStateStore
+from smart_unpacker_native import watch_candidate_for_path as _native_watch_candidate_for_path
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -200,13 +201,14 @@ class _ArchiveEventHandler(FileSystemEventHandler):
 def _candidate_for_event_path(path: str) -> WatchCandidate | None:
     if not path or not looks_like_archive(path):
         return None
-    try:
-        stat = os.stat(path)
-    except OSError:
+    item = _native_watch_candidate_for_path(str(path))
+    if item is None:
         return None
-    if stat.st_size <= 0:
-        return None
-    return WatchCandidate(path=os.path.abspath(path), size=int(stat.st_size), mtime=float(stat.st_mtime))
+    return WatchCandidate(
+        path=str(item.get("path") or ""),
+        size=int(item.get("size", 0) or 0),
+        mtime=float(item.get("mtime", 0.0) or 0.0),
+    )
 
 
 def _longest_matching_root(path: str, roots: list[str]) -> str | None:
@@ -222,4 +224,3 @@ def _is_relative_to(path: str, root: str) -> bool:
         return True
     except ValueError:
         return False
-

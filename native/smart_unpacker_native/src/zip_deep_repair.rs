@@ -171,6 +171,127 @@ pub(crate) fn zip_deep_partial_recovery(
     Ok(result.unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    output_path,
+    require_data_descriptor=false,
+    max_entries=20000,
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    verify_candidates=true
+))]
+pub(crate) fn zip_rebuild_from_local_headers(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    output_path: &str,
+    require_data_descriptor: bool,
+    max_entries: usize,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    verify_candidates: bool,
+) -> PyResult<Py<PyDict>> {
+    let started = Instant::now();
+    let options = DeepZipOptions {
+        max_candidates: 1,
+        max_entries: max_entries.max(1),
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_entry_uncompressed_bytes: None,
+        max_duration: None,
+        verify_candidates,
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => return rebuild_status_dict(py, "skipped", "", &message, &[], 0, 0, 0, 0, 0, false),
+    };
+    let scan = scan_entries(&data, &options, started);
+    let indices = scan
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            (!require_data_descriptor || entry.descriptor).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if indices.is_empty() {
+        return rebuild_status_dict(
+            py,
+            "unrepairable",
+            "",
+            if require_data_descriptor {
+                "no recoverable ZIP data descriptor entries were found"
+            } else {
+                "no recoverable ZIP local file headers were found"
+            },
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            scan.descriptor_entries,
+            0,
+            0,
+            scan.timed_out,
+        );
+    }
+    let plan = make_plan(
+        "zip_rebuild_from_local_headers",
+        indices,
+        &scan.entries,
+        if require_data_descriptor { 0.86 } else { 0.84 },
+        if require_data_descriptor {
+            vec![
+                "scan_zip_data_descriptors",
+                "materialize_descriptor_sizes",
+                "write_repaired_zip",
+            ]
+        } else {
+            vec![
+                "scan_local_file_headers",
+                "rebuild_zip_central_directory",
+                "write_repaired_zip",
+            ]
+        },
+    );
+    match write_candidate_zip(
+        &data,
+        &scan.entries,
+        &plan,
+        Path::new(output_path),
+        options.max_output_bytes,
+    ) {
+        Ok(stats) => rebuild_status_dict(
+            py,
+            if scan.skipped_offsets.is_empty() && scan.encrypted_entries == 0 && !scan.timed_out {
+                "repaired"
+            } else {
+                "partial"
+            },
+            output_path,
+            "ZIP local headers were rebuilt",
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            scan.descriptor_entries,
+            stats.entries,
+            stats.verified_entries,
+            scan.timed_out,
+        ),
+        Err(message) => rebuild_status_dict(
+            py,
+            "unrepairable",
+            "",
+            &message,
+            &scan.warnings,
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            scan.descriptor_entries,
+            0,
+            0,
+            scan.timed_out,
+        ),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct DeepZipOptions {
     max_candidates: usize,
@@ -1133,6 +1254,34 @@ fn status_dict(
                 .collect::<Vec<_>>(),
         )?,
     )?;
+    Ok(result.unbind())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rebuild_status_dict(
+    py: Python<'_>,
+    status: &str,
+    path: &str,
+    message: &str,
+    warnings: &[String],
+    skipped_entries: usize,
+    encrypted_entries: usize,
+    descriptor_entries: usize,
+    recovered_entries: usize,
+    verified_entries: usize,
+    timed_out: bool,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("status", status)?;
+    result.set_item("path", path)?;
+    result.set_item("message", message)?;
+    result.set_item("warnings", PyList::new(py, warnings)?)?;
+    result.set_item("skipped_entries", skipped_entries)?;
+    result.set_item("encrypted_entries", encrypted_entries)?;
+    result.set_item("descriptor_entries", descriptor_entries)?;
+    result.set_item("recovered_entries", recovered_entries)?;
+    result.set_item("verified_entries", verified_entries)?;
+    result.set_item("timed_out", timed_out)?;
     Ok(result.unbind())
 }
 

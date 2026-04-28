@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
+
+from smart_unpacker_native import scan_watch_candidates as _native_scan_watch_candidates
+from smart_unpacker_native import watch_candidate_for_path as _native_watch_candidate_for_path
 
 
 WATCH_ARCHIVE_SUFFIXES = {
@@ -19,43 +21,14 @@ class WatchCandidate:
 
 
 def scan_watch_candidates(roots: list[str], *, recursive: bool = True) -> list[WatchCandidate]:
-    candidates: list[WatchCandidate] = []
-    for root in roots:
-        if os.path.isfile(root):
-            item = _candidate_for(root)
-            if item is not None:
-                candidates.append(item)
-            continue
-        if not os.path.isdir(root):
-            continue
-        if recursive:
-            walker = os.walk(root)
-            for current_root, _dirs, files in walker:
-                for name in files:
-                    item = _candidate_for(os.path.join(current_root, name))
-                    if item is not None:
-                        candidates.append(item)
-        else:
-            for item in Path(root).iterdir():
-                if item.is_file():
-                    candidate = _candidate_for(str(item))
-                    if candidate is not None:
-                        candidates.append(candidate)
-    candidates.sort(key=lambda item: item.path)
-    return candidates
+    return [_candidate_from_native(item) for item in _native_scan_watch_candidates(list(roots or []), bool(recursive))]
 
 
 def _candidate_for(path: str) -> WatchCandidate | None:
-    lower = os.path.basename(path).lower()
-    if not _looks_like_archive(lower):
+    item = _native_watch_candidate_for_path(str(path))
+    if item is None:
         return None
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return None
-    if stat.st_size <= 0:
-        return None
-    return WatchCandidate(path=os.path.abspath(path), size=int(stat.st_size), mtime=float(stat.st_mtime))
+    return _candidate_from_native(item)
 
 
 def _looks_like_archive(name: str) -> bool:
@@ -66,3 +39,11 @@ def _looks_like_archive(name: str) -> bool:
 
 def looks_like_archive(path: str) -> bool:
     return _looks_like_archive(os.path.basename(path).lower())
+
+
+def _candidate_from_native(item: dict) -> WatchCandidate:
+    return WatchCandidate(
+        path=str(item.get("path") or ""),
+        size=int(item.get("size", 0) or 0),
+        mtime=float(item.get("mtime", 0.0) or 0.0),
+    )

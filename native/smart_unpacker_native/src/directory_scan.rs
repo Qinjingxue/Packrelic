@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 use regex::RegexBuilder;
 use std::collections::HashSet;
 use std::fs;
@@ -100,6 +100,107 @@ pub(crate) fn list_regular_files_in_directory(
         .into_iter()
         .map(|entry| entry.into_py_dict(py))
         .collect()
+}
+
+#[pyfunction]
+pub(crate) fn scan_output_tree(py: Python<'_>, output_dir: &str) -> PyResult<Py<PyDict>> {
+    let root = PathBuf::from(output_dir);
+    let result = PyDict::new(py);
+    result.set_item("exists", root.exists())?;
+    result.set_item("is_dir", root.is_dir())?;
+    result.set_item("file_count", 0usize)?;
+    result.set_item("dir_count", 0usize)?;
+    result.set_item("total_size", 0u64)?;
+    result.set_item("transient_file_count", 0usize)?;
+    result.set_item("unreadable_count", 0usize)?;
+    result.set_item("files", PyList::empty(py))?;
+    if !root.is_dir() {
+        return Ok(result.unbind());
+    }
+
+    let mut stats = OutputTreeStats::default();
+    walk_output_tree(py, &root, &root, &mut stats)?;
+    result.set_item("file_count", stats.file_count)?;
+    result.set_item("dir_count", stats.dir_count)?;
+    result.set_item("total_size", stats.total_size)?;
+    result.set_item("transient_file_count", stats.transient_file_count)?;
+    result.set_item("unreadable_count", stats.unreadable_count)?;
+    result.set_item("files", PyList::new(py, stats.files)?)?;
+    Ok(result.unbind())
+}
+
+#[derive(Default)]
+struct OutputTreeStats {
+    file_count: usize,
+    dir_count: usize,
+    total_size: u64,
+    transient_file_count: usize,
+    unreadable_count: usize,
+    files: Vec<Py<PyDict>>,
+}
+
+fn walk_output_tree(
+    py: Python<'_>,
+    root: &Path,
+    current: &Path,
+    stats: &mut OutputTreeStats,
+) -> PyResult<()> {
+    let entries = match fs::read_dir(current) {
+        Ok(entries) => entries,
+        Err(_) => {
+            stats.unreadable_count += 1;
+            return Ok(());
+        }
+    };
+    for item in entries {
+        let Ok(entry) = item else {
+            stats.unreadable_count += 1;
+            continue;
+        };
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                stats.unreadable_count += 1;
+                continue;
+            }
+        };
+        if metadata.is_dir() {
+            if file_name == ".sunpack" {
+                continue;
+            }
+            stats.dir_count += 1;
+            walk_output_tree(py, root, &path, stats)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        stats.file_count += 1;
+        let size = metadata.len();
+        stats.total_size = stats.total_size.saturating_add(size);
+        if is_transient_file_name(&file_name) {
+            stats.transient_file_count += 1;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map(path_to_string)
+            .unwrap_or_else(|_| file_name.clone());
+        let dict = PyDict::new(py);
+        dict.set_item("path", normalize_path_separator(relative))?;
+        dict.set_item("abs_path", path_to_string(&path))?;
+        dict.set_item("size", size)?;
+        stats.files.push(dict.unbind());
+    }
+    Ok(())
+}
+
+fn is_transient_file_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".tmp", ".temp", ".part", ".partial", ".crdownload"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
 }
 
 fn compile_case_insensitive_regexes(patterns: Vec<String>) -> PyResult<Vec<regex::Regex>> {

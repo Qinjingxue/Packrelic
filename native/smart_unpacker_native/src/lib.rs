@@ -14,6 +14,7 @@ mod password_input;
 mod password_rar;
 mod password_zip;
 mod pe_overlay;
+mod postprocess_ops;
 mod repair_io;
 mod util;
 mod zip_deep_repair;
@@ -51,6 +52,7 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(native_available, m)?)?;
     m.add_function(wrap_pyfunction!(scanner_version, m)?)?;
     m.add_class::<analysis::AnalysisBinaryView>()?;
+    m.add_class::<analysis::AnalysisMultiVolumeView>()?;
     m.add_function(wrap_pyfunction!(magic::scan_after_markers, m)?)?;
     m.add_function(wrap_pyfunction!(magic::scan_magics_anywhere, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -67,6 +69,7 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         directory_scan::list_regular_files_in_directory,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(directory_scan::scan_output_tree, m)?)?;
     m.add_function(wrap_pyfunction!(
         file_crc::compute_directory_crc_manifest,
         m
@@ -104,6 +107,13 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         pe_overlay::inspect_pe_overlay_structure,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(postprocess_ops::scan_watch_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(postprocess_ops::watch_candidate_for_path, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        postprocess_ops::flatten_single_branch_directories,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(postprocess_ops::delete_files_batch, m)?)?;
     m.add_function(wrap_pyfunction!(
         password_7z::seven_zip_fast_verify_passwords,
         m
@@ -142,6 +152,10 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(repair_io::repair_patch_file, m)?)?;
     m.add_function(wrap_pyfunction!(
         zip_deep_repair::zip_deep_partial_recovery,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        zip_deep_repair::zip_rebuild_from_local_headers,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

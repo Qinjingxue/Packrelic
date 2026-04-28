@@ -60,6 +60,26 @@ class CliBasicTests(unittest.TestCase):
         self.assertIn("score_breakdown", first_item)
         self.assertIn("confirmation", first_item)
 
+    def test_inspect_analyze_json_shape_is_compact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = build_cli_pipeline_fixture(Path(tmp))
+            result = run_cli("inspect", "--json", "--analyze", str(fixture), "--no-pause")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["summary"]["analyze"])
+        analyzed = [item for item in payload["items"] if item.get("analysis")]
+        self.assertGreaterEqual(len(analyzed), 1)
+        analysis = analyzed[0]["analysis"]
+        self.assertIn("status", analysis)
+        self.assertIn("selected_format", analysis)
+        self.assertIn("selected_confidence", analysis)
+        self.assertIn("primary_segment", analysis)
+        self.assertIn("candidates", analysis)
+        self.assertLessEqual(len(analysis["candidates"]), 3)
+        self.assertNotIn("prepass", analysis)
+        self.assertNotIn("fuzzy", analysis)
+
     def test_inspect_archives_only_filters_output_items(self):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = build_cli_pipeline_fixture(Path(tmp))
@@ -114,6 +134,12 @@ class CliBasicTests(unittest.TestCase):
         self.assertIn("--cleanup", result.stdout)
         self.assertIn("--out-dir", result.stdout)
         self.assertNotIn("--min-size", result.stdout)
+
+    def test_inspect_help_documents_analyze_option(self):
+        result = run_cli("inspect", "-h")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--analyze", result.stdout)
 
     def test_watch_help_documents_watchdog_options(self):
         result = run_cli("watch", "-h")

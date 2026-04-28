@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from smart_unpacker_native import scan_output_tree as _native_scan_output_tree
+
 from smart_unpacker.support.path_names import clean_relative_archive_path, normalize_match_name, normalize_match_path
 from smart_unpacker.verification.result import FileVerificationObservation, VerificationIssue
 
@@ -153,22 +155,14 @@ def coverage_from_archive_and_output(
 
 
 def output_files_from_directory(output_dir: str) -> list[dict[str, Any]]:
-    root = Path(output_dir)
-    if not root.is_dir():
+    scan = dict(_native_scan_output_tree(output_dir))
+    if not scan.get("is_dir"):
         return []
-    files: list[dict[str, Any]] = []
-    for item in root.rglob("*"):
-        if not item.is_file() or ".sunpack" in item.parts:
-            continue
-        try:
-            size = item.stat().st_size
-        except OSError:
-            size = 0
-        files.append({
-            "path": _relative_path(item, root),
-            "size": size,
-        })
-    return files
+    return [
+        {"path": str(item.get("path") or ""), "size": int(item.get("size", 0) or 0)}
+        for item in scan.get("files") or []
+        if isinstance(item, dict)
+    ]
 
 
 def archive_files_from_names(names: list[str]) -> list[dict[str, Any]]:

@@ -7,8 +7,9 @@ from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
+from smart_unpacker.repair.coverage import coverage_view_from_job
 
-from ._rebuild import load_source_bytes, rebuild_zip_from_entries, scan_local_file_headers, write_rebuilt_zip
+from ._rebuild import rebuild_zip_from_source
 
 
 class ZipPartialRecovery:
@@ -32,6 +33,13 @@ class ZipPartialRecovery:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        coverage = coverage_view_from_job(job)
+        if coverage.mixed_damage_suspected:
+            return 0.9
+        if coverage.payload_only_suspected:
+            return 0.88
+        if coverage.directory_only_suspected and coverage.has_recovered_output:
+            return 0.78
         if "content_recovery" in diagnosis.categories:
             return 0.85
         if flags & {"damaged", "crc_error", "checksum_error", "local_header_recovery"}:
@@ -41,8 +49,20 @@ class ZipPartialRecovery:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_source_bytes(job.source_input)
-        scan = scan_local_file_headers(data)
+        flags = set(job.damage_flags)
+        if "crc_error" in flags and not (
+            flags & {"local_header_recovery", "central_directory_bad", "directory_integrity_bad_or_unknown"}
+        ):
+            return RepairResult(
+                status="unrepairable",
+                confidence=0.0,
+                format="zip",
+                module_name=self.spec.name,
+                diagnosis=diagnosis.as_dict(),
+                message="payload checksum damage requires deep ZIP partial recovery",
+            )
+        candidate = Path(workspace) / "zip_partial_recovery.zip"
+        scan = rebuild_zip_from_source(job.source_input, candidate, config=config)
         if not scan.entries:
             return RepairResult(
                 status="unrepairable",
@@ -54,14 +74,22 @@ class ZipPartialRecovery:
                 message="no intact ZIP entries could be recovered",
             )
 
-        candidate = Path(workspace) / "zip_partial_recovery.zip"
-        write_rebuilt_zip(rebuild_zip_from_entries(scan.entries), candidate)
+        coverage = coverage_view_from_job(job)
         warnings = list(scan.warnings)
         if scan.skipped_offsets:
             warnings.append(f"skipped {len(scan.skipped_offsets)} damaged ZIP local header(s)")
+        if coverage.failed_names:
+            warnings.append(f"prior extraction reported failed payloads: {', '.join(coverage.failed_names[:5])}")
+        if coverage.partial_names:
+            warnings.append(f"prior extraction reported partial payloads: {', '.join(coverage.partial_names[:5])}")
+        confidence = 0.65 if scan.skipped_offsets else 0.78
+        confidence += coverage.score_hint(payload=0.08, mixed=0.06, directory=0.02, partial=0.03)
+        if coverage.low_yield_partial:
+            confidence -= 0.08
+        confidence = max(0.1, min(0.95, confidence))
         return RepairResult(
             status="partial",
-            confidence=0.65 if scan.skipped_offsets else 0.78,
+            confidence=confidence,
             format="zip",
             repaired_input={"kind": "file", "path": str(candidate), "format_hint": "zip"},
             actions=["scan_local_file_headers", "skip_unrecoverable_entries", "write_partial_zip"],
@@ -70,7 +98,11 @@ class ZipPartialRecovery:
             workspace_paths=[str(candidate)],
             partial=True,
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            diagnosis={
+                **diagnosis.as_dict(),
+                "archive_coverage": coverage.as_dict(),
+                "coverage_strategy": "keep_complete_and_best_partial_entries",
+            },
         )
 
 

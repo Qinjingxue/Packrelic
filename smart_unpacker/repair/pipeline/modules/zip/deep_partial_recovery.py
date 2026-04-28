@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
+from smart_unpacker.repair.coverage import coverage_view_from_job
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
@@ -41,6 +44,13 @@ class ZipDeepPartialRecovery:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        coverage = coverage_view_from_job(job)
+        if coverage.mixed_damage_suspected:
+            return 0.98
+        if coverage.payload_only_suspected and coverage.low_yield_partial:
+            return 0.97
+        if coverage.payload_only_suspected:
+            return 0.94
         if "content_recovery" in diagnosis.categories:
             return 0.96
         if flags & {
@@ -65,6 +75,7 @@ class ZipDeepPartialRecovery:
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         result = self._run_native(job, workspace, config)
+        coverage = coverage_view_from_job(job)
         candidates = candidates_from_native_result(
             self.spec.name,
             result,
@@ -77,7 +88,15 @@ class ZipDeepPartialRecovery:
             default_message="ZIP deep partial recovery produced a candidate",
         )
         return [
-            candidate
+            candidate if not coverage.known else replace(
+                candidate,
+                confidence=min(0.99, float(candidate.confidence or 0.0) + coverage.score_hint(payload=0.04, mixed=0.05, partial=0.02)),
+                diagnosis={
+                    **candidate.diagnosis,
+                    "archive_coverage": coverage.as_dict(),
+                    "coverage_strategy": "deep_partial_payload_scan",
+                },
+            )
             for candidate in candidates
             if int(candidate.diagnosis.get("native_candidate", {}).get("verified_entries") or 0) > 0
         ]
@@ -98,6 +117,7 @@ class ZipDeepPartialRecovery:
 
     def _result_from_native(self, result: dict, job: RepairJob, diagnosis: RepairDiagnosis) -> RepairResult:
         status = str(result.get("status") or "unrepairable")
+        coverage = coverage_view_from_job(job)
         selected_path = str(result.get("selected_path") or "")
         if status not in {"repaired", "partial"} or not selected_path:
             return RepairResult(
@@ -116,7 +136,7 @@ class ZipDeepPartialRecovery:
 
         return RepairResult(
             status="partial",
-            confidence=float(result.get("confidence") or 0.7),
+            confidence=min(0.99, float(result.get("confidence") or 0.7) + coverage.score_hint(payload=0.04, mixed=0.05, partial=0.02)),
             format="zip",
             repaired_input={"kind": "file", "path": selected_path, "format_hint": "zip"},
             actions=list(result.get("actions") or []),
@@ -127,6 +147,8 @@ class ZipDeepPartialRecovery:
             module_name=self.spec.name,
             diagnosis={
                 **diagnosis.as_dict(),
+                "archive_coverage": coverage.as_dict(),
+                "coverage_strategy": "deep_partial_payload_scan",
                 "native_zip_deep_recovery": {
                     "selected_candidate": result.get("selected_candidate", ""),
                     "recovered_entries": result.get("recovered_entries", 0),

@@ -1,3 +1,5 @@
+import json
+
 from smart_unpacker.app.cli_constants import EXIT_TASK_FAILED, EXIT_USAGE
 from smart_unpacker.app.cli_parsers import (
     CliHelpFormatter,
@@ -98,6 +100,7 @@ def handle(args, ctx):
             "recovered_outputs": list(getattr(summary, "recovered_outputs", []) or []),
             "wrong_password_failure": has_wrong_password_failure(failed_tasks),
         })
+        _emit_verbose_recovery_details(reporter, summary)
         if not _should_retry_password_failure(args, failed_tasks):
             break
         if not _confirm_password_retry(ctx):
@@ -172,6 +175,48 @@ def has_wrong_password_failure(failed_tasks: list[str]) -> bool:
         "密码不正确",
     )
     return any(any(marker in str(item).lower() for marker in markers) for item in failed_tasks)
+
+
+def _emit_verbose_recovery_details(reporter, summary) -> None:
+    recovered = list(getattr(summary, "recovered_outputs", []) or [])
+    if not recovered or not getattr(reporter, "verbose", False):
+        return
+    for item in recovered:
+        report_path = str(item.get("recovery_report") or "")
+        report = _read_recovery_report(report_path)
+        files = [file for file in report.get("files") or [] if isinstance(file, dict)]
+        if not files:
+            continue
+        reporter.detail(f"[CLI] Partial recovery files for {item.get('archive', '')}:")
+        for file in files:
+            name = file.get("archive_path") or file.get("output_path") or "<unknown>"
+            status = file.get("status") or "unverified"
+            size = _file_size_label(file)
+            action = file.get("user_action") or "inspect_manually"
+            reporter.detail(f"  - [{status}] {name}{size} ({action})")
+
+
+def _read_recovery_report(path: str) -> dict:
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _file_size_label(file: dict) -> str:
+    written = int(file.get("bytes_written", 0) or 0)
+    expected = file.get("expected_size")
+    if expected is None or expected == "":
+        return f" {written} B" if written else ""
+    try:
+        expected_int = int(expected)
+    except (TypeError, ValueError):
+        return f" {written} B" if written else ""
+    return f" {written}/{expected_int} B"
 
 
 def _should_retry_password_failure(args, failed_tasks: list[str]) -> bool:

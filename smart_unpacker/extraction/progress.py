@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from smart_unpacker_native import scan_output_tree as _native_scan_output_tree
+
 
 CONTENT_FAILURE_KINDS = {
     "checksum_error",
@@ -178,16 +180,16 @@ def _manifest_item(item: dict[str, Any], *, round_index: int) -> dict[str, Any]:
 
 def _merge_untraced_files(items: list[dict[str, Any]], out_dir: str, *, round_index: int) -> list[dict[str, Any]]:
     seen = {str(item.get("path") or "") for item in items if item.get("path")}
-    for path in _iter_files(Path(out_dir)):
-        text = str(path)
-        if text in seen or ".sunpack" in path.parts:
+    for file_item in _iter_files(out_dir):
+        text = str(file_item.get("abs_path") or "")
+        if text in seen:
             continue
         items.append({
             "path": text,
-            "archive_path": _relative_path(path, Path(out_dir)),
+            "archive_path": str(file_item.get("path") or ""),
             "status": "unverified",
             "source_round": round_index,
-            "bytes_written": path.stat().st_size,
+            "bytes_written": int(file_item.get("size", 0) or 0),
             "expected_size": None,
             "crc_ok": None,
             "failure_stage": "",
@@ -208,11 +210,10 @@ def _discard_file(item: dict[str, Any]) -> None:
         return
 
 
-def _iter_files(root: Path):
-    if not root.exists():
-        return
-    for item in root.rglob("*"):
-        if item.is_file():
+def _iter_files(root: str):
+    scan = dict(_native_scan_output_tree(str(root)))
+    for item in scan.get("files") or []:
+        if isinstance(item, dict):
             yield item
 
 

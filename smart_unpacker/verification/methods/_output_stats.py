@@ -2,6 +2,8 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from smart_unpacker_native import scan_output_tree as _native_scan_output_tree
+
 
 @dataclass(frozen=True)
 class OutputStats:
@@ -25,41 +27,19 @@ TRANSIENT_SUFFIXES = (
 
 
 def collect_output_stats(output_dir: str) -> OutputStats:
-    if not output_dir or not os.path.exists(output_dir):
+    if not output_dir:
         return OutputStats(exists=False, is_dir=False)
-    if not os.path.isdir(output_dir):
-        return OutputStats(exists=True, is_dir=False)
-
-    file_count = 0
-    dir_count = 0
-    total_size = 0
-    transient_file_count = 0
-    unreadable_count = 0
-    relative_paths = []
-
-    for root, dirs, files in os.walk(output_dir):
-        dirs[:] = [item for item in dirs if item != ".sunpack"]
-        dir_count += len(dirs)
-        for name in files:
-            file_count += 1
-            if name.lower().endswith(TRANSIENT_SUFFIXES):
-                transient_file_count += 1
-            path = os.path.join(root, name)
-            relative_paths.append(os.path.relpath(path, output_dir))
-            try:
-                total_size += os.path.getsize(path)
-            except OSError:
-                unreadable_count += 1
-
+    scan = dict(_native_scan_output_tree(output_dir))
+    files = [dict(item) for item in scan.get("files") or [] if isinstance(item, dict)]
     return OutputStats(
-        exists=True,
-        is_dir=True,
-        file_count=file_count,
-        dir_count=dir_count,
-        total_size=total_size,
-        transient_file_count=transient_file_count,
-        unreadable_count=unreadable_count,
-        relative_paths=tuple(relative_paths),
+        exists=bool(scan.get("exists")),
+        is_dir=bool(scan.get("is_dir")),
+        file_count=int(scan.get("file_count", 0) or 0),
+        dir_count=int(scan.get("dir_count", 0) or 0),
+        total_size=int(scan.get("total_size", 0) or 0),
+        transient_file_count=int(scan.get("transient_file_count", 0) or 0),
+        unreadable_count=int(scan.get("unreadable_count", 0) or 0),
+        relative_paths=tuple(str(item.get("path") or "") for item in files),
     )
 
 

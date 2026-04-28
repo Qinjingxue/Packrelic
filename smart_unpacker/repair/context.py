@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from smart_unpacker.repair.coverage import ArchiveCoverageView, coverage_view_from_payload
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 
@@ -23,7 +24,7 @@ class RepairContext:
     operation_result_name: str = ""
     failed_item: str = ""
     structure_evidence: Any = None
-    archive_coverage: dict[str, Any] = field(default_factory=dict)
+    archive_coverage: ArchiveCoverageView = field(default_factory=ArchiveCoverageView)
     prepass: dict[str, Any] = field(default_factory=dict)
     fuzzy_profile: dict[str, Any] = field(default_factory=dict)
     extraction_failure: dict[str, Any] = field(default_factory=dict)
@@ -71,7 +72,7 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         ]),
         failed_item=_first_text([failure.get("failed_item"), result_payload.get("failed_item")]),
         structure_evidence=job.analysis_evidence,
-        archive_coverage=_archive_coverage(failure),
+        archive_coverage=coverage_view_from_payload(_archive_coverage(failure), _file_observations(failure)),
         prepass=dict(job.analysis_prepass or {}),
         fuzzy_profile=fuzzy_profile,
         extraction_failure=failure,
@@ -140,6 +141,11 @@ def _damage_flags(
 def _archive_coverage(failure: dict[str, Any]) -> dict[str, Any]:
     coverage = failure.get("archive_coverage")
     return dict(coverage) if isinstance(coverage, dict) else {}
+
+
+def _file_observations(failure: dict[str, Any]) -> list[Any]:
+    observations = failure.get("file_observations")
+    return list(observations) if isinstance(observations, list) else []
 
 
 def _coverage_flags(coverage: dict[str, Any]) -> list[str]:

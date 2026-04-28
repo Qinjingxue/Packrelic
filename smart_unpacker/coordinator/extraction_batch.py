@@ -518,6 +518,7 @@ def _verification_payload(verification: VerificationResult) -> dict[str, Any]:
         "source_integrity": verification.source_integrity,
         "decision_hint": verification.decision_hint,
         "archive_coverage": _coverage_payload(verification),
+        "files": _file_recovery_items(verification),
     }
 
 
@@ -533,6 +534,7 @@ def _write_recovery_report(task: ArchiveTask, outcome: BatchExtractionOutcome, o
         "progress_manifest": outcome.result.progress_manifest,
         "verification": _verification_payload(verification),
         "archive_coverage": _coverage_payload(verification),
+        "files": _file_recovery_items(verification, manifest_path=outcome.result.progress_manifest),
     }
     target = Path(out_dir) / ".sunpack" / "recovery_report.json"
     try:
@@ -568,7 +570,135 @@ def _annotate_progress_manifest(manifest_path: str, recovery_report: dict[str, A
                 continue
             status = str(item.get("status") or "unverified")
             item["recovery_status"] = "kept_complete" if status == "complete" else "kept_partial_or_unverified"
+            item["user_action"] = _user_action_for_file_status(status)
     try:
         path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         return
+
+
+def _file_recovery_items(verification: VerificationResult, *, manifest_path: str = "") -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for observation in verification.file_observations:
+        status = _normalize_file_status(observation.state)
+        payload = {
+            "archive_path": observation.archive_path,
+            "output_path": observation.path,
+            "status": status,
+            "bytes_written": int(observation.bytes_written or 0),
+            "expected_size": observation.expected_size,
+            "progress": observation.progress,
+            "crc_expected": observation.crc_expected,
+            "crc_actual": observation.crc_actual,
+            "method": observation.method,
+            "user_action": _user_action_for_file_status(status),
+        }
+        key = (str(payload["archive_path"]), str(payload["output_path"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(payload)
+
+    manifest = _read_manifest(manifest_path)
+    for raw in list(manifest.get("files") or []) + list(manifest.get("discarded_files") or []):
+        if not isinstance(raw, dict):
+            continue
+        status = _normalize_file_status(raw.get("status"))
+        if raw in manifest.get("discarded_files", []):
+            status = "discarded"
+        payload = {
+            "archive_path": str(raw.get("archive_path") or ""),
+            "output_path": str(raw.get("path") or ""),
+            "status": status,
+            "bytes_written": int(raw.get("bytes_written", 0) or 0),
+            "expected_size": raw.get("expected_size"),
+            "progress": _progress_from_manifest_item(raw),
+            "crc_ok": raw.get("crc_ok"),
+            "failure_stage": str(raw.get("failure_stage") or ""),
+            "failure_kind": str(raw.get("failure_kind") or ""),
+            "message": str(raw.get("message") or ""),
+            "retention": str(raw.get("retention") or ""),
+            "user_action": _user_action_for_file_status(status),
+        }
+        key = (payload["archive_path"], payload["output_path"])
+        if key in seen:
+            if status == "discarded":
+                _merge_discarded_file_status(items, key, payload)
+            continue
+        seen.add(key)
+        items.append(payload)
+    return sorted(items, key=lambda item: (_file_status_rank(str(item.get("status") or "")), str(item.get("archive_path") or item.get("output_path") or "")))
+
+
+def _read_manifest(manifest_path: str) -> dict[str, Any]:
+    if not manifest_path:
+        return {}
+    path = Path(manifest_path)
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _merge_discarded_file_status(items: list[dict[str, Any]], key: tuple[str, str], discarded: dict[str, Any]) -> None:
+    for item in items:
+        if (str(item.get("archive_path") or ""), str(item.get("output_path") or "")) != key:
+            continue
+        if item.get("status") == "failed":
+            item["retention"] = discarded.get("retention", "discarded")
+            return
+        item["observed_status"] = item.get("status")
+        item["status"] = "discarded"
+        item["retention"] = discarded.get("retention", "discarded")
+        item["user_action"] = _user_action_for_file_status("discarded")
+        if discarded.get("failure_stage"):
+            item["failure_stage"] = discarded.get("failure_stage")
+        if discarded.get("failure_kind"):
+            item["failure_kind"] = discarded.get("failure_kind")
+        if discarded.get("message"):
+            item["message"] = discarded.get("message")
+        return
+
+
+def _normalize_file_status(value: Any) -> str:
+    status = str(value or "unverified")
+    if status in {"complete", "partial", "failed", "missing", "unverified", "discarded"}:
+        return status
+    return "unverified"
+
+
+def _progress_from_manifest_item(item: dict[str, Any]) -> float | None:
+    expected = item.get("expected_size")
+    try:
+        expected_int = int(expected)
+    except (TypeError, ValueError):
+        return None
+    if expected_int <= 0:
+        return None
+    return min(1.0, max(0.0, int(item.get("bytes_written", 0) or 0) / expected_int))
+
+
+def _user_action_for_file_status(status: str) -> str:
+    return {
+        "complete": "safe_to_use",
+        "partial": "inspect_manually",
+        "unverified": "inspect_manually",
+        "failed": "not_recovered",
+        "missing": "not_recovered",
+        "discarded": "discarded_low_quality",
+    }.get(status, "inspect_manually")
+
+
+def _file_status_rank(status: str) -> int:
+    return {
+        "complete": 0,
+        "partial": 1,
+        "unverified": 2,
+        "failed": 3,
+        "missing": 4,
+        "discarded": 5,
+    }.get(status, 9)

@@ -7,8 +7,9 @@ from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
+from smart_unpacker.repair.coverage import coverage_view_from_job
 
-from ._rebuild import load_source_bytes, rebuild_zip_from_entries, scan_local_file_headers, write_rebuilt_zip
+from ._rebuild import rebuild_zip_from_source
 
 
 class ZipCentralDirectoryRebuild:
@@ -29,10 +30,17 @@ class ZipCentralDirectoryRebuild:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        coverage = coverage_view_from_job(job)
         if "eocd_bad" in flags and "local_header_recovery" not in flags:
             return 0.0
         if flags & {"data_descriptor", "compressed_size_bad", "bit3_data_descriptor"}:
             return 0.0
+        if coverage.payload_only_suspected and "directory_rebuild" not in diagnosis.categories:
+            return 0.15
+        if coverage.directory_only_suspected:
+            return 0.94
+        if coverage.mixed_damage_suspected:
+            return 0.82
         if flags & {"central_directory_offset_bad", "central_directory_count_bad"} and not (
             flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}
         ):
@@ -54,8 +62,8 @@ class ZipCentralDirectoryRebuild:
                 diagnosis=diagnosis.as_dict(),
                 message="EOCD-only damage is handled by the EOCD repair module first",
             )
-        data = load_source_bytes(job.source_input)
-        scan = scan_local_file_headers(data)
+        candidate = Path(workspace) / "zip_central_directory_rebuild.zip"
+        scan = rebuild_zip_from_source(job.source_input, candidate, config=config)
         if not scan.entries:
             return RepairResult(
                 status="unrepairable",
@@ -67,12 +75,19 @@ class ZipCentralDirectoryRebuild:
                 message="no recoverable ZIP local file headers were found",
             )
 
-        candidate = Path(workspace) / "zip_central_directory_rebuild.zip"
-        write_rebuilt_zip(rebuild_zip_from_entries(scan.entries), candidate)
-        partial = not scan.complete
+        coverage = coverage_view_from_job(job)
+        partial = not scan.complete or (coverage.known and scan.entries and coverage.has_missing_entries)
+        confidence = 0.72 if partial else 0.92
+        confidence += coverage.score_hint(directory=0.04, mixed=-0.04, payload=-0.12)
+        confidence = max(0.1, min(0.98, confidence))
+        diagnosis_payload = {
+            **diagnosis.as_dict(),
+            "archive_coverage": coverage.as_dict(),
+            "coverage_strategy": "directory_rebuild" if not coverage.payload_only_suspected else "low_priority_payload_only",
+        }
         return RepairResult(
             status="partial" if partial else "repaired",
-            confidence=0.72 if partial else 0.92,
+            confidence=confidence,
             format="zip",
             repaired_input={"kind": "file", "path": str(candidate), "format_hint": "zip"},
             actions=["scan_local_file_headers", "rebuild_zip_central_directory", "write_repaired_zip"],
@@ -81,7 +96,7 @@ class ZipCentralDirectoryRebuild:
             workspace_paths=[str(candidate)],
             partial=partial,
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            diagnosis=diagnosis_payload,
         )
 
 

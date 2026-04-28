@@ -30,8 +30,7 @@ class PostProcessActions:
             flatten_outputs = self.config.get("post_extract", {}).get("flatten_single_directory", True)
         if flatten_outputs:
             for target in self._consume_flatten_targets(flatten_targets):
-                if os.path.exists(target):
-                    self.flattener.flatten_dirs(target)
+                self.flattener.flatten_dirs(target)
 
     def cleanup_archive_file(self, path: str, reason: str = "[CLEAN]"):
         self.cleanup.cleanup_archive_file(path, reason)

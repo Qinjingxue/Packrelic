@@ -55,3 +55,58 @@ def test_extract_prompts_for_password_retry_after_wrong_password(tmp_path, monke
     assert result.summary["password_retry_count"] == 1
     assert result.summary["success_count"] == 1
     assert result.errors == []
+
+
+def test_extract_verbose_prints_partial_recovery_file_details(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "archives"
+    target.mkdir()
+    report = tmp_path / "recovery_report.json"
+    report.write_text(
+        """{
+          "files": [
+            {"archive_path": "good.txt", "status": "complete", "bytes_written": 2, "expected_size": 2, "user_action": "safe_to_use"},
+            {"archive_path": "partial.bin", "status": "partial", "bytes_written": 4, "expected_size": 8, "user_action": "inspect_manually"}
+          ]
+        }""",
+        encoding="utf-8",
+    )
+
+    class FakeRunner:
+        recent_passwords = []
+
+        def __init__(self, _config):
+            pass
+
+        def run_targets(self, _target_paths):
+            return SimpleNamespace(
+                success_count=1,
+                failed_tasks=[],
+                processed_keys=["broken"],
+                partial_success_count=1,
+                recovered_outputs=[{"archive": "broken.zip", "recovery_report": str(report)}],
+            )
+
+    monkeypatch.setattr(extract, "PipelineRunner", FakeRunner)
+    args = SimpleNamespace(
+        paths=[str(target)],
+        password=[],
+        password_file=None,
+        prompt_passwords=False,
+        no_builtin_passwords=True,
+        recursive_extract=None,
+        scheduler_profile=None,
+        archive_cleanup_mode=None,
+        flatten_single_directory=None,
+        json=False,
+        quiet=False,
+        verbose=True,
+    )
+    ctx = CliContext(language="en", reporter=CliReporter(verbose=True))
+
+    exit_code, result = extract.handle(args, ctx)
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert result.summary["partial_success_count"] == 1
+    assert "[complete] good.txt 2/2 B" in captured.out
+    assert "[partial] partial.bin 4/8 B" in captured.out

@@ -2,6 +2,7 @@ import os
 from typing import Iterable
 
 from send2trash import send2trash
+from smart_unpacker_native import delete_files_batch as _native_delete_files_batch
 
 
 class ArchiveCleanup:
@@ -29,6 +30,10 @@ class ArchiveCleanup:
             print(self.text("[CLEAN] No archives found that require cleanup.", "[CLEAN] 没有需要清理的压缩包。"))
             return
 
+        if self.mode == "delete":
+            self._delete_archive_files([path for parts in archives for path in parts])
+            return
+
         for parts in archives:
             for path in parts:
                 self.cleanup_archive_file(path)
@@ -48,14 +53,7 @@ class ArchiveCleanup:
             return
 
         if self.mode == "delete":
-            print(self.text(f"{reason} Completely deleting: {filename}", f"{reason} 彻底删除：{filename}"))
-            try:
-                os.remove(archive_path)
-            except Exception as exc:
-                print(self.text(
-                    f"[ERROR] Failed to completely delete: {filename} ({exc})",
-                    f"[ERROR] 彻底删除失败：{filename} ({exc})",
-                ))
+            self._delete_archive_files([archive_path], reason=reason)
             return
 
         print(self.text(f"{reason} Moving to recycle bin: {filename}", f"{reason} 移动到回收站：{filename}"))
@@ -65,4 +63,27 @@ class ArchiveCleanup:
             print(self.text(
                 f"[ERROR] Failed to move to recycle bin: {filename} ({exc})",
                 f"[ERROR] 移动到回收站失败：{filename} ({exc})",
+            ))
+
+    def _delete_archive_files(self, paths: list[str], reason: str = "[CLEAN]"):
+        existing = []
+        for path in paths:
+            archive_path = os.path.normpath(path)
+            filename = os.path.basename(archive_path)
+            if not os.path.exists(archive_path):
+                print(self.text(
+                    f"[DEBUG] File not found, skipping cleanup: {archive_path}",
+                    f"[DEBUG] 文件不存在，跳过清理：{archive_path}",
+                ))
+                continue
+            print(self.text(f"{reason} Completely deleting: {filename}", f"{reason} 彻底删除：{filename}"))
+            existing.append(archive_path)
+        for item in _native_delete_files_batch(existing):
+            if str(item.get("status") or "") != "error":
+                continue
+            filename = str(item.get("filename") or os.path.basename(str(item.get("path") or "")))
+            error = str(item.get("error") or "")
+            print(self.text(
+                f"[ERROR] Failed to completely delete: {filename} ({error})",
+                f"[ERROR] 彻底删除失败：{filename} ({error})",
             ))

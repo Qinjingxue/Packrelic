@@ -76,14 +76,17 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     out_dir = tmp_path / "out"
     out_dir.mkdir()
     good = out_dir / "good.txt"
+    partial = out_dir / "partial.bin"
     failed = out_dir / "failed.bin"
     good.write_text("ok", encoding="utf-8")
+    partial.write_bytes(b"half")
     failed.write_bytes(b"bad")
     manifest = _write_manifest(
         out_dir,
         archive,
         [
             {"path": str(good), "archive_path": "good.txt", "status": "complete", "bytes_written": 2, "expected_size": 2},
+            {"path": str(partial), "archive_path": "partial.bin", "status": "partial", "bytes_written": 4, "expected_size": 8},
             {"path": str(failed), "archive_path": "failed.bin", "status": "failed", "bytes_written": 0, "expected_size": 10},
         ],
     )
@@ -119,14 +122,20 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     assert outcome.verification is not None
     assert outcome.verification.decision_hint == "accept_partial"
     assert good.exists()
+    assert not partial.exists()
     assert not failed.exists()
     assert runner.collect_result(task, outcome) == str(out_dir)
     assert runner.context.partial_success_count == 1
     recovered = runner.context.recovered_outputs[0]
-    assert recovered["archive_coverage"]["expected_files"] == 2
+    assert recovered["archive_coverage"]["expected_files"] == 3
     report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
     assert report["success_kind"] == "partial"
-    assert report["archive_coverage"]["expected_files"] == 2
+    assert report["archive_coverage"]["expected_files"] == 3
+    file_statuses = {item["archive_path"]: item["status"] for item in report["files"]}
+    assert file_statuses["good.txt"] == "complete"
+    assert file_statuses["partial.bin"] == "discarded"
+    assert file_statuses["failed.bin"] == "failed"
+    assert {item["user_action"] for item in report["files"]} >= {"safe_to_use", "discarded_low_quality", "not_recovered"}
     manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert manifest_payload["recovery"]["verification"]["decision_hint"] == "accept_partial"
 

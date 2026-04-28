@@ -7,8 +7,9 @@ from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
+from smart_unpacker.repair.coverage import coverage_view_from_job
 
-from ._rebuild import load_source_bytes, rebuild_zip_from_entries, scan_local_file_headers, write_rebuilt_zip
+from ._rebuild import rebuild_zip_from_source
 
 
 class ZipDataDescriptorRecovery:
@@ -30,15 +31,22 @@ class ZipDataDescriptorRecovery:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        coverage = coverage_view_from_job(job)
         if flags & {"data_descriptor", "compressed_size_bad", "bit3_data_descriptor"}:
             return 0.9
+        if coverage.payload_only_suspected and coverage.has_recovered_output:
+            return 0.82
+        if coverage.mixed_damage_suspected:
+            return 0.76
+        if coverage.directory_only_suspected:
+            return 0.35
         if "directory_rebuild" in diagnosis.categories or "boundary_repair" in diagnosis.categories:
             return 0.65
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_source_bytes(job.source_input)
-        scan = scan_local_file_headers(data, require_data_descriptor=True)
+        candidate = Path(workspace) / "zip_data_descriptor_recovery.zip"
+        scan = rebuild_zip_from_source(job.source_input, candidate, require_data_descriptor=True, config=config)
         if not scan.entries or scan.descriptor_entries <= 0:
             return RepairResult(
                 status="unrepairable",
@@ -50,12 +58,14 @@ class ZipDataDescriptorRecovery:
                 message="no recoverable ZIP data descriptor entries were found",
             )
 
-        candidate = Path(workspace) / "zip_data_descriptor_recovery.zip"
-        write_rebuilt_zip(rebuild_zip_from_entries(scan.entries), candidate)
-        partial = not scan.complete
+        coverage = coverage_view_from_job(job)
+        partial = not scan.complete or coverage.has_payload_damage
+        confidence = 0.68 if partial else 0.86
+        confidence += coverage.score_hint(payload=0.06, mixed=0.02, directory=-0.1, partial=0.02)
+        confidence = max(0.1, min(0.96, confidence))
         return RepairResult(
             status="partial" if partial else "repaired",
-            confidence=0.68 if partial else 0.86,
+            confidence=confidence,
             format="zip",
             repaired_input={"kind": "file", "path": str(candidate), "format_hint": "zip"},
             actions=["scan_zip_data_descriptors", "materialize_descriptor_sizes", "write_repaired_zip"],
@@ -64,7 +74,11 @@ class ZipDataDescriptorRecovery:
             workspace_paths=[str(candidate)],
             partial=partial,
             module_name=self.spec.name,
-            diagnosis=diagnosis.as_dict(),
+            diagnosis={
+                **diagnosis.as_dict(),
+                "archive_coverage": coverage.as_dict(),
+                "coverage_strategy": "descriptor_payload_recovery" if coverage.has_payload_damage else "descriptor_directory_recovery",
+            },
         )
 
 

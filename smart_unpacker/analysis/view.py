@@ -1,12 +1,9 @@
 import os
-import threading
 from binascii import crc32
-from collections import OrderedDict
 from dataclasses import dataclass
 
 from smart_unpacker_native import AnalysisBinaryView as _NativeAnalysisBinaryView
-from smart_unpacker_native import fuzzy_binary_profile_for_paths as _native_fuzzy_binary_profile_for_paths
-from smart_unpacker_native import repair_concat_ranges_to_bytes as _native_concat_ranges_to_bytes
+from smart_unpacker_native import AnalysisMultiVolumeView as _NativeAnalysisMultiVolumeView
 
 
 @dataclass(frozen=True)
@@ -129,90 +126,30 @@ class MultiVolumeBinaryView:
         self.path = self.volumes[0]
         self.cache_bytes = max(0, int(cache_bytes or 0))
         self.max_read_bytes = max_read_bytes if max_read_bytes is None else max(0, int(max_read_bytes))
-        self._read_semaphore = threading.Semaphore(max(1, int(max_concurrent_reads or 1)))
-        self._cache: OrderedDict[tuple[int, int], bytes] = OrderedDict()
-        self._cache_size = 0
-        self._lock = threading.Lock()
-        self._read_bytes = 0
-        self._cache_hits = 0
-        self._ranges = []
-        cursor = 0
-        for path in self.volumes:
-            size = os.path.getsize(path)
-            self._ranges.append((cursor, cursor + size, path))
-            cursor += size
-        self.size = cursor
+        self._native = _NativeAnalysisMultiVolumeView(
+            self.volumes,
+            cache_bytes=self.cache_bytes,
+            max_read_bytes=self.max_read_bytes,
+            max_concurrent_reads=max_concurrent_reads,
+        )
+        self.path = str(self._native.path)
+        self.size = int(self._native.size)
 
     def read_at(self, offset: int, size: int) -> bytes:
-        offset = max(0, int(offset))
-        size = max(0, int(size))
-        if offset >= self.size or size <= 0:
-            return b""
-        size = min(size, self.size - offset)
-        key = (offset, size)
-        with self._lock:
-            cached = self._cache.get(key)
-            if cached is not None:
-                self._cache_hits += 1
-                self._cache.move_to_end(key)
-                return cached
-            self._reserve_read_budget(size)
-
-        chunks = []
-        remaining = size
-        cursor = offset
-        with self._read_semaphore:
-            for start, end, path in self._ranges:
-                if remaining <= 0:
-                    break
-                if cursor >= end or cursor + remaining <= start:
-                    continue
-                local_start = max(cursor, start)
-                local_end = min(cursor + remaining, end)
-                chunks.append({
-                    "path": path,
-                    "start": local_start - start,
-                    "end": local_end - start,
-                })
-                remaining -= local_end - local_start
-                cursor = local_end
-
-        data = bytes(_native_concat_ranges_to_bytes(chunks))
-        with self._lock:
-            self._read_bytes += len(data)
-            self._store_cache_entry(key, data)
-        return data
+        return bytes(self._native.read_at(int(offset), int(size)))
 
     def read_tail(self, size: int) -> bytes:
-        size = min(max(0, int(size)), self.size)
-        return self.read_at(max(0, self.size - size), size)
+        return bytes(self._native.read_tail(int(size)))
 
     def stats(self) -> ReadStats:
-        with self._lock:
-            return ReadStats(read_bytes=self._read_bytes, cache_hits=self._cache_hits)
+        stats = self._native.stats()
+        return ReadStats(
+            read_bytes=int(stats.get("read_bytes", 0) or 0),
+            cache_hits=int(stats.get("cache_hits", 0) or 0),
+        )
 
     def signature_prepass(self, *, head_bytes: int, tail_bytes: int) -> dict | None:
-        head_size = int(head_bytes)
-        tail_size = int(tail_bytes)
-        head = self.read_at(0, min(head_size, self.size))
-        tail_len = min(tail_size, self.size)
-        tail_start = max(0, self.size - tail_len)
-        tail = self.read_at(tail_start, tail_len)
-        hits = []
-        for name, signature in _KNOWN_SIGNATURES.items():
-            for offset in _find_all(head, signature):
-                hits.append({"name": name, "offset": offset})
-            for offset in _find_all(tail, signature):
-                absolute = tail_start + offset
-                if absolute >= len(head) or tail_start > 0:
-                    hits.append({"name": name, "offset": absolute})
-        hits.sort(key=lambda item: int(item["offset"]))
-        return {
-            "hits": hits,
-            "formats": sorted(_formats_from_hits(hits)),
-            "head_bytes": len(head),
-            "tail_bytes": len(tail),
-        }
+        return dict(self._native.signature_prepass(int(head_bytes), int(tail_bytes)))
 
     def probe_zip(self, *, eocd_offset: int, max_cd_entries_to_walk: int = 64) -> dict | None:
         return _probe_zip_view(self, int(eocd_offset), int(max_cd_entries_to_walk))
@@ -235,8 +172,7 @@ class MultiVolumeBinaryView:
         ngram_top_k: int = 8,
         max_ngram_sample_bytes: int = 256 * 1024,
     ) -> dict:
-        return dict(_native_fuzzy_binary_profile_for_paths(
-            self.volumes,
+        return dict(self._native.fuzzy_binary_profile(
             int(window_bytes),
             int(max_windows),
             int(max_sample_bytes),
@@ -246,22 +182,6 @@ class MultiVolumeBinaryView:
             int(ngram_top_k),
             int(max_ngram_sample_bytes),
         ))
-
-    def _reserve_read_budget(self, size: int) -> None:
-        if self.max_read_bytes is None:
-            return
-        if self._read_bytes + size > self.max_read_bytes:
-            raise RuntimeError("archive analysis read budget exceeded")
-
-    def _store_cache_entry(self, key: tuple[int, int], data: bytes) -> None:
-        if self.cache_bytes <= 0 or len(data) > self.cache_bytes:
-            return
-        self._cache[key] = data
-        self._cache.move_to_end(key)
-        self._cache_size += len(data)
-        while self._cache_size > self.cache_bytes and self._cache:
-            _, old = self._cache.popitem(last=False)
-            self._cache_size -= len(old)
 
 
 def _normalize_volume_paths(paths) -> list[str]:
