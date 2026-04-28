@@ -1,15 +1,18 @@
 import io
+import gzip
 import json
 import os
 import struct
 import subprocess
 import tarfile
 import zipfile
+import zlib
 from pathlib import Path
 
 import pytest
 
 from smart_unpacker.contracts.detection import FactBag
+from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.config.schema import normalize_config
@@ -272,6 +275,91 @@ def test_encrypted_zip_payload_damage_with_known_password_is_not_wrong_password(
     assert not any(issue.code == "fail.archive_crc_wrong_password" for issue in verification.issues)
 
 
+def test_encrypted_zip_wrong_password_vs_payload_damage_matrix(tmp_path):
+    complete = _encrypted_zip(tmp_path / "complete-encrypted", password="secret", corrupt_payload=False)
+    damaged = _encrypted_zip(tmp_path / "damaged-encrypted", password="secret", corrupt_payload=True)
+
+    _complete_completed, complete_wrong = _run_worker(
+        complete,
+        tmp_path / "out-complete-wrong",
+        format_hint="zip",
+        password="wrong",
+    )
+    _damaged_wrong_completed, damaged_wrong = _run_worker(
+        damaged,
+        tmp_path / "out-damaged-wrong",
+        format_hint="zip",
+        password="wrong",
+    )
+    _damaged_ok_completed, damaged_ok = _run_worker(
+        damaged,
+        tmp_path / "out-damaged-ok",
+        format_hint="zip",
+        password="secret",
+    )
+
+    assert complete_wrong["native_status"] == "wrong_password"
+    assert complete_wrong["wrong_password"] is True
+    assert complete_wrong["failure_kind"] == "encrypted_or_wrong_password"
+    assert complete_wrong["files_written"] == 0
+
+    assert damaged_wrong["native_status"] == "wrong_password"
+    assert damaged_wrong["wrong_password"] is True
+    assert damaged_wrong["failure_kind"] == "encrypted_or_wrong_password"
+    assert damaged_wrong["files_written"] == 0
+
+    assert damaged_ok["native_status"] == "damaged"
+    assert damaged_ok["wrong_password"] is False
+    assert damaged_ok["failure_kind"] in {"checksum_error", "corrupted_data", "data_error"}
+    assert damaged_ok["files_written"] == 2
+
+
+def test_huge_declared_zip_member_does_not_inflate_partial_byte_coverage(tmp_path):
+    archive = _zip_with_huge_declared_stored_member(tmp_path)
+    out_dir = tmp_path / "out"
+    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
+
+    assert worker_result["status"] == "failed"
+    assert worker_result["bytes_written"] == 1024
+    assert (out_dir / "huge.bin").stat().st_size == 1024
+    assert verification.assessment_status == "partial"
+    assert verification.archive_coverage.expected_files == 1
+    assert verification.archive_coverage.partial_files == 1
+    assert verification.archive_coverage.complete_files == 0
+    assert verification.archive_coverage.expected_bytes == 1024 * 1024 * 1024
+    assert verification.archive_coverage.matched_bytes == 1024
+    assert verification.archive_coverage.byte_coverage < 0.00001
+    assert verification.archive_coverage.completeness < 0.51
+
+
+def test_unicode_reserved_and_long_zip_paths_match_archive_paths(tmp_path):
+    archive, names = _zip_with_unicode_reserved_long_paths(tmp_path)
+    out_dir = tmp_path / "out"
+    _completed, worker_result = _run_worker(archive, out_dir, format_hint="zip")
+    manifest_path = write_extraction_progress_manifest(
+        archive=str(archive),
+        out_dir=str(out_dir),
+        diagnostics={"result": worker_result},
+        round_index=1,
+    )
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    manifest_items = {item["archive_path"]: item for item in manifest["files"]}
+    verification = _verify_worker_output(archive, out_dir, worker_result, detected_ext="zip")
+    states = {item.archive_path: item.state for item in verification.file_observations}
+
+    assert worker_result["status"] == "failed"
+    assert set(names.values()) <= set(manifest_items)
+    assert states[names["cjk"]] == "complete"
+    assert states[names["combining"]] == "failed"
+    assert states[names["reserved"]] == "complete"
+    assert states[names["long"]] == "complete"
+    assert verification.archive_coverage.expected_files == 4
+    assert verification.archive_coverage.complete_files == 3
+    assert verification.archive_coverage.failed_files == 1
+    assert verification.archive_coverage.completeness == pytest.approx(0.75, abs=0.02)
+
+
 def test_missing_split_volume_is_not_reported_as_payload_partial(tmp_path):
     archive, part_paths = _seven_zip_missing_middle_volume(tmp_path)
     out_dir = tmp_path / "out"
@@ -290,6 +378,75 @@ def test_missing_split_volume_is_not_reported_as_payload_partial(tmp_path):
     assert worker_result["failure_kind"] == "missing_volume"
     assert json.loads(Path(manifest).read_text(encoding="utf-8"))["partial_outputs"] is False
     assert not any(path.is_file() and ".sunpack" not in path.parts for path in out_dir.rglob("*"))
+
+
+def test_sfx_crop_patch_payload_damage_coverage_uses_virtual_zip_not_carrier(tmp_path):
+    sfx, prefix_size = _sfx_with_zip_payload_damage(tmp_path)
+    task = _task(sfx, detected_ext="zip")
+    patched_state = ArchiveState.from_archive_input(
+        task.archive_input(),
+        patches=[PatchPlan(
+            id="crop-sfx-prefix",
+            operations=[PatchOperation.delete_range(offset=0, size=prefix_size)],
+            provenance={"module": "test_carrier_crop_patch"},
+            confidence=0.95,
+        )],
+    )
+    task.set_archive_state(patched_state)
+    out_dir = tmp_path / "out"
+
+    _completed, worker_result = _run_worker_state(task, out_dir, format_hint="zip")
+    verification = _verify_worker_output(
+        sfx,
+        out_dir,
+        worker_result,
+        detected_ext="zip",
+        fact_bag=task.fact_bag,
+    )
+
+    assert worker_result["status"] == "failed"
+    assert worker_result["failure_kind"] in {"checksum_error", "data_error", "corrupted_data"}
+    assert verification.source_integrity == "payload_damaged"
+    assert verification.archive_coverage.expected_files == 4
+    assert verification.archive_coverage.complete_files == 3
+    assert verification.archive_coverage.failed_files == 1
+    assert verification.archive_coverage.completeness == pytest.approx(0.75, abs=0.02)
+    assert all(source.get("patch_digest") == patched_state.effective_patch_digest()
+               for source in verification.archive_coverage.sources
+               if source.get("method") == "archive_test_crc")
+
+
+def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_path):
+    archive = tmp_path / "tail-missing.7z.001"
+    archive.write_bytes(b"7z\xbc\xaf\x27\x1cmissing tail placeholder")
+    out_dir = tmp_path / "out"
+    extractor = _MissingVolumePartialExtractor(archive, out_dir)
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        extractor,
+        _NoNestedOutputScanPolicy(),
+        config={
+            "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
+            "verification": {
+                "enabled": True,
+                "methods": [{"name": "extraction_exit_signal"}, {"name": "output_presence"}],
+                "partial_min_completeness": 0.2,
+                "partial_accept_threshold": 0.2,
+            },
+        },
+    )
+    task = _task(archive, detected_ext="7z")
+
+    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
+    collected = runner.collect_result(task, outcome)
+
+    assert collected is None
+    assert outcome.success is False
+    assert outcome.verification is not None
+    assert outcome.verification.decision_hint == "accept_partial"
+    assert runner.context.partial_success_count == 0
+    assert runner.context.failed_tasks
+    assert not (out_dir / ".sunpack" / "recovery_report.json").exists()
 
 
 def test_main_flow_nested_archive_keeps_outer_complete_and_inner_partial_coverage_separate(tmp_path):
@@ -319,6 +476,31 @@ def test_main_flow_nested_archive_keeps_outer_complete_and_inner_partial_coverag
     assert inner_report["archive_coverage"]["complete_files"] == 3
     assert inner_report["archive_coverage"]["failed_files"] == 1
     assert inner_report["archive_coverage"]["completeness"] == pytest.approx(0.75, abs=0.02)
+
+
+def test_main_flow_recurses_into_truncated_tar_gz_partial_tar_stream(tmp_path):
+    _require_worker_or_skip()
+    _require_7z_dll_or_skip()
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    archive = _truncated_tar_gz_with_valid_partial_tar_prefix(input_root)
+    config = _tar_gz_recursive_pipeline_config(tmp_path)
+
+    summary = PipelineRunner(config).run(str(input_root))
+
+    outer_out_dir = input_root / archive.stem
+    report = json.loads((outer_out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    extracted_names = {path.name for path in outer_out_dir.rglob("*.bin")}
+
+    assert summary.partial_success_count == 1
+    assert not summary.failed_tasks
+    assert report["success_kind"] == "partial"
+    assert report["archive"].endswith("truncated-stream.tar.gz")
+    assert report["archive_coverage"]["expected_files"] == 1
+    assert report["archive_coverage"]["partial_files"] == 1
+    assert "#0" in {item["archive_path"] for item in report["files"]}
+    assert {"f0.bin", "f1.bin"} <= extracted_names
+    assert "f2.bin" not in extracted_names
 
 
 def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tmp_path):
@@ -446,6 +628,36 @@ def _run_worker(
     return completed, _worker_result(completed.stdout)
 
 
+def _run_worker_state(
+    task: ArchiveTask,
+    out_dir: Path,
+    *,
+    format_hint: str,
+    job_id: str = "best-effort-state-coverage",
+    password: str | None = None,
+):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    payload = {
+        "job_id": job_id,
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(task.main_path),
+        "output_dir": str(out_dir),
+        "format_hint": format_hint,
+        "archive_state": task.archive_state().to_dict(),
+    }
+    if password is not None:
+        payload["password"] = password
+    completed = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return completed, _worker_result(completed.stdout)
+
+
 def _verify_worker_output(
     archive: Path,
     out_dir: Path,
@@ -536,6 +748,43 @@ def _best_effort_pipeline_config(
     ]))
 
 
+def _tar_gz_recursive_pipeline_config(tmp_path: Path) -> dict:
+    return normalize_config(with_detection_pipeline({
+        "recursive_extract": "3",
+        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
+        "post_extract": {
+            "archive_cleanup_mode": "k",
+            "flatten_single_directory": False,
+        },
+        "repair": {
+            "enabled": True,
+            "max_attempts_per_task": 0,
+            "max_repair_rounds_per_task": 0,
+            "workspace": str(tmp_path / "repair"),
+        },
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "extraction_exit_signal", "enabled": True},
+                {"name": "output_presence", "enabled": True},
+                {"name": "archive_test_crc", "enabled": True},
+            ],
+            "partial_min_completeness": 0.2,
+            "partial_accept_threshold": 0.2,
+        },
+    }, precheck=[
+        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+    ], scoring=[
+        {
+            "name": "extension",
+            "enabled": True,
+            "extension_score_groups": [{"score": 5, "extensions": [".tar", ".gz", ".tgz", ".tar.gz"]}],
+        },
+        {"name": "compression_stream_identity", "enabled": True},
+        {"name": "tar_structure_identity", "enabled": True},
+    ]))
+
+
 def _require_worker_or_skip() -> str:
     try:
         return get_sevenzip_worker_path()
@@ -584,6 +833,16 @@ def _outer_zip_with_damaged_inner_zip(tmp_path: Path) -> Path:
         zf.writestr("outer-note.txt", b"outer")
         zf.writestr("inner.zip", inner_bytes)
     return outer
+
+
+def _sfx_with_zip_payload_damage(tmp_path: Path) -> tuple[Path, int]:
+    zip_archive = _zip_with_one_bad_payload(tmp_path)
+    zip_bytes = zip_archive.read_bytes()
+    zip_archive.unlink()
+    prefix = b"MZ" + b"SFX-STUB" * 32
+    sfx = tmp_path / "payload-damaged-sfx.exe"
+    sfx.write_bytes(prefix + zip_bytes)
+    return sfx, len(prefix)
 
 
 def _zip_with_middle_bad_payload(tmp_path: Path) -> Path:
@@ -670,6 +929,77 @@ def _zip_with_deflated_bad_payload(tmp_path: Path) -> Path:
     return archive
 
 
+def _zip_with_huge_declared_stored_member(tmp_path: Path) -> Path:
+    archive = tmp_path / "huge-declared-member.zip"
+    name = b"huge.bin"
+    payload = b"A" * 1024
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    declared_size = 1024 * 1024 * 1024
+    local = (
+        struct.pack(
+            "<IHHHHHIIIHH",
+            0x04034B50,
+            20,
+            0,
+            0,
+            0,
+            0,
+            crc,
+            len(payload),
+            declared_size,
+            len(name),
+            0,
+        )
+        + name
+        + payload
+    )
+    cd_offset = len(local)
+    central = (
+        struct.pack(
+            "<IHHHHHHIIIHHHHHII",
+            0x02014B50,
+            20,
+            20,
+            0,
+            0,
+            0,
+            0,
+            crc,
+            len(payload),
+            declared_size,
+            len(name),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        + name
+    )
+    eocd = struct.pack("<IHHHHIIH", 0x06054B50, 0, 0, 1, 1, len(central), cd_offset, 0)
+    archive.write_bytes(local + central + eocd)
+    return archive
+
+
+def _zip_with_unicode_reserved_long_paths(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    archive = tmp_path / "unicode-paths.zip"
+    names = {
+        "cjk": "unicode/\u4e2d\u6587.txt",
+        "combining": "unicode/cafe\u0301.txt",
+        "reserved": "reserved/CON.txt",
+        "long": "long/" + ("a" * 120) + ".txt",
+    }
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as zf:
+        for name in names.values():
+            zf.writestr(name, name.encode("utf-8"))
+    data = bytearray(archive.read_bytes())
+    payload_offset = _zip_stored_payload_offset(bytes(data), names["combining"])
+    data[payload_offset] ^= 0x55
+    archive.write_bytes(bytes(data))
+    return archive, names
+
+
 def _truncated_tar_with_partial_member(tmp_path: Path) -> Path:
     archive = tmp_path / "truncated-member.tar"
     buffer = io.BytesIO()
@@ -686,10 +1016,33 @@ def _truncated_tar_with_partial_member(tmp_path: Path) -> Path:
     return archive
 
 
+def _truncated_tar_gz_with_valid_partial_tar_prefix(tmp_path: Path) -> Path:
+    archive = tmp_path / "truncated-stream.tar.gz"
+    buffer = io.BytesIO()
+    member_size = 64 * 1024
+    with tarfile.open(fileobj=buffer, mode="w") as tf:
+        for index in range(5):
+            payload = bytes([65 + index]) * member_size
+            info = tarfile.TarInfo(f"f{index}.bin")
+            info.size = len(payload)
+            tf.addfile(info, io.BytesIO(payload))
+
+    tar_data = buffer.getvalue()
+    first_two_members = (512 + member_size) * 2
+    first_segment = gzip.compress(tar_data[:first_two_members], compresslevel=1)
+    truncated_second_segment = gzip.compress(tar_data[first_two_members:], compresslevel=1)[:20]
+    archive.write_bytes(first_segment + truncated_second_segment)
+    return archive
+
+
 def _encrypted_zip_with_bad_payload(tmp_path: Path, *, password: str) -> Path:
+    return _encrypted_zip(tmp_path, password=password, corrupt_payload=True)
+
+
+def _encrypted_zip(tmp_path: Path, *, password: str, corrupt_payload: bool) -> Path:
     seven_zip = _require_7z_exe_or_skip()
     source = tmp_path / "encrypted-src"
-    source.mkdir()
+    source.mkdir(parents=True)
     (source / "good.txt").write_text("good", encoding="utf-8")
     (source / "bad.bin").write_bytes(b"B" * 256)
     (source / "keep.txt").write_text("keep", encoding="utf-8")
@@ -715,6 +1068,8 @@ def _encrypted_zip_with_bad_payload(tmp_path: Path, *, password: str) -> Path:
     )
     if completed.returncode != 0 or not archive.is_file():
         pytest.skip(f"encrypted ZIP fixture could not be created: {completed.stderr or completed.stdout}")
+    if not corrupt_payload:
+        return archive
     data = bytearray(archive.read_bytes())
     payload_offset = _zip_stored_payload_offset(bytes(data), "bad.bin")
     data[payload_offset + 20] ^= 0x44
@@ -853,6 +1208,63 @@ class _ApplyRepairedArchiveStage:
             actions=["apply_repaired_archive_for_best_effort_loop_test"],
             module_name="fake_structure_repair",
             workspace_paths=[str(self.repaired_archive)],
+        )
+
+
+class _MissingVolumePartialExtractor:
+    password_session = None
+
+    def __init__(self, archive: Path, out_dir: Path):
+        self.archive = archive
+        self.out_dir = out_dir
+
+    def default_output_dir_for_task(self, task):
+        return str(self.out_dir)
+
+    def inspect(self, task, out_dir):
+        return type("Preflight", (), {"skip_result": None})()
+
+    def extract(self, task, out_dir, runtime_scheduler=None):
+        output = Path(out_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "prefix-file.bin").write_bytes(b"partial prefix")
+        worker_result = {
+            "status": "failed",
+            "native_status": "damaged",
+            "missing_volume": True,
+            "wrong_password": False,
+            "failure_stage": "item_extract",
+            "failure_kind": "missing_volume",
+            "files_written": 1,
+            "bytes_written": 14,
+            "message": "split archive is missing tail volume",
+            "diagnostics": {
+                "output_trace": {
+                    "items": [{
+                        "index": 0,
+                        "path": "prefix-file.bin",
+                        "is_dir": False,
+                        "bytes_written": 14,
+                        "failed": False,
+                    }]
+                }
+            },
+        }
+        manifest = write_extraction_progress_manifest(
+            archive=str(self.archive),
+            out_dir=str(output),
+            diagnostics={"result": worker_result},
+            round_index=1,
+        )
+        return ExtractionResult(
+            success=False,
+            archive=str(self.archive),
+            out_dir=str(output),
+            all_parts=[str(self.archive)],
+            error="missing volume",
+            diagnostics={"result": worker_result, "progress_manifest": manifest, "partial_outputs": True},
+            partial_outputs=True,
+            progress_manifest=manifest,
         )
 
 

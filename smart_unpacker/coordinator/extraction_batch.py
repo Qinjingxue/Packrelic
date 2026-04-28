@@ -11,7 +11,7 @@ from smart_unpacker.contracts.archive_state import ArchiveState
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
 from smart_unpacker.coordinator.repair_beam import RepairBeamCandidate, RepairBeamLoop, RepairBeamState
-from smart_unpacker.coordinator.repair_loop import RepairLoopLimits, RepairLoopState
+from smart_unpacker.coordinator.repair_loop import RepairLoopLimits, RepairLoopState, terminal_failure_reason
 from smart_unpacker.coordinator.repair_stage import ArchiveRepairStage
 from smart_unpacker.coordinator.resource_preflight import ResourcePreflightInspector
 from smart_unpacker.coordinator.scheduling import (
@@ -40,6 +40,8 @@ class BatchExtractionOutcome:
     @property
     def success(self) -> bool:
         if not self.result.success:
+            if terminal_failure_reason(self.result):
+                return False
             return _verification_accepts_partial(self.verification)
         return self.verification is None or _verification_accepts(self.verification)
 
@@ -342,7 +344,7 @@ class ExtractionBatchRunner:
                         verification=verification,
                         attempts=attempt_index + 1,
                     )
-                return BatchExtractionOutcome(result=result, attempts=attempt_index + 1)
+                return BatchExtractionOutcome(result=result, verification=verification, attempts=attempt_index + 1)
 
             verification = self.verifier.verify(task, result)
             outcome = BatchExtractionOutcome(result=result, verification=verification, attempts=attempt_index + 1)
@@ -395,6 +397,8 @@ class ExtractionBatchRunner:
     def _accept_partial_output(self, result: ExtractionResult, verification: VerificationResult) -> bool:
         config = self.verifier.config
         if not bool(config.get("accept_partial_when_source_damaged", True)):
+            return False
+        if terminal_failure_reason(result):
             return False
         if verification.decision_hint != DECISION_ACCEPT_PARTIAL:
             return False
