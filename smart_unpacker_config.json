@@ -120,7 +120,7 @@
           "extension_score_groups": [
             {
               "score": 5,
-              "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst", ".Z", ".tar"]
+              "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst", ".Z", ".tar", ".tgz", ".tbz2", ".txz", ".tzst"]
             }
           ]
         },
