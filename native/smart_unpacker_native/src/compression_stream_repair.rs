@@ -105,6 +105,209 @@ pub(crate) fn compression_stream_partial_recovery(
     }
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    format,
+    workspace,
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_seconds=30.0,
+    max_entries=20000
+))]
+pub(crate) fn tar_compressed_partial_recovery(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    format: &str,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_seconds: f64,
+    max_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    let Some(format) = CompressedTarFormat::from_name(format) else {
+        return tar_status_dict(
+            py,
+            "unsupported",
+            "",
+            "",
+            "unsupported compressed TAR format",
+            &[],
+            format,
+            "",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0.0,
+            &[],
+        );
+    };
+    let options = StreamRepairOptions {
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_duration: duration_from_seconds(max_seconds),
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => {
+            return tar_status_dict(
+                py,
+                "skipped",
+                "",
+                "",
+                &message,
+                &[],
+                format.name(),
+                format.stream().name(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+
+    let decoded = match decode_stream_prefix_to_vec(&data, format.stream(), &options) {
+        Ok(decoded) => decoded,
+        Err(message) => {
+            return tar_status_dict(
+                py,
+                "unrepairable",
+                "",
+                "",
+                &message,
+                &[],
+                format.name(),
+                format.stream().name(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+
+    let tar = match repair_tar_prefix(&decoded.bytes, &options, max_entries) {
+        Ok(tar) => tar,
+        Err(message) => {
+            return tar_status_dict(
+                py,
+                "unrepairable",
+                "",
+                decoded.error.as_deref().unwrap_or(""),
+                &message,
+                &decoded.warnings,
+                format.name(),
+                format.stream().name(),
+                decoded.decoded_bytes,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+
+    if decoded.error.is_none() && !decoded.timed_out && !tar.changed {
+        return tar_status_dict(
+            py,
+            "unrepairable",
+            "",
+            "",
+            "compressed TAR decoded cleanly and inner TAR already looks canonical",
+            &tar.warnings,
+            format.name(),
+            format.stream().name(),
+            decoded.decoded_bytes,
+            tar.tar_bytes,
+            0,
+            tar.members,
+            tar.checksum_fixes,
+            tar.truncated_members,
+            0.0,
+            &[],
+        );
+    }
+
+    let output_path = Path::new(workspace).join(format!(
+        "{}_truncated_partial_recovery{}",
+        format.file_stem(),
+        format.ext()
+    ));
+    let output_bytes =
+        match write_recompressed_stream(format.stream(), &tar.bytes, &output_path, &options) {
+            Ok(bytes) => bytes,
+            Err(message) => {
+                let mut warnings = decoded.warnings.clone();
+                warnings.extend(tar.warnings.iter().cloned());
+                return tar_status_dict(
+                    py,
+                    "unrepairable",
+                    "",
+                    decoded.error.as_deref().unwrap_or(""),
+                    &message,
+                    &warnings,
+                    format.name(),
+                    format.stream().name(),
+                    decoded.decoded_bytes,
+                    tar.tar_bytes,
+                    0,
+                    tar.members,
+                    tar.checksum_fixes,
+                    tar.truncated_members,
+                    0.0,
+                    &[],
+                );
+            }
+        };
+
+    let mut warnings = decoded.warnings.clone();
+    warnings.extend(tar.warnings.iter().cloned());
+    let status = if decoded.error.is_none() && !decoded.timed_out && tar.truncated_members == 0 {
+        "repaired"
+    } else {
+        "partial"
+    };
+    let actions = [
+        "decode_outer_stream_prefix",
+        "repair_tar_headers",
+        "append_tar_zero_blocks",
+        "recompress_tar_stream",
+    ];
+    tar_status_dict(
+        py,
+        status,
+        &output_path.to_string_lossy(),
+        decoded.error.as_deref().unwrap_or(""),
+        "compressed TAR recovery produced a canonical TAR stream candidate",
+        &warnings,
+        format.name(),
+        format.stream().name(),
+        decoded.decoded_bytes,
+        tar.tar_bytes,
+        output_bytes,
+        tar.members,
+        tar.checksum_fixes,
+        tar.truncated_members,
+        tar_confidence(tar.members, decoded.decoded_bytes),
+        &actions,
+    )
+}
+
 #[derive(Clone, Copy, Debug)]
 enum StreamFormat {
     Gzip,
@@ -148,6 +351,67 @@ impl StreamFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum CompressedTarFormat {
+    Gzip,
+    Bzip2,
+    Xz,
+    Zstd,
+}
+
+impl CompressedTarFormat {
+    fn from_name(value: &str) -> Option<Self> {
+        match value
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "tar.gz" | "tgz" | "gzip" | "gz" => Some(Self::Gzip),
+            "tar.bz2" | "tbz2" | "tbz" | "bzip2" | "bz2" => Some(Self::Bzip2),
+            "tar.xz" | "txz" | "xz" => Some(Self::Xz),
+            "tar.zst" | "tar.zstd" | "tzst" | "zstd" | "zst" => Some(Self::Zstd),
+            _ => None,
+        }
+    }
+
+    fn stream(self) -> StreamFormat {
+        match self {
+            Self::Gzip => StreamFormat::Gzip,
+            Self::Bzip2 => StreamFormat::Bzip2,
+            Self::Xz => StreamFormat::Xz,
+            Self::Zstd => StreamFormat::Zstd,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Gzip => "tar.gz",
+            Self::Bzip2 => "tar.bz2",
+            Self::Xz => "tar.xz",
+            Self::Zstd => "tar.zst",
+        }
+    }
+
+    fn file_stem(self) -> &'static str {
+        match self {
+            Self::Gzip => "tar_gzip",
+            Self::Bzip2 => "tar_bzip2",
+            Self::Xz => "tar_xz",
+            Self::Zstd => "tar_zstd",
+        }
+    }
+
+    fn ext(self) -> &'static str {
+        match self {
+            Self::Gzip => ".tar.gz",
+            Self::Bzip2 => ".tar.bz2",
+            Self::Xz => ".tar.xz",
+            Self::Zstd => ".tar.zst",
+        }
+    }
+}
+
 struct StreamRepairOptions {
     max_input_bytes: Option<u64>,
     max_output_bytes: Option<u64>,
@@ -158,6 +422,24 @@ struct RecoveryStats {
     decoded_bytes: u64,
     output_bytes: u64,
     error: Option<String>,
+    warnings: Vec<String>,
+}
+
+struct DecodedPrefix {
+    bytes: Vec<u8>,
+    decoded_bytes: u64,
+    error: Option<String>,
+    timed_out: bool,
+    warnings: Vec<String>,
+}
+
+struct TarPrefixRepair {
+    bytes: Vec<u8>,
+    tar_bytes: u64,
+    members: u64,
+    checksum_fixes: u64,
+    truncated_members: u64,
+    changed: bool,
     warnings: Vec<String>,
 }
 
@@ -198,6 +480,63 @@ impl CandidateEncoder {
             Self::Zstd(encoder) => encoder.finish(),
         }
     }
+}
+
+fn decode_stream_prefix_to_vec(
+    data: &[u8],
+    format: StreamFormat,
+    options: &StreamRepairOptions,
+) -> Result<DecodedPrefix, String> {
+    let started = Instant::now();
+    let cursor = Cursor::new(data.to_vec());
+    let mut decoder = decoder_for(format, cursor)?;
+    let mut buffer = vec![0u8; DECODE_CHUNK_SIZE];
+    let mut decoded = Vec::new();
+    let mut error = None;
+    let mut timed_out = false;
+
+    loop {
+        if timed_out_at(started, options.max_duration) {
+            timed_out = true;
+            break;
+        }
+        match decoder.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                decoded.extend_from_slice(&buffer[..read]);
+                if options
+                    .max_output_bytes
+                    .is_some_and(|limit| decoded.len() as u64 > limit)
+                {
+                    return Err(
+                        "decoded TAR stream exceeds repair.deep.max_output_size_mb".to_string()
+                    );
+                }
+            }
+            Err(err) => {
+                error = Some(err.to_string());
+                break;
+            }
+        }
+    }
+
+    if decoded.is_empty() {
+        return Err(
+            error.unwrap_or_else(|| "stream produced no recoverable TAR prefix".to_string())
+        );
+    }
+
+    let mut warnings = Vec::new();
+    if timed_out {
+        warnings.push("compressed TAR decode time budget reached".to_string());
+    }
+    Ok(DecodedPrefix {
+        decoded_bytes: decoded.len() as u64,
+        bytes: decoded,
+        error,
+        timed_out,
+        warnings,
+    })
 }
 
 fn recover_stream_prefix(
@@ -292,6 +631,137 @@ fn recover_stream_prefix(
             Err(err)
         }
     }
+}
+
+fn write_recompressed_stream(
+    format: StreamFormat,
+    data: &[u8],
+    output: &Path,
+    options: &StreamRepairOptions,
+) -> Result<u64, String> {
+    ensure_parent(output).map_err(|err| err.to_string())?;
+    let temp = temp_path(output);
+    let result = (|| -> Result<u64, String> {
+        let file = File::create(&temp).map_err(|err| err.to_string())?;
+        let mut encoder = CandidateEncoder::new(format, file).map_err(|err| err.to_string())?;
+        encoder.write_all(data).map_err(|err| err.to_string())?;
+        let mut file = encoder.finish().map_err(|err| err.to_string())?;
+        file.flush().map_err(|err| err.to_string())?;
+        let output_bytes = file.seek(SeekFrom::End(0)).map_err(|err| err.to_string())?;
+        if options
+            .max_output_bytes
+            .is_some_and(|limit| output_bytes > limit)
+        {
+            return Err("candidate output exceeds repair.deep.max_output_size_mb".to_string());
+        }
+        Ok(output_bytes)
+    })();
+
+    match result {
+        Ok(output_bytes) => {
+            if output.exists() {
+                fs::remove_file(output).map_err(|err| err.to_string())?;
+            }
+            fs::rename(&temp, output).map_err(|err| err.to_string())?;
+            Ok(output_bytes)
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+fn repair_tar_prefix(
+    data: &[u8],
+    options: &StreamRepairOptions,
+    max_entries: usize,
+) -> Result<TarPrefixRepair, String> {
+    let mut output = Vec::with_capacity(data.len().saturating_add(1024));
+    let mut offset = 0usize;
+    let mut members = 0u64;
+    let mut checksum_fixes = 0u64;
+    let mut truncated_members = 0u64;
+    let mut warnings = Vec::new();
+
+    while offset + 512 <= data.len() {
+        if max_entries > 0 && members as usize >= max_entries {
+            warnings.push("compressed TAR recovery reached repair.deep.max_entries".to_string());
+            break;
+        }
+
+        let header = &data[offset..offset + 512];
+        if is_zero_block(header) {
+            break;
+        }
+
+        let Some(size) = parse_tar_number(&header[124..136]) else {
+            if members == 0 {
+                return Err("no plausible TAR header was found in decoded stream".to_string());
+            }
+            warnings.push("stopped before a TAR header with an invalid size field".to_string());
+            break;
+        };
+        if !plausible_tar_header(header) {
+            if members == 0 {
+                return Err("decoded stream does not begin with a plausible TAR header".to_string());
+            }
+            warnings.push("stopped before an implausible TAR header".to_string());
+            break;
+        }
+
+        let Some(payload_span) = padded_tar_payload_span(size) else {
+            warnings.push("stopped before a TAR member with an oversized payload".to_string());
+            break;
+        };
+        let Some(member_end) = offset
+            .checked_add(512)
+            .and_then(|value| value.checked_add(payload_span))
+        else {
+            warnings
+                .push("stopped before a TAR member with an overflowing payload span".to_string());
+            break;
+        };
+        if member_end > data.len() {
+            truncated_members += 1;
+            warnings.push("dropped a trailing TAR member whose payload is truncated".to_string());
+            break;
+        }
+
+        let mut fixed_header = header.to_vec();
+        let computed = tar_checksum(&fixed_header);
+        let stored = parse_tar_number(&fixed_header[148..156]);
+        if stored != Some(computed) {
+            fixed_header[148..156].copy_from_slice(&format_tar_checksum(computed));
+            checksum_fixes += 1;
+        }
+
+        output.extend_from_slice(&fixed_header);
+        output.extend_from_slice(&data[offset + 512..member_end]);
+        members += 1;
+        offset = member_end;
+    }
+
+    if members == 0 {
+        return Err("decoded stream contains no complete TAR members".to_string());
+    }
+    output.extend_from_slice(&[0u8; 1024]);
+    if options
+        .max_output_bytes
+        .is_some_and(|limit| output.len() as u64 > limit)
+    {
+        return Err("repaired TAR stream exceeds repair.deep.max_output_size_mb".to_string());
+    }
+    let changed = output.as_slice() != data;
+    Ok(TarPrefixRepair {
+        tar_bytes: output.len() as u64,
+        bytes: output,
+        members,
+        checksum_fixes,
+        truncated_members,
+        changed,
+        warnings,
+    })
 }
 
 fn decoder_for(format: StreamFormat, cursor: Cursor<Vec<u8>>) -> Result<Box<dyn Read>, String> {
@@ -424,6 +894,51 @@ fn status_dict(
     Ok(result.unbind())
 }
 
+fn tar_status_dict(
+    py: Python<'_>,
+    status: &str,
+    selected_path: &str,
+    decoder_error: &str,
+    message: &str,
+    warnings: &[String],
+    format: &str,
+    outer_format: &str,
+    decoded_bytes: u64,
+    tar_bytes: u64,
+    output_bytes: u64,
+    members: u64,
+    checksum_fixes: u64,
+    truncated_members: u64,
+    confidence: f64,
+    actions: &[&str],
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("status", status)?;
+    result.set_item("selected_path", selected_path)?;
+    result.set_item("format", format)?;
+    result.set_item("outer_format", outer_format)?;
+    result.set_item("confidence", confidence)?;
+    result.set_item("message", message)?;
+    result.set_item("decoder_error", decoder_error)?;
+    result.set_item("decoded_bytes", decoded_bytes)?;
+    result.set_item("tar_bytes", tar_bytes)?;
+    result.set_item("output_bytes", output_bytes)?;
+    result.set_item("members", members)?;
+    result.set_item("checksum_fixes", checksum_fixes)?;
+    result.set_item("truncated_members", truncated_members)?;
+    result.set_item("actions", PyList::new(py, actions)?)?;
+    result.set_item("warnings", PyList::new(py, warnings)?)?;
+    result.set_item(
+        "workspace_paths",
+        if selected_path.is_empty() {
+            PyList::empty(py)
+        } else {
+            PyList::new(py, [selected_path])?
+        },
+    )?;
+    Ok(result.unbind())
+}
+
 fn get_required_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<String> {
     dict.get_item(key)?
         .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("missing {key}")))?
@@ -483,6 +998,118 @@ fn confidence_for_size(decoded_bytes: u64) -> f64 {
     } else {
         0.62
     }
+}
+
+fn tar_confidence(members: u64, decoded_bytes: u64) -> f64 {
+    if members >= 8 || decoded_bytes >= 4 * 1024 * 1024 {
+        0.82
+    } else if members >= 2 || decoded_bytes >= 512 * 1024 {
+        0.76
+    } else {
+        0.68
+    }
+}
+
+fn is_zero_block(block: &[u8]) -> bool {
+    block.iter().all(|byte| *byte == 0)
+}
+
+fn plausible_tar_header(header: &[u8]) -> bool {
+    if header.len() != 512 {
+        return false;
+    }
+    if !plausible_tar_name(&header[0..100]) {
+        return false;
+    }
+    if parse_tar_number(&header[100..108]).is_none()
+        || parse_tar_number(&header[108..116]).is_none()
+        || parse_tar_number(&header[116..124]).is_none()
+        || parse_tar_number(&header[124..136]).is_none()
+    {
+        return false;
+    }
+    let typeflag = header[156];
+    if typeflag != 0 && !(0x20..=0x7e).contains(&typeflag) {
+        return false;
+    }
+    let magic = &header[257..263];
+    if magic.iter().any(|byte| *byte != 0)
+        && !magic.starts_with(b"ustar\0")
+        && !magic.starts_with(b"ustar ")
+    {
+        return false;
+    }
+    true
+}
+
+fn plausible_tar_name(field: &[u8]) -> bool {
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
+    if end == 0 {
+        return false;
+    }
+    field[..end]
+        .iter()
+        .all(|byte| *byte >= 0x20 && *byte != 0x7f)
+}
+
+fn parse_tar_number(field: &[u8]) -> Option<u64> {
+    if field.is_empty() {
+        return None;
+    }
+    if field[0] & 0x80 != 0 {
+        let mut value = (field[0] & 0x7f) as u64;
+        for byte in &field[1..] {
+            value = value.checked_mul(256)?.checked_add(*byte as u64)?;
+        }
+        return Some(value);
+    }
+
+    let mut value = 0u64;
+    let mut seen_digit = false;
+    for byte in field {
+        match *byte {
+            b'0'..=b'7' => {
+                seen_digit = true;
+                value = value.checked_mul(8)?.checked_add((*byte - b'0') as u64)?;
+            }
+            b'\0' | b' ' => {}
+            _ => return None,
+        }
+    }
+    if seen_digit {
+        Some(value)
+    } else {
+        Some(0)
+    }
+}
+
+fn padded_tar_payload_span(size: u64) -> Option<usize> {
+    let padded = size.checked_add(511)? / 512 * 512;
+    usize::try_from(padded).ok()
+}
+
+fn tar_checksum(header: &[u8]) -> u64 {
+    header
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            if (148..156).contains(&index) {
+                b' ' as u64
+            } else {
+                *byte as u64
+            }
+        })
+        .sum()
+}
+
+fn format_tar_checksum(value: u64) -> [u8; 8] {
+    let text = format!("{value:06o}\0 ");
+    let mut output = [0u8; 8];
+    output.copy_from_slice(text.as_bytes());
+    output
 }
 
 #[cfg(test)]
@@ -581,6 +1208,71 @@ mod tests {
         let _ = fs::remove_file(output);
     }
 
+    #[test]
+    fn tar_prefix_repair_drops_truncated_member_and_appends_zero_blocks() {
+        let first = tar_member("first.bin", b"first payload");
+        let second = tar_member("second.bin", &patterned_payload(4096));
+        let mut prefix = first.clone();
+        prefix.extend_from_slice(&second[..512 + 32]);
+
+        let repaired = repair_tar_prefix(&prefix, &test_options(), 20000).unwrap();
+
+        assert_eq!(repaired.members, 1);
+        assert_eq!(repaired.truncated_members, 1);
+        assert_eq!(repaired.checksum_fixes, 0);
+        assert_eq!(&repaired.bytes[..first.len()], first.as_slice());
+        assert_eq!(&repaired.bytes[first.len()..], &[0u8; 1024]);
+    }
+
+    #[test]
+    fn tar_prefix_repair_fixes_header_checksum() {
+        let mut member = tar_member("payload.txt", b"payload");
+        member[148] = b'7';
+
+        let repaired = repair_tar_prefix(&member, &test_options(), 20000).unwrap();
+
+        assert_eq!(repaired.members, 1);
+        assert_eq!(repaired.checksum_fixes, 1);
+        assert!(repaired.changed);
+        assert_eq!(
+            parse_tar_number(&repaired.bytes[148..156]),
+            Some(tar_checksum(&repaired.bytes[..512]))
+        );
+    }
+
+    #[test]
+    fn gzip_tar_combo_recompresses_repaired_tar_prefix() {
+        let first = tar_member("first.bin", &patterned_payload(2048));
+        let second = tar_member("second.bin", &patterned_payload(4096));
+        let mut tar_prefix = first.clone();
+        tar_prefix.extend_from_slice(&second[..512 + 128]);
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = GzEncoder::new(&mut encoded, GzipCompression::default());
+            encoder.write_all(&tar_prefix).unwrap();
+            encoder.finish().unwrap();
+        }
+        encoded.truncate(encoded.len().saturating_sub(8));
+
+        let decoded =
+            decode_stream_prefix_to_vec(&encoded, StreamFormat::Gzip, &test_options()).unwrap();
+        let tar = repair_tar_prefix(&decoded.bytes, &test_options(), 20000).unwrap();
+        let output = temp_output("tar_gzip_combo.tar.gz");
+        let output_bytes =
+            write_recompressed_stream(StreamFormat::Gzip, &tar.bytes, &output, &test_options())
+                .unwrap();
+
+        assert!(output_bytes > 0);
+        assert_eq!(tar.members, 1);
+        let recovered = fs::read(&output).unwrap();
+        let mut decoder = GzDecoder::new(Cursor::new(recovered));
+        let mut repaired_tar = Vec::new();
+        decoder.read_to_end(&mut repaired_tar).unwrap();
+        assert_eq!(&repaired_tar[..first.len()], first.as_slice());
+        assert_eq!(&repaired_tar[first.len()..], &[0u8; 1024]);
+        let _ = fs::remove_file(output);
+    }
+
     fn test_options() -> StreamRepairOptions {
         StreamRepairOptions {
             max_input_bytes: None,
@@ -611,5 +1303,33 @@ mod tests {
             .expect("time should be monotonic enough for tests")
             .as_nanos();
         std::env::temp_dir().join(format!("smart_unpacker_native_{name}_{nonce}"))
+    }
+
+    fn tar_member(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut header = [0u8; 512];
+        header[0..name.len()].copy_from_slice(name.as_bytes());
+        write_tar_octal(&mut header[100..108], 0o644);
+        write_tar_octal(&mut header[108..116], 0);
+        write_tar_octal(&mut header[116..124], 0);
+        write_tar_octal(&mut header[124..136], payload.len() as u64);
+        write_tar_octal(&mut header[136..148], 0);
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum = tar_checksum(&header);
+        header[148..156].copy_from_slice(&format_tar_checksum(checksum));
+
+        let mut output = header.to_vec();
+        output.extend_from_slice(payload);
+        let padding = (512 - (payload.len() % 512)) % 512;
+        output.extend(std::iter::repeat(0).take(padding));
+        output
+    }
+
+    fn write_tar_octal(field: &mut [u8], value: u64) {
+        let width = field.len() - 1;
+        let text = format!("{:0width$o}\0", value, width = width);
+        field.copy_from_slice(text.as_bytes());
     }
 }

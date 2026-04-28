@@ -1,0 +1,898 @@
+use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+
+const COPY_CHUNK_SIZE: usize = 1024 * 1024;
+const SEVEN_Z_MAGIC: &[u8] = b"7z\xbc\xaf\x27\x1c";
+const SEVEN_Z_HEADER_SIZE: usize = 32;
+const RAR4_MAGIC: &[u8] = b"Rar!\x1a\x07\x00";
+const RAR5_MAGIC: &[u8] = b"Rar!\x1a\x07\x01\x00";
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    format,
+    workspace,
+    max_input_size_mb=512.0,
+    max_candidates=8
+))]
+pub(crate) fn archive_carrier_crop_recovery(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    format: &str,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_candidates: usize,
+) -> PyResult<Py<PyDict>> {
+    let target = TargetFormat::from_name(format);
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => {
+            return status_dict(
+                py,
+                "skipped",
+                "",
+                target.name(),
+                &message,
+                &[],
+                0,
+                0,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+
+    let candidates = scan_archive_signatures(&data, target, true, max_candidates.max(1));
+    let Some(candidate) = candidates.first() else {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            target.name(),
+            "no embedded 7z/RAR archive signature passed structural checks",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
+    };
+    let output_path = Path::new(workspace).join(format!(
+        "archive_carrier_crop_{:08x}{}",
+        candidate.offset,
+        candidate.format.ext()
+    ));
+    let output_bytes = match write_slice_candidate(&data[candidate.offset..], &output_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return status_dict(
+                py,
+                "unrepairable",
+                "",
+                candidate.format.name(),
+                &err.to_string(),
+                &[],
+                candidate.offset as u64,
+                data.len() as u64,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+    let mut warnings = candidate.warnings.clone();
+    if candidate.offset == 0 {
+        warnings.push("archive starts at offset 0; carrier crop was not needed".to_string());
+    }
+    status_dict(
+        py,
+        "repaired",
+        &output_path.to_string_lossy(),
+        candidate.format.name(),
+        "embedded archive candidate was cropped from carrier bytes",
+        &warnings,
+        candidate.offset as u64,
+        data.len() as u64,
+        output_bytes,
+        confidence_for_candidate(candidate),
+        &["crop_embedded_archive_from_carrier"],
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_candidates=8
+))]
+pub(crate) fn seven_zip_precise_boundary_repair(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_candidates: usize,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => {
+            return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
+        }
+    };
+    let candidates =
+        scan_archive_signatures(&data, TargetFormat::SevenZip, false, max_candidates.max(1));
+    let selected = candidates.into_iter().find(|candidate| {
+        candidate.format == TargetFormat::SevenZip
+            && candidate.archive_end > candidate.offset
+            && (candidate.offset > 0 || candidate.archive_end < data.len())
+            && candidate.next_header_crc_ok
+    });
+    let Some(candidate) = selected else {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "7z",
+            "no 7z candidate had a trusted precise boundary to trim",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
+    };
+    let output_path = Path::new(workspace).join(format!(
+        "seven_zip_precise_boundary_repair_{:08x}.7z",
+        candidate.offset
+    ));
+    let output_bytes =
+        match write_slice_candidate(&data[candidate.offset..candidate.archive_end], &output_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return status_dict(
+                    py,
+                    "unrepairable",
+                    "",
+                    "7z",
+                    &err.to_string(),
+                    &[],
+                    candidate.offset as u64,
+                    candidate.archive_end as u64,
+                    0,
+                    0.0,
+                    &[],
+                )
+            }
+        };
+    status_dict(
+        py,
+        "repaired",
+        &output_path.to_string_lossy(),
+        "7z",
+        "7z archive was cropped to the exact NextHeader boundary",
+        &candidate.warnings,
+        candidate.offset as u64,
+        candidate.archive_end as u64,
+        output_bytes,
+        0.94,
+        &["crop_7z_to_precise_next_header_boundary"],
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_candidates=8
+))]
+pub(crate) fn seven_zip_crc_field_repair(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_candidates: usize,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => {
+            return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
+        }
+    };
+
+    let mut checked = 0usize;
+    for offset in find_all(&data, SEVEN_Z_MAGIC) {
+        checked += 1;
+        if checked > max_candidates.max(1) {
+            break;
+        }
+        let Some(repair) = repair_seven_zip_crc_candidate(&data, offset) else {
+            continue;
+        };
+        let output_path =
+            Path::new(workspace).join(format!("seven_zip_crc_field_repair_{:08x}.7z", offset));
+        let output_bytes = match write_slice_candidate(&repair.bytes, &output_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return status_dict(
+                    py,
+                    "unrepairable",
+                    "",
+                    "7z",
+                    &err.to_string(),
+                    &[],
+                    offset as u64,
+                    repair.archive_end as u64,
+                    0,
+                    0.0,
+                    &[],
+                )
+            }
+        };
+        return status_dict(
+            py,
+            "repaired",
+            &output_path.to_string_lossy(),
+            "7z",
+            "7z StartHeader/NextHeader CRC fields were recomputed from intact bytes",
+            &repair.warnings,
+            offset as u64,
+            repair.archive_end as u64,
+            output_bytes,
+            0.9,
+            &repair
+                .actions
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    status_dict(
+        py,
+        "unrepairable",
+        "",
+        "7z",
+        "no 7z CRC field mismatch was safely repairable",
+        &[],
+        0,
+        data.len() as u64,
+        0,
+        0.0,
+        &[],
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TargetFormat {
+    SevenZip,
+    Rar,
+    Any,
+}
+
+impl TargetFormat {
+    fn from_name(value: &str) -> Self {
+        match value
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "7z" | "seven_zip" | "sevenzip" => Self::SevenZip,
+            "rar" => Self::Rar,
+            _ => Self::Any,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::SevenZip => "7z",
+            Self::Rar => "rar",
+            Self::Any => "archive",
+        }
+    }
+
+    fn ext(self) -> &'static str {
+        match self {
+            Self::SevenZip => ".7z",
+            Self::Rar => ".rar",
+            Self::Any => ".bin",
+        }
+    }
+}
+
+struct ArchiveCandidate {
+    format: TargetFormat,
+    offset: usize,
+    archive_end: usize,
+    start_crc_ok: bool,
+    next_header_crc_ok: bool,
+    warnings: Vec<String>,
+}
+
+struct SevenZipHeader {
+    archive_end: usize,
+    start_header: [u8; 20],
+    stored_start_crc: u32,
+    computed_start_crc: u32,
+    stored_next_header_crc: u32,
+    computed_next_header_crc: u32,
+    next_header_nid_valid: bool,
+}
+
+struct SevenZipCrcRepair {
+    bytes: Vec<u8>,
+    archive_end: usize,
+    actions: Vec<String>,
+    warnings: Vec<String>,
+}
+
+fn scan_archive_signatures(
+    data: &[u8],
+    target: TargetFormat,
+    require_carrier_offset: bool,
+    max_candidates: usize,
+) -> Vec<ArchiveCandidate> {
+    let mut output = Vec::new();
+    if matches!(target, TargetFormat::SevenZip | TargetFormat::Any) {
+        for offset in find_all(data, SEVEN_Z_MAGIC) {
+            if require_carrier_offset && offset == 0 {
+                continue;
+            }
+            if let Some(candidate) = seven_zip_candidate(data, offset) {
+                output.push(candidate);
+                if output.len() >= max_candidates {
+                    return output;
+                }
+            }
+        }
+    }
+    if matches!(target, TargetFormat::Rar | TargetFormat::Any) {
+        for offset in find_all(data, RAR4_MAGIC) {
+            if require_carrier_offset && offset == 0 {
+                continue;
+            }
+            if let Some(candidate) = rar4_candidate(data, offset) {
+                output.push(candidate);
+                if output.len() >= max_candidates {
+                    return output;
+                }
+            }
+        }
+        for offset in find_all(data, RAR5_MAGIC) {
+            if require_carrier_offset && offset == 0 {
+                continue;
+            }
+            if let Some(candidate) = rar5_candidate(data, offset) {
+                output.push(candidate);
+                if output.len() >= max_candidates {
+                    return output;
+                }
+            }
+        }
+    }
+    output.sort_by_key(|candidate| candidate.offset);
+    output
+}
+
+fn seven_zip_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate> {
+    let header = parse_seven_zip_header(data, offset)?;
+    if !header.start_crc_ok() || !header.next_header_nid_valid {
+        return None;
+    }
+    let mut warnings = Vec::new();
+    if !header.next_header_crc_ok() {
+        warnings.push(
+            "7z NextHeader CRC is invalid; crop candidate requires later CRC repair".to_string(),
+        );
+    }
+    Some(ArchiveCandidate {
+        format: TargetFormat::SevenZip,
+        offset,
+        archive_end: header.archive_end,
+        start_crc_ok: header.start_crc_ok(),
+        next_header_crc_ok: header.next_header_crc_ok(),
+        warnings,
+    })
+}
+
+fn rar4_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate> {
+    let first = offset.checked_add(RAR4_MAGIC.len())?;
+    if first.checked_add(7)? > data.len() {
+        return None;
+    }
+    let stored_crc = u16_le(data, first) as u32;
+    let header_type = data[first + 2];
+    let flags = u16_le(data, first + 3);
+    let header_size = u16_le(data, first + 5) as usize;
+    if !matches!(header_type, 0x73..=0x7b)
+        || header_size < 7
+        || first.checked_add(header_size)? > data.len()
+    {
+        return None;
+    }
+    let header = &data[first..first + header_size];
+    if (crc32(&header[2..]) & 0xffff) != stored_crc {
+        return None;
+    }
+    let mut archive_end = data.len();
+    if flags & 0x8000 != 0 {
+        if header_size < 11 {
+            return None;
+        }
+        let add_size = u32_le(header, 7) as usize;
+        archive_end = first.checked_add(header_size)?.checked_add(add_size)?;
+        if archive_end > data.len() {
+            return None;
+        }
+    }
+    Some(ArchiveCandidate {
+        format: TargetFormat::Rar,
+        offset,
+        archive_end,
+        start_crc_ok: true,
+        next_header_crc_ok: true,
+        warnings: Vec::new(),
+    })
+}
+
+fn rar5_candidate(data: &[u8], offset: usize) -> Option<ArchiveCandidate> {
+    let first = offset.checked_add(RAR5_MAGIC.len())?;
+    if first.checked_add(6)? > data.len() {
+        return None;
+    }
+    let stored_crc = u32_le(data, first);
+    let (header_size, after_size) = read_vint(data, first + 4)?;
+    let total_size = 4usize
+        .checked_add(after_size.checked_sub(first + 4)?)?
+        .checked_add(usize::try_from(header_size).ok()?)?;
+    let end = first.checked_add(total_size)?;
+    if header_size == 0 || end > data.len() {
+        return None;
+    }
+    let header_data = &data[first + 4..end];
+    if crc32(header_data) != stored_crc {
+        return None;
+    }
+    let (header_type, _) = read_vint(data, after_size)?;
+    if !matches!(header_type, 1..=5) {
+        return None;
+    }
+    Some(ArchiveCandidate {
+        format: TargetFormat::Rar,
+        offset,
+        archive_end: data.len(),
+        start_crc_ok: true,
+        next_header_crc_ok: true,
+        warnings: Vec::new(),
+    })
+}
+
+fn parse_seven_zip_header(data: &[u8], offset: usize) -> Option<SevenZipHeader> {
+    if offset.checked_add(SEVEN_Z_HEADER_SIZE)? > data.len()
+        || !data[offset..].starts_with(SEVEN_Z_MAGIC)
+    {
+        return None;
+    }
+    if data[offset + 6] != 0 {
+        return None;
+    }
+    let stored_start_crc = u32_le(data, offset + 8);
+    let mut start_header = [0u8; 20];
+    start_header.copy_from_slice(&data[offset + 12..offset + 32]);
+    let computed_start_crc = crc32(&start_header);
+    let next_header_offset = u64_le(&start_header, 0);
+    let next_header_size = u64_le(&start_header, 8);
+    let stored_next_header_crc = u32_le(&start_header, 16);
+    if next_header_size == 0 {
+        return None;
+    }
+    let relative_end = (SEVEN_Z_HEADER_SIZE as u64)
+        .checked_add(next_header_offset)?
+        .checked_add(next_header_size)?;
+    let archive_end = offset.checked_add(usize::try_from(relative_end).ok()?)?;
+    if archive_end > data.len() {
+        return None;
+    }
+    let next_header_start = offset
+        .checked_add(SEVEN_Z_HEADER_SIZE)?
+        .checked_add(usize::try_from(next_header_offset).ok()?)?;
+    if next_header_start >= archive_end {
+        return None;
+    }
+    let next_header = &data[next_header_start..archive_end];
+    let computed_next_header_crc = crc32(next_header);
+    let nid = next_header.first().copied().unwrap_or(0);
+    Some(SevenZipHeader {
+        archive_end,
+        start_header,
+        stored_start_crc,
+        computed_start_crc,
+        stored_next_header_crc,
+        computed_next_header_crc,
+        next_header_nid_valid: nid == 0x01 || nid == 0x17,
+    })
+}
+
+impl SevenZipHeader {
+    fn start_crc_ok(&self) -> bool {
+        self.stored_start_crc == self.computed_start_crc
+    }
+
+    fn next_header_crc_ok(&self) -> bool {
+        self.stored_next_header_crc == self.computed_next_header_crc
+    }
+}
+
+fn repair_seven_zip_crc_candidate(data: &[u8], offset: usize) -> Option<SevenZipCrcRepair> {
+    let header = parse_seven_zip_header(data, offset)?;
+    if !header.next_header_nid_valid {
+        return None;
+    }
+    let mut candidate = data[offset..header.archive_end].to_vec();
+    let mut start_header = header.start_header;
+    let mut actions = Vec::new();
+    if header.stored_next_header_crc != header.computed_next_header_crc {
+        start_header[16..20].copy_from_slice(&header.computed_next_header_crc.to_le_bytes());
+        candidate[28..32].copy_from_slice(&header.computed_next_header_crc.to_le_bytes());
+        actions.push("recompute_7z_next_header_crc".to_string());
+    }
+    let computed_start_crc = crc32(&start_header);
+    if header.stored_start_crc != computed_start_crc {
+        candidate[8..12].copy_from_slice(&computed_start_crc.to_le_bytes());
+        actions.push("recompute_7z_start_header_crc".to_string());
+    }
+    if actions.is_empty() {
+        return None;
+    }
+    let repaired_header = parse_seven_zip_header(&candidate, 0)?;
+    if !repaired_header.start_crc_ok() || !repaired_header.next_header_crc_ok() {
+        return None;
+    }
+    let mut warnings = Vec::new();
+    if offset > 0 || header.archive_end < data.len() {
+        warnings.push(
+            "CRC repair output also cropped carrier or trailing bytes around the 7z archive"
+                .to_string(),
+        );
+    }
+    Some(SevenZipCrcRepair {
+        bytes: candidate,
+        archive_end: header.archive_end,
+        actions,
+        warnings,
+    })
+}
+
+fn read_source_input(
+    source_input: &Bound<'_, PyDict>,
+    max_bytes: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    let kind = get_optional_string(source_input, "kind")
+        .map_err(|err| err.to_string())?
+        .unwrap_or_else(|| "file".to_string());
+    match kind.as_str() {
+        "file" => {
+            let path = get_required_string(source_input, "path").map_err(|err| err.to_string())?;
+            read_range_to_vec(&path, 0, None, max_bytes)
+        }
+        "file_range" => {
+            let path = get_required_string(source_input, "path").map_err(|err| err.to_string())?;
+            let start = get_optional_u64(source_input, "start")
+                .map_err(|err| err.to_string())?
+                .unwrap_or(0);
+            let end = get_optional_u64(source_input, "end").map_err(|err| err.to_string())?;
+            read_range_to_vec(&path, start, end, max_bytes)
+        }
+        "concat_ranges" => {
+            let ranges_obj = source_input
+                .get_item("ranges")
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| "missing ranges".to_string())?;
+            let ranges = ranges_obj.cast::<PyList>().map_err(|err| err.to_string())?;
+            let mut output = Vec::new();
+            for item in ranges.iter() {
+                let dict = item.cast::<PyDict>().map_err(|err| err.to_string())?;
+                let path = get_required_string(dict, "path").map_err(|err| err.to_string())?;
+                let start = get_optional_u64(dict, "start")
+                    .map_err(|err| err.to_string())?
+                    .unwrap_or(0);
+                let end = get_optional_u64(dict, "end").map_err(|err| err.to_string())?;
+                let remaining_limit =
+                    max_bytes.map(|limit| limit.saturating_sub(output.len() as u64));
+                let chunk = read_range_to_vec(&path, start, end, remaining_limit)?;
+                output.extend_from_slice(&chunk);
+                if max_bytes.is_some_and(|limit| output.len() as u64 > limit) {
+                    return Err("archive deep repair input exceeds max_input_size_mb".to_string());
+                }
+            }
+            Ok(output)
+        }
+        _ => Err(format!("unsupported repair input kind: {kind}")),
+    }
+}
+
+fn read_range_to_vec(
+    path: &str,
+    start: u64,
+    end: Option<u64>,
+    max_bytes: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    let mut file = File::open(path).map_err(|err| err.to_string())?;
+    let file_size = file.seek(SeekFrom::End(0)).map_err(|err| err.to_string())?;
+    if start > file_size {
+        return Err("range start is beyond input size".to_string());
+    }
+    let effective_end = end.unwrap_or(file_size).min(file_size);
+    if effective_end < start {
+        return Err("range end is before range start".to_string());
+    }
+    let len = effective_end - start;
+    if max_bytes.is_some_and(|limit| len > limit) {
+        return Err("archive deep repair input exceeds max_input_size_mb".to_string());
+    }
+    let mut output = Vec::with_capacity(len.min(COPY_CHUNK_SIZE as u64) as usize);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|err| err.to_string())?;
+    let mut limited = file.take(len);
+    limited
+        .read_to_end(&mut output)
+        .map_err(|err| err.to_string())?;
+    Ok(output)
+}
+
+fn write_slice_candidate(bytes: &[u8], output: &Path) -> std::io::Result<u64> {
+    ensure_parent(output)?;
+    let temp = temp_path(output);
+    let result = (|| -> std::io::Result<u64> {
+        let mut file = File::create(&temp)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        Ok(bytes.len() as u64)
+    })();
+    match result {
+        Ok(written) => {
+            if output.exists() {
+                fs::remove_file(output)?;
+            }
+            fs::rename(&temp, output)?;
+            Ok(written)
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+fn status_dict(
+    py: Python<'_>,
+    status: &str,
+    selected_path: &str,
+    format: &str,
+    message: &str,
+    warnings: &[String],
+    offset: u64,
+    end_offset: u64,
+    output_bytes: u64,
+    confidence: f64,
+    actions: &[&str],
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("status", status)?;
+    result.set_item("selected_path", selected_path)?;
+    result.set_item("format", format)?;
+    result.set_item("message", message)?;
+    result.set_item("warnings", PyList::new(py, warnings)?)?;
+    result.set_item("offset", offset)?;
+    result.set_item("end_offset", end_offset)?;
+    result.set_item("output_bytes", output_bytes)?;
+    result.set_item("confidence", confidence)?;
+    result.set_item("actions", PyList::new(py, actions)?)?;
+    result.set_item(
+        "workspace_paths",
+        if selected_path.is_empty() {
+            PyList::empty(py)
+        } else {
+            PyList::new(py, [selected_path])?
+        },
+    )?;
+    Ok(result.unbind())
+}
+
+fn confidence_for_candidate(candidate: &ArchiveCandidate) -> f64 {
+    match candidate.format {
+        TargetFormat::SevenZip if candidate.start_crc_ok && candidate.next_header_crc_ok => 0.92,
+        TargetFormat::SevenZip if candidate.start_crc_ok => 0.82,
+        TargetFormat::Rar => 0.86,
+        _ => 0.7,
+    }
+}
+
+fn find_all(data: &[u8], needle: &[u8]) -> Vec<usize> {
+    if needle.is_empty() || data.len() < needle.len() {
+        return Vec::new();
+    }
+    let mut output = Vec::new();
+    let mut start = 0usize;
+    while start + needle.len() <= data.len() {
+        let Some(index) = find_subslice(&data[start..], needle) else {
+            break;
+        };
+        let absolute = start + index;
+        output.push(absolute);
+        start = absolute + 1;
+    }
+    output
+}
+
+fn find_subslice(data: &[u8], needle: &[u8]) -> Option<usize> {
+    data.windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn ensure_parent(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn temp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("candidate");
+    path.with_file_name(format!(".{name}.tmp"))
+}
+
+fn get_required_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<String> {
+    dict.get_item(key)?
+        .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(format!("missing {key}")))?
+        .extract::<String>()
+}
+
+fn get_optional_string(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<String>> {
+    match dict.get_item(key)? {
+        Some(value) if !value.is_none() => Ok(Some(value.extract::<String>()?)),
+        _ => Ok(None),
+    }
+}
+
+fn get_optional_u64(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u64>> {
+    match dict.get_item(key)? {
+        Some(value) if !value.is_none() => Ok(Some(value.extract::<u64>()?)),
+        _ => Ok(None),
+    }
+}
+
+fn mb_to_bytes(value: f64) -> Option<u64> {
+    if value <= 0.0 {
+        None
+    } else {
+        Some((value * 1024.0 * 1024.0) as u64)
+    }
+}
+
+fn u16_le(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+fn u32_le(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+fn u64_le(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+        bytes[offset + 4],
+        bytes[offset + 5],
+        bytes[offset + 6],
+        bytes[offset + 7],
+    ])
+}
+
+fn read_vint(data: &[u8], offset: usize) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    let mut shift = 0;
+    for index in offset..data.len().min(offset + 10) {
+        let byte = data[index];
+        value |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some((value, index + 1));
+        }
+        shift += 7;
+    }
+    None
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for byte in bytes {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn precise_7z_boundary_finds_embedded_archive_end() {
+        let archive = seven_zip_bytes();
+        let data = [b"carrier".as_slice(), archive.as_slice(), b"junk"].concat();
+
+        let candidates = scan_archive_signatures(&data, TargetFormat::SevenZip, false, 8);
+        let selected = candidates.first().unwrap();
+
+        assert_eq!(selected.offset, 7);
+        assert_eq!(selected.archive_end, 7 + archive.len());
+        assert!(selected.start_crc_ok);
+        assert!(selected.next_header_crc_ok);
+    }
+
+    #[test]
+    fn crc_field_repair_fixes_next_header_and_start_crc() {
+        let mut data = seven_zip_bytes();
+        data[8..12].copy_from_slice(&0u32.to_le_bytes());
+        data[28..32].copy_from_slice(&0u32.to_le_bytes());
+
+        let repair = repair_seven_zip_crc_candidate(&data, 0).unwrap();
+
+        assert_eq!(repair.bytes, seven_zip_bytes());
+        assert_eq!(
+            repair.actions,
+            vec![
+                "recompute_7z_next_header_crc".to_string(),
+                "recompute_7z_start_header_crc".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn carrier_crop_ignores_archive_at_zero() {
+        let archive = seven_zip_bytes();
+        let candidates = scan_archive_signatures(&archive, TargetFormat::SevenZip, true, 8);
+
+        assert!(candidates.is_empty());
+    }
+
+    fn seven_zip_bytes() -> Vec<u8> {
+        let next_header = b"\x01";
+        let gap = b"abcde";
+        let start_header = [
+            (gap.len() as u64).to_le_bytes().as_slice(),
+            (next_header.len() as u64).to_le_bytes().as_slice(),
+            crc32(next_header).to_le_bytes().as_slice(),
+        ]
+        .concat();
+        [
+            b"7z\xbc\xaf\x27\x1c".as_slice(),
+            b"\x00\x04".as_slice(),
+            crc32(&start_header).to_le_bytes().as_slice(),
+            start_header.as_slice(),
+            gap.as_slice(),
+            next_header.as_slice(),
+        ]
+        .concat()
+    }
+}

@@ -515,9 +515,58 @@ def test_zstd_truncated_partial_recovery_recompresses_prefix_when_backend_availa
     result = _run_stream_partial_repair(tmp_path, "zstd_truncated_partial_recovery", "zstd", source)
 
     assert result.ok is True
-    recovered = zstd.ZstdDecompressor().decompress(open(result.repaired_input["path"], "rb").read())
+    recovered = _zstd_decompress_all(zstd, open(result.repaired_input["path"], "rb").read())
     assert payload.startswith(recovered)
     assert 0 < len(recovered) < len(payload)
+
+
+def test_tar_gzip_truncated_partial_recovery_repairs_inner_tar(tmp_path):
+    source = tmp_path / "truncated.tar.gz"
+    tar_prefix = _partial_tar_prefix()
+    data = gzip.compress(tar_prefix)
+    source.write_bytes(data[:-8])
+
+    result = _run_stream_partial_repair(tmp_path, "tar_gzip_truncated_partial_recovery", "tar.gz", source)
+
+    assert result.ok is True
+    assert result.repaired_input["format_hint"] == "tar.gz"
+    with tarfile.open(result.repaired_input["path"], mode="r:gz") as archive:
+        assert archive.getnames() == ["first.bin"]
+        assert archive.extractfile("first.bin").read() == b"first payload"
+    native = result.diagnosis["native_tar_compressed_partial_recovery"]
+    assert native["members"] == 1
+    assert native["truncated_members"] == 1
+
+
+def test_tar_xz_truncated_partial_recovery_repairs_inner_tar(tmp_path):
+    source = tmp_path / "truncated.tar.xz"
+    tar_prefix = _partial_tar_prefix()
+    data = lzma.compress(tar_prefix, format=lzma.FORMAT_XZ)
+    source.write_bytes(data[:-12])
+
+    result = _run_stream_partial_repair(tmp_path, "tar_xz_truncated_partial_recovery", "tar.xz", source)
+
+    assert result.ok is True
+    assert result.repaired_input["format_hint"] == "tar.xz"
+    with tarfile.open(result.repaired_input["path"], mode="r:xz") as archive:
+        assert archive.getnames() == ["first.bin"]
+        assert archive.extractfile("first.bin").read() == b"first payload"
+
+
+def test_tar_zstd_partial_recovery_repairs_inner_tar_when_backend_available(tmp_path):
+    zstd = pytest.importorskip("zstandard")
+    source = tmp_path / "partial.tar.zst"
+    tar_prefix = _partial_tar_prefix()
+    source.write_bytes(zstd.ZstdCompressor().compress(tar_prefix))
+
+    result = _run_stream_partial_repair(tmp_path, "tar_zstd_truncated_partial_recovery", "tar.zst", source)
+
+    assert result.ok is True
+    assert result.repaired_input["format_hint"] == "tar.zst"
+    decoded = _zstd_decompress_all(zstd, open(result.repaired_input["path"], "rb").read())
+    with tarfile.open(fileobj=io.BytesIO(decoded), mode="r:") as archive:
+        assert archive.getnames() == ["first.bin"]
+        assert archive.extractfile("first.bin").read() == b"first payload"
 
 
 def test_seven_zip_boundary_trim_removes_bytes_after_next_header(tmp_path):
@@ -541,6 +590,86 @@ def test_seven_zip_start_header_crc_fix_rewrites_bad_crc(tmp_path):
 
     assert result.ok is True
     assert open(result.repaired_input["path"], "rb").read() == _seven_zip_bytes()
+
+
+def test_archive_carrier_crop_deep_recovery_crops_embedded_7z(tmp_path):
+    source = tmp_path / "carrier.bin"
+    original = _seven_zip_bytes()
+    source.write_bytes(b"JPEGDATA" + original)
+
+    result = _run_deep_repair(
+        tmp_path,
+        "archive_carrier_crop_deep_recovery",
+        "7z",
+        source,
+        ["carrier_archive", "boundary_unreliable"],
+    )
+
+    assert result.ok is True
+    assert result.module_name == "archive_carrier_crop_deep_recovery"
+    assert result.repaired_input["format_hint"] == "7z"
+    assert open(result.repaired_input["path"], "rb").read() == original
+    assert result.diagnosis["native_archive_deep_repair"]["offset"] == 8
+
+
+def test_archive_carrier_crop_deep_recovery_crops_embedded_rar(tmp_path):
+    source = tmp_path / "carrier-rar.bin"
+    original = _rar4_bytes()
+    source.write_bytes(b"GIF89a-data" + original)
+
+    result = _run_deep_repair(
+        tmp_path,
+        "archive_carrier_crop_deep_recovery",
+        "rar",
+        source,
+        ["carrier_archive", "boundary_unreliable"],
+    )
+
+    assert result.ok is True
+    assert result.repaired_input["format_hint"] == "rar"
+    assert open(result.repaired_input["path"], "rb").read() == original
+
+
+def test_seven_zip_precise_boundary_repair_trims_carrier_and_tail(tmp_path):
+    source = tmp_path / "carrier-tail.7z"
+    original = _seven_zip_bytes()
+    source.write_bytes(b"SFX" + original + b"JUNK")
+
+    result = _run_deep_repair(
+        tmp_path,
+        "seven_zip_precise_boundary_repair",
+        "7z",
+        source,
+        ["carrier_archive", "trailing_junk", "boundary_unreliable"],
+    )
+
+    assert result.ok is True
+    assert result.module_name == "seven_zip_precise_boundary_repair"
+    assert open(result.repaired_input["path"], "rb").read() == original
+    assert result.diagnosis["native_archive_deep_repair"]["offset"] == 3
+    assert result.actions == ["crop_7z_to_precise_next_header_boundary"]
+
+
+def test_seven_zip_crc_field_repair_rewrites_next_header_and_start_crc(tmp_path):
+    source = tmp_path / "bad-next-crc.7z"
+    original = _seven_zip_bytes()
+    data = bytearray(original)
+    data[8:12] = b"\0\0\0\0"
+    data[28:32] = b"\0\0\0\0"
+    source.write_bytes(bytes(data))
+
+    result = _run_deep_repair(
+        tmp_path,
+        "seven_zip_crc_field_repair",
+        "7z",
+        source,
+        ["next_header_crc_bad", "start_header_crc_bad"],
+    )
+
+    assert result.ok is True
+    assert result.module_name == "seven_zip_crc_field_repair"
+    assert open(result.repaired_input["path"], "rb").read() == original
+    assert result.actions == ["recompute_7z_next_header_crc", "recompute_7z_start_header_crc"]
 
 
 def test_rar_trailing_junk_trim_supports_rar4(tmp_path):
@@ -717,6 +846,24 @@ def _run_stream_partial_repair(tmp_path, module_name, fmt, source):
     ))
 
 
+def _run_deep_repair(tmp_path, module_name, fmt, source, flags):
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "stages": {"deep": True},
+            "deep": {"verify_candidates": False},
+            "modules": [{"name": module_name, "enabled": True}],
+        }
+    })
+    return scheduler.repair(RepairJob(
+        source_input={"kind": "file", "path": str(source)},
+        format=fmt,
+        confidence=0.7,
+        damage_flags=flags,
+        archive_key=source.name,
+    ))
+
+
 def _deep_merge(target, source):
     for key, value in source.items():
         if isinstance(value, dict) and isinstance(target.get(key), dict):
@@ -739,6 +886,35 @@ def _tar_bytes(files):
             info.size = len(payload)
             archive.addfile(info, io.BytesIO(payload))
     return buffer.getvalue()
+
+
+def _partial_tar_prefix():
+    first = _tar_member("first.bin", b"first payload")
+    second = _tar_member("second.bin", _pseudo_random_payload(64 * 1024))
+    return first + second[:512 + 128]
+
+
+def _tar_member(name: str, payload: bytes) -> bytes:
+    encoded_name = name.encode("utf-8")
+    header = bytearray(512)
+    header[:len(encoded_name)] = encoded_name
+    header[100:108] = _tar_octal(0o644, 8)
+    header[108:116] = _tar_octal(0, 8)
+    header[116:124] = _tar_octal(0, 8)
+    header[124:136] = _tar_octal(len(payload), 12)
+    header[136:148] = _tar_octal(0, 12)
+    header[148:156] = b" " * 8
+    header[156] = ord("0")
+    header[257:263] = b"ustar\0"
+    header[263:265] = b"00"
+    checksum = sum(header)
+    header[148:156] = f"{checksum:06o}\0 ".encode("ascii")
+    padding = b"\0" * ((512 - (len(payload) % 512)) % 512)
+    return bytes(header) + payload + padding
+
+
+def _tar_octal(value: int, length: int) -> bytes:
+    return f"{value:0{length - 1}o}\0".encode("ascii")
 
 
 def _descriptor_zip_fragment(name: str, payload: bytes, *, zip64: bool = False) -> bytes:
@@ -831,6 +1007,11 @@ def _pseudo_random_payload(size: int) -> bytes:
         value ^= (value << 5) & 0xFFFFFFFF
         output.append(value & 0xFF)
     return bytes(output)
+
+
+def _zstd_decompress_all(zstd, data: bytes) -> bytes:
+    with zstd.ZstdDecompressor().stream_reader(io.BytesIO(data)) as reader:
+        return reader.read()
 
 
 def _seven_zip_bytes() -> bytes:

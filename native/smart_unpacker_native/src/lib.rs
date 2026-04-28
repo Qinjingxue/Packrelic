@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 mod analysis;
+mod archive_deep_repair;
 mod carrier;
 mod compression_stream_repair;
 mod directory_scan;
@@ -140,6 +141,22 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         compression_stream_repair::compression_stream_partial_recovery,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        compression_stream_repair::tar_compressed_partial_recovery,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::archive_carrier_crop_recovery,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::seven_zip_precise_boundary_repair,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::seven_zip_crc_field_repair,
         m
     )?)?;
     Ok(())
