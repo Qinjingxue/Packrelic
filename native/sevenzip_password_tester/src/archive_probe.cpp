@@ -103,10 +103,10 @@ SUP7Z_API int sup7z_probe_archive(
     }
 
     const std::wstring archive_path_text(archive_path);
-    const std::wstring type = archive_type_for_path(archive_path_text);
-    copy_text(archive_type, archive_type_chars, type);
 
     const auto result = smart_unpacker::sevenzip::test_password(seven_zip_dll_path, archive_path_text, L"");
+    const std::wstring type = result.archive_type.empty() ? archive_type_for_path(archive_path_text) : result.archive_type;
+    copy_text(archive_type, archive_type_chars, type);
     const bool encrypted_result = result.status == smart_unpacker::sevenzip::PasswordTestStatus::WrongPassword ||
         (result.status == smart_unpacker::sevenzip::PasswordTestStatus::Unsupported && lower_extension(archive_path_text) == L".7z");
     const bool damaged_result = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Damaged;
@@ -125,6 +125,9 @@ SUP7Z_API int sup7z_probe_archive(
     }
     if (checksum_error) {
         *checksum_error = damaged_result ? 1 : 0;
+    }
+    if (offset) {
+        *offset = result.archive_offset;
     }
     if (item_count) {
         *item_count = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Ok ? 1 : 0;

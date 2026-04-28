@@ -23,6 +23,43 @@ def _remove_last_data_part(case):
     parts[-1].unlink()
 
 
+@pytest.mark.parametrize(
+    ("case_kwargs", "password"),
+    [
+        ({"sfx": True}, None),
+        ({"sfx": True}, PASSWORD),
+        ({"carrier": "jpg"}, None),
+        ({"carrier": "jpg"}, PASSWORD),
+    ],
+)
+def test_native_probe_identifies_embedded_7z_payload_offset(tmp_path, case_kwargs, password):
+    require_7z()
+    kwargs = dict(case_kwargs)
+    if password:
+        kwargs["password"] = password
+    case = ArchiveFixtureFactory().create(
+        tmp_path,
+        f"native_embedded_7z_probe_{'_'.join(case_kwargs)}_{bool(password)}",
+        "7z",
+        **kwargs,
+    )
+    tester = get_native_password_tester()
+    parts = _parts(case)
+
+    probe = tester.probe_archive(str(case.entry_path), part_paths=parts)
+
+    assert probe.is_archive
+    assert probe.archive_type == "7z"
+    assert probe.offset > 0
+    if password:
+        assert probe.is_encrypted
+        assert tester.test_archive(str(case.entry_path), part_paths=parts).encrypted
+        assert tester.test_archive(str(case.entry_path), password=password, part_paths=parts).ok
+    else:
+        assert not probe.is_encrypted
+        assert tester.test_archive(str(case.entry_path), part_paths=parts).ok
+
+
 @pytest.mark.parametrize("password", [None, PASSWORD])
 def test_native_wrapper_handles_7z_sfx_split_health_password_and_resources(tmp_path, password):
     require_7z()

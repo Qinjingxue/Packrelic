@@ -67,6 +67,8 @@ class NestedOutputScanPolicy:
             return self._size_at_least(path, size, 1024 * 1024)
         if ext in ambiguous_exts and any(token in filename for token in ("archive", "zip", "rar", "7z", "part")):
             return True
+        if filename == "#0" and self._parent_suggests_tar_stream(path):
+            return True
         if ".part" in filename or filename.endswith(".001"):
             return True
         if not ext:
@@ -86,3 +88,30 @@ class NestedOutputScanPolicy:
             return os.path.getsize(path) >= minimum_bytes
         except OSError:
             return False
+
+    def _parent_suggests_tar_stream(self, path: str) -> bool:
+        parent_name = os.path.basename(os.path.dirname(path)).lower()
+        if parent_name.endswith("_extracted"):
+            parent_name = parent_name[: -len("_extracted")]
+        return parent_name.endswith((
+            ".tar",
+            ".tar.gz",
+            ".tgz",
+            ".tar.bz2",
+            ".tbz",
+            ".tbz2",
+            ".tar.xz",
+            ".txz",
+            ".tar.zst",
+            ".tzst",
+            "_tar",
+            "_tar.gz",
+            "_tgz",
+            "_tar.bz2",
+            "_tbz",
+            "_tbz2",
+            "_tar.xz",
+            "_txz",
+            "_tar.zst",
+            "_tzst",
+        ))

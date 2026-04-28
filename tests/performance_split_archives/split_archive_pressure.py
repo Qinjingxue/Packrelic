@@ -19,7 +19,7 @@ from smart_unpacker.coordinator.runner import PipelineRunner
 from smart_unpacker.coordinator.scanner import ScanOrchestrator
 from smart_unpacker.coordinator.scheduling.executor import TaskExecutor
 from tests.helpers.detection_config import with_detection_pipeline
-from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory
+from tests.helpers.real_archives import ArchiveCase, ArchiveFixtureFactory, normalize_archive_format
 from tests.helpers.tool_config import get_optional_rar, require_7z
 
 
@@ -27,7 +27,10 @@ PASSWORD = "pressure-secret"
 WRONG_PASSWORDS = ["wrong-password", "123456", "letmein"]
 PASSWORD_TRY_LIST = [*WRONG_PASSWORDS[:2], PASSWORD]
 PAYLOAD_SIZE = 180 * 1024
-FORMATS = ("7z", "zip", "rar")
+PASSWORD_ARCHIVE_FORMATS = ("7z", "zip", "rar")
+PLAIN_ARCHIVE_FORMATS = ("tar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "gzip", "bzip2", "xz", "zstd")
+FORMATS = (*PASSWORD_ARCHIVE_FORMATS, *PLAIN_ARCHIVE_FORMATS)
+PLAIN_ONLY_FORMATS = set(PLAIN_ARCHIVE_FORMATS)
 UNLISTED_PASSWORD = "pressure-secret-not-in-list"
 PASSWORD_VIEWS = [
     ("no_password", [], "failure"),
@@ -242,7 +245,7 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
 def pressure_config(passwords: list[str] | None = None, scheduler_profile: str = "single") -> dict:
     return normalize_config(with_detection_pipeline({
         "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-        "recursive_extract": "1",
+        "recursive_extract": "2",
         "post_extract": {
             "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
@@ -263,6 +266,16 @@ def pressure_config(passwords: list[str] | None = None, scheduler_profile: str =
                     ".zip",
                     ".7z",
                     ".rar",
+                    ".tar",
+                    ".gz",
+                    ".bz2",
+                    ".xz",
+                    ".zst",
+                    ".tgz",
+                    ".tbz",
+                    ".tbz2",
+                    ".txz",
+                    ".tzst",
                     ".001",
                     ".exe",
                     ".jpg",
@@ -274,6 +287,8 @@ def pressure_config(passwords: list[str] | None = None, scheduler_profile: str =
         {"name": "seven_zip_structure_identity", "enabled": True},
         {"name": "zip_structure_identity", "enabled": True},
         {"name": "rar_structure_identity", "enabled": True},
+        {"name": "tar_structure_identity", "enabled": True},
+        {"name": "compression_stream_identity", "enabled": True},
     ], confirmation=[
         {"name": "seven_zip_probe", "enabled": True},
         {"name": "seven_zip_validation", "enabled": True, "reject_on_failed": False},
@@ -417,6 +432,9 @@ def build_acceptance_format_cases(root: Path, archive_format: str) -> list[Press
 
 
 def build_acceptance_batch_format_cases(root: Path, archive_format: str) -> list[PressureCase]:
+    if archive_format in PLAIN_ONLY_FORMATS:
+        return [build_or_skip(root, archive_format, "single_plain")]
+
     cases: list[PressureCase] = []
     cases.append(build_or_skip(root, archive_format, "single_plain"))
     cases.append(build_or_skip(root, archive_format, "single_password", passwords=PASSWORD_TRY_LIST, password=PASSWORD))
@@ -475,9 +493,16 @@ def build_cases(root: Path, requested_formats: list[str], profile: str) -> list[
 
 
 def marker_extracted(case: ArchiveCase) -> bool:
+    marker_bytes = case.marker_text.encode("utf-8")
     for path in case.archive_dir.rglob(case.marker_name):
         try:
             if path.read_text(encoding="utf-8") == case.marker_text:
+                return True
+        except OSError:
+            pass
+    for path in case.archive_dir.rglob("*"):
+        try:
+            if path.is_file() and path.stat().st_size == len(marker_bytes) and path.read_bytes() == marker_bytes:
                 return True
         except OSError:
             pass
@@ -619,34 +644,9 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
     timing_data = timing_columns(pipeline_timing)
 
     rows: list[dict] = []
-    expected_successes = sum(1 for pressure_case in pressure_cases if pressure_case.expected == "success")
-    expected_failures = sum(1 for pressure_case in pressure_cases if pressure_case.expected == "failure")
-    summary_observed = (
-        "success"
-        if summary.success_count == expected_successes and len(summary.failed_tasks) == expected_failures
-        else "failure"
-    )
+    case_rows: list[dict] = []
+    attributed_failed_tasks: set[str] = set()
     batch_files = sorted(path.name for path in batch_dir.iterdir() if path.is_file())
-    rows.append({
-        "case": "batch:summary",
-        "format": "batch",
-        "variant": "acceptance-batch",
-        "expected": "success",
-        "observed": summary_observed,
-        "pipeline_status": f"{summary.success_count} success / {len(summary.failed_tasks)} failed",
-        "marker_extracted": summary_observed == "success",
-        "password_count": len(PASSWORD_TRY_LIST),
-        "build_ms": round(sum(pressure_case.build_seconds for pressure_case in pressure_cases) * 1000, 2),
-        "scan_ms": round(scan_seconds * 1000, 2),
-        "pipeline_ms": round(pipeline_seconds * 1000, 2),
-        "scan_results": len(scan_results),
-        "success_count": summary.success_count,
-        "failed_count": len(summary.failed_tasks),
-        "failed_tasks": list(summary.failed_tasks),
-        "skip_reason": None,
-        "files": batch_files,
-        **timing_data,
-    })
 
     for pressure_case in pressure_cases:
         case = pressure_case.case
@@ -661,7 +661,8 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
         else:
             observed = "missing"
         case_failed_tasks = failed_tasks_for_case(list(summary.failed_tasks), pressure_case)
-        rows.append({
+        attributed_failed_tasks.update(case_failed_tasks)
+        case_rows.append({
             "case": pressure_case.name,
             "format": pressure_case.archive_format,
             "variant": pressure_case.variant,
@@ -681,6 +682,35 @@ def run_batch_cases(pressure_cases: list[PressureCase]) -> list[dict]:
             "files": list(case.metadata.get("batch_files") or [case.entry_path.name]),
             **timing_data,
         })
+    unexpected_failed_tasks = [
+        failed_task for failed_task in summary.failed_tasks if failed_task not in attributed_failed_tasks
+    ]
+    summary_observed = (
+        "success"
+        if all(row["expected"] == row["observed"] for row in case_rows) and not unexpected_failed_tasks
+        else "failure"
+    )
+    rows.append({
+        "case": "batch:summary",
+        "format": "batch",
+        "variant": "acceptance-batch",
+        "expected": "success",
+        "observed": summary_observed,
+        "pipeline_status": f"{summary.success_count} success / {len(summary.failed_tasks)} failed",
+        "marker_extracted": summary_observed == "success",
+        "password_count": len(PASSWORD_TRY_LIST),
+        "build_ms": round(sum(pressure_case.build_seconds for pressure_case in pressure_cases) * 1000, 2),
+        "scan_ms": round(scan_seconds * 1000, 2),
+        "pipeline_ms": round(pipeline_seconds * 1000, 2),
+        "scan_results": len(scan_results),
+        "success_count": summary.success_count,
+        "failed_count": len(summary.failed_tasks),
+        "failed_tasks": unexpected_failed_tasks or list(summary.failed_tasks),
+        "skip_reason": None,
+        "files": batch_files,
+        **timing_data,
+    })
+    rows.extend(case_rows)
     return rows
 
 
@@ -728,7 +758,7 @@ def print_table(rows: list[dict]):
 
 
 def parse_formats(value: str) -> list[str]:
-    requested = [item.strip().lower() for item in value.split(",") if item.strip()]
+    requested = [normalize_archive_format(item) for item in value.split(",") if item.strip()]
     unknown = sorted(set(requested) - set(FORMATS))
     if unknown:
         raise argparse.ArgumentTypeError(f"Unsupported formats: {', '.join(unknown)}")
@@ -739,7 +769,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Generate and pressure-test broad real archive edge cases.")
     parser.add_argument("--strict", action="store_true", help="Return non-zero when expected and observed results differ.")
     parser.add_argument("--no-json", action="store_true", help="Only print the table summary.")
-    parser.add_argument("--formats", type=parse_formats, default=list(FORMATS), help="Comma-separated formats to cover: 7z,zip,rar.")
+    parser.add_argument(
+        "--formats",
+        type=parse_formats,
+        default=list(FORMATS),
+        help="Comma-separated formats to cover: 7z,zip,rar,tar,tar.gz,tar.bz2,tar.xz,tar.zst,gzip,bzip2,xz,zstd.",
+    )
     parser.add_argument(
         "--profile",
         choices=["full", "acceptance", "acceptance-batch"],

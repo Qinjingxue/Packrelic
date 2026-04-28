@@ -20,6 +20,8 @@ struct PasswordTestResult {
     bool backend_available = false;
     int matched_index = -1;
     int attempts = 0;
+    unsigned long long archive_offset = 0;
+    std::wstring archive_type;
     std::string message;
 };
 

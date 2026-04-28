@@ -108,12 +108,15 @@ SUP7Z_API int sup7z_test_archive(
     }
 
     const std::wstring archive_path_text(archive_path);
-    copy_text(archive_type, archive_type_chars, archive_type_for_path(archive_path_text));
 
     const auto result = smart_unpacker::sevenzip::test_password(
         seven_zip_dll_path,
         archive_path_text,
         password ? password : L"");
+    copy_text(
+        archive_type,
+        archive_type_chars,
+        result.archive_type.empty() ? archive_type_for_path(archive_path_text) : result.archive_type);
     if (command_ok) {
         *command_ok = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Ok ? 1 : 0;
     }
@@ -156,13 +159,16 @@ SUP7Z_API int sup7z_test_archive_with_parts(
     }
 
     const std::wstring archive_path_text(archive_path);
-    copy_text(archive_type, archive_type_chars, archive_type_for_path(archive_path_text));
 
     const auto result = smart_unpacker::sevenzip::test_password_with_parts(
         seven_zip_dll_path,
         archive_path_text,
         collect_part_paths(archive_path, part_paths, part_count),
         password ? password : L"");
+    copy_text(
+        archive_type,
+        archive_type_chars,
+        result.archive_type.empty() ? archive_type_for_path(archive_path_text) : result.archive_type);
     if (command_ok) {
         *command_ok = result.status == smart_unpacker::sevenzip::PasswordTestStatus::Ok ? 1 : 0;
     }
