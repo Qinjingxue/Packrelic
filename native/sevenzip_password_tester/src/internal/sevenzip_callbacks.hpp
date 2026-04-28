@@ -12,6 +12,8 @@
 
 #include <algorithm>
 
+#include <cstddef>
+
 #include <filesystem>
 
 #include <map>
@@ -370,9 +372,26 @@ class FileOutStream final : public ISequentialOutStream {
 
 public:
 
-    explicit FileOutStream(const std::wstring& path)
+    explicit FileOutStream(const std::wstring& path, ExtractOutputTrace* trace = nullptr, std::size_t item_trace_index = 0)
 
-        : handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
+        : trace_(trace),
+          item_trace_index_(item_trace_index),
+
+          handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)) {
+
+        if (trace_ && handle_ == INVALID_HANDLE_VALUE) {
+
+            const DWORD error = GetLastError();
+
+            trace_->last_hresult = HRESULT_FROM_WIN32(error);
+
+            trace_->last_win32_error = static_cast<int>(error);
+
+            mark_item_failure(trace_->last_hresult, trace_->last_win32_error);
+
+        }
+
+    }
 
     ~FileOutStream() {
 
@@ -442,6 +461,12 @@ public:
 
         if (handle_ == INVALID_HANDLE_VALUE) {
 
+            if (trace_) {
+
+                trace_->last_hresult = E_FAIL;
+
+            }
+
             return E_FAIL;
 
         }
@@ -450,11 +475,51 @@ public:
 
         if (!WriteFile(handle_, data, size, &written, nullptr)) {
 
-            return HRESULT_FROM_WIN32(GetLastError());
+            const DWORD error = GetLastError();
+
+            const HRESULT hr = HRESULT_FROM_WIN32(error);
+
+            if (trace_) {
+
+                trace_->last_hresult = hr;
+
+                trace_->last_win32_error = static_cast<int>(error);
+
+                trace_->last_write_size = 0;
+
+                mark_item_failure(hr, static_cast<int>(error));
+
+            }
+
+            return hr;
 
         }
 
         bytes_written_ += written;
+
+        if (trace_) {
+
+            trace_->total_bytes_written += written;
+
+            trace_->current_item_bytes_written += written;
+
+            trace_->last_write_size = written;
+
+            trace_->last_hresult = S_OK;
+
+            trace_->last_win32_error = 0;
+
+            if (item_trace_index_ < trace_->items.size()) {
+
+                trace_->items[item_trace_index_].bytes_written += written;
+
+                trace_->items[item_trace_index_].hresult = S_OK;
+
+                trace_->items[item_trace_index_].win32_error = 0;
+
+            }
+
+        }
 
         if (processedSize) {
 
@@ -470,7 +535,29 @@ public:
 
 private:
 
+    void mark_item_failure(HRESULT hr, int win32_error) {
+
+        if (!trace_ || item_trace_index_ >= trace_->items.size()) {
+
+            return;
+
+        }
+
+        auto& item = trace_->items[item_trace_index_];
+
+        item.failed = true;
+
+        item.hresult = static_cast<int>(hr);
+
+        item.win32_error = win32_error;
+
+    }
+
     LONG refs_ = 1;
+
+    ExtractOutputTrace* trace_ = nullptr;
+
+    std::size_t item_trace_index_ = 0;
 
     HANDLE handle_ = INVALID_HANDLE_VALUE;
 
@@ -542,7 +629,9 @@ public:
 
         std::wstring output_dir,
 
-        ExtractProgressCallback progress
+        ExtractProgressCallback progress,
+
+        ExtractOutputTrace* output_trace = nullptr
 
     ) : archive_(archive),
 
@@ -550,7 +639,9 @@ public:
 
         output_dir_(std::move(output_dir)),
 
-        progress_(std::move(progress)) {}
+        progress_(std::move(progress)),
+
+        output_trace_(output_trace) {}
 
 
 
@@ -565,6 +656,10 @@ public:
     UInt64 completed_bytes() const { return completed_bytes_; }
 
     const std::wstring& failed_item() const { return failed_item_; }
+
+    UInt32 failed_item_index() const { return failed_item_index_; }
+
+    UInt64 failed_item_bytes_written() const { return failed_item_bytes_written_; }
 
     bool output_error() const { return output_error_; }
 
@@ -654,6 +749,12 @@ public:
 
         current_item_.clear();
 
+        current_item_bytes_written_ = 0;
+
+        current_item_is_dir_ = false;
+
+        current_trace_active_ = false;
+
         if (askExtractMode != kExtractMode) {
 
             return S_OK;
@@ -702,6 +803,20 @@ public:
 
         current_item_ = name;
 
+        current_item_is_dir_ = is_dir;
+
+        if (output_trace_) {
+
+            output_trace_->current_item_index = index;
+
+            output_trace_->current_item_path = name;
+
+            output_trace_->current_item_bytes_written = 0;
+
+            begin_item_trace(index, name, is_dir);
+
+        }
+
 
 
         const auto safe_path = safe_relative_item_path(name);
@@ -710,7 +825,13 @@ public:
 
             failed_item_ = name;
 
+            failed_item_index_ = index;
+
+            failed_item_bytes_written_ = 0;
+
             output_error_ = true;
+
+            mark_current_item_failure(E_INVALIDARG, 0);
 
             return E_INVALIDARG;
 
@@ -738,7 +859,13 @@ public:
 
             failed_item_ = name;
 
+            failed_item_index_ = index;
+
+            failed_item_bytes_written_ = current_item_bytes_written_;
+
             output_error_ = true;
+
+            mark_current_item_failure(E_FAIL, 0);
 
             return E_FAIL;
 
@@ -746,7 +873,7 @@ public:
 
 
 
-        auto* stream = new FileOutStream(target.wstring());
+        auto* stream = new FileOutStream(target.wstring(), output_trace_, current_trace_index_);
 
         if (!stream->is_open()) {
 
@@ -754,7 +881,14 @@ public:
 
             failed_item_ = name;
 
+            failed_item_index_ = index;
+
+            failed_item_bytes_written_ = current_item_bytes_written_;
+
             output_error_ = true;
+
+            mark_current_item_failure(output_trace_ ? static_cast<HRESULT>(output_trace_->last_hresult) : E_FAIL,
+                                      output_trace_ ? output_trace_->last_win32_error : 0);
 
             return E_FAIL;
 
@@ -776,13 +910,25 @@ public:
 
         }
 
-        if (opRes == kOpOk && !current_item_.empty()) {
+        if (opRes == kOpOk && !current_item_.empty() && !current_item_is_dir_) {
 
             files_written_ += 1;
 
         } else if (opRes != kOpOk && failed_item_.empty()) {
 
             failed_item_ = current_item_;
+
+            failed_item_index_ = current_index_;
+
+        }
+
+        current_item_bytes_written_ = output_trace_ ? output_trace_->current_item_bytes_written : current_item_bytes_written_;
+
+        finish_current_item_trace(opRes);
+
+        if (opRes != kOpOk) {
+
+            failed_item_bytes_written_ = current_item_bytes_written_;
 
         }
 
@@ -809,6 +955,80 @@ public:
 
 
 private:
+
+    void begin_item_trace(UInt32 index, const std::wstring& item_path, bool is_dir) {
+
+        if (!output_trace_) {
+
+            return;
+
+        }
+
+        ExtractOutputItemTrace item;
+
+        item.index = index;
+
+        item.path = item_path;
+
+        item.is_dir = is_dir;
+
+        item.operation_result = kOpOk;
+
+        output_trace_->items.push_back(std::move(item));
+
+        current_trace_index_ = output_trace_->items.size() - 1;
+
+        current_trace_active_ = true;
+
+    }
+
+    void finish_current_item_trace(Int32 opRes) {
+
+        if (!output_trace_ || !current_trace_active_ || current_trace_index_ >= output_trace_->items.size()) {
+
+            return;
+
+        }
+
+        auto& item = output_trace_->items[current_trace_index_];
+
+        item.bytes_written = output_trace_->current_item_bytes_written;
+
+        item.operation_result = opRes;
+
+        item.done = opRes == kOpOk && !item.failed;
+
+        item.failed = item.failed || opRes != kOpOk;
+
+        item.hresult = output_trace_->last_hresult;
+
+        item.win32_error = output_trace_->last_win32_error;
+
+    }
+
+    void mark_current_item_failure(HRESULT hr, int win32_error) {
+
+        if (!output_trace_ || !current_trace_active_ || current_trace_index_ >= output_trace_->items.size()) {
+
+            return;
+
+        }
+
+        auto& item = output_trace_->items[current_trace_index_];
+
+        item.bytes_written = output_trace_->current_item_bytes_written;
+
+        item.hresult = static_cast<int>(hr);
+
+        item.win32_error = win32_error;
+
+        item.failed = true;
+
+        output_trace_->last_hresult = static_cast<int>(hr);
+
+        output_trace_->last_win32_error = win32_error;
+
+    }
 
     void emit(const std::string& event, UInt32 item_index, const std::wstring& item_path) {
 
@@ -846,23 +1066,37 @@ private:
 
     ExtractProgressCallback progress_;
 
+    ExtractOutputTrace* output_trace_ = nullptr;
+
     UInt64 completed_bytes_ = 0;
 
     UInt64 total_bytes_ = 0;
 
     UInt64 bytes_written_ = 0;
 
+    UInt64 current_item_bytes_written_ = 0;
+
+    UInt64 failed_item_bytes_written_ = 0;
+
     UInt32 current_index_ = 0;
+
+    UInt32 failed_item_index_ = 0;
 
     UInt32 files_written_ = 0;
 
     UInt32 dirs_written_ = 0;
+
+    std::size_t current_trace_index_ = 0;
 
     std::wstring current_item_;
 
     std::wstring failed_item_;
 
     Int32 operation_result_ = kOpOk;
+
+    bool current_item_is_dir_ = false;
+
+    bool current_trace_active_ = false;
 
     bool output_error_ = false;
 

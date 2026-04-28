@@ -54,23 +54,47 @@ class SingleArchiveExtractor:
         print(f"\n[EXTRACT] 开始: {archive}")
 
         if not self.ensure_space(5):
-            return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
+            return self._failed(
+                archive,
+                out_dir,
+                all_parts,
+                "磁盘空间不足",
+                diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
+            )
 
         try:
             os.makedirs(out_dir, exist_ok=True)
         except Exception as exc:
-            return self._failed(archive, out_dir, all_parts, f"目录创建失败: {exc}")
+            return self._failed(
+                archive,
+                out_dir,
+                all_parts,
+                f"目录创建失败: {exc}",
+                diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
+            )
 
         startupinfo = self._startupinfo()
         retry_count = 0
         while retry_count < self.retry_policy.max_retries:
             if not self.ensure_space(5):
                 shutil.rmtree(out_dir, ignore_errors=True)
-                return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
+                return self._failed(
+                    archive,
+                    out_dir,
+                    all_parts,
+                    "磁盘空间不足",
+                    diagnostics={"failure_stage": "preflight", "failure_kind": "disk_space"},
+                )
             try:
                 os.makedirs(out_dir, exist_ok=True)
             except Exception as exc:
-                return self._failed(archive, out_dir, all_parts, f"目录创建失败: {exc}")
+                return self._failed(
+                    archive,
+                    out_dir,
+                    all_parts,
+                    f"目录创建失败: {exc}",
+                    diagnostics={"failure_stage": "preflight", "failure_kind": "output_filesystem", "message": str(exc)},
+                )
 
             staged = self.rename_scheduler.normalize_archive_paths(
                 archive,
@@ -95,7 +119,13 @@ class SingleArchiveExtractor:
                 if self.password_store.has_candidates():
                     if correct_pwd is None and "wrong password" in test_err:
                         shutil.rmtree(out_dir, ignore_errors=True)
-                        return self._failed(archive, out_dir, run_parts, "密码错误或未知密码")
+                        return self._failed(
+                            archive,
+                            out_dir,
+                            run_parts,
+                            "密码错误或未知密码",
+                            diagnostics=self._diagnostics_from(test_result),
+                        )
 
                 selected_codepage = self._codepage_from_facts(task)
 
@@ -132,7 +162,13 @@ class SingleArchiveExtractor:
                 retry_count += 1
                 if self.retry_policy.needs_space_recheck(run_result, err) and not self.ensure_space(10):
                     shutil.rmtree(out_dir, ignore_errors=True)
-                    return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
+                    return self._failed(
+                        archive,
+                        out_dir,
+                        all_parts,
+                        "磁盘空间不足",
+                        diagnostics={"failure_stage": "retry_preflight", "failure_kind": "disk_space"},
+                    )
                 shutil.rmtree(out_dir, ignore_errors=True)
                 print(f"[EXTRACT] 临时失败，准备第 {retry_count + 1}/{self.retry_policy.max_retries} 次尝试: {archive}")
                 self.retry_policy.backoff(retry_count)
@@ -149,10 +185,17 @@ class SingleArchiveExtractor:
                 error_msg,
                 password_used=correct_pwd,
                 selected_codepage=selected_codepage,
+                diagnostics=self._diagnostics_from(run_result or test_result),
             )
 
         shutil.rmtree(out_dir, ignore_errors=True)
-        return self._failed(archive, out_dir, all_parts, "磁盘空间不足")
+        return self._failed(
+            archive,
+            out_dir,
+            all_parts,
+            "磁盘空间不足",
+            diagnostics={"failure_stage": "retry_exhausted", "failure_kind": "unknown"},
+        )
 
     def _resolve_password(self, task: ArchiveTask, archive_path: str, part_paths: list[str]):
         fact_bag = getattr(task, "fact_bag", None)
@@ -212,6 +255,7 @@ class SingleArchiveExtractor:
         *,
         password_used: str | None = None,
         selected_codepage: str | None = None,
+        diagnostics: dict | None = None,
     ) -> ExtractionResult:
         return ExtractionResult(
             success=False,
@@ -221,4 +265,10 @@ class SingleArchiveExtractor:
             error=error,
             password_used=password_used,
             selected_codepage=selected_codepage,
+            diagnostics=dict(diagnostics or {}),
         )
+
+    @staticmethod
+    def _diagnostics_from(result: object) -> dict:
+        diagnostics = getattr(result, "worker_diagnostics", None)
+        return dict(diagnostics) if isinstance(diagnostics, dict) else {}

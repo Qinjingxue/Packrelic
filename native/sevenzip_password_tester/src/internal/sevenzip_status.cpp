@@ -34,6 +34,58 @@ bool looks_damaged_health_result(const std::wstring& password, Int32 op_res) {
 
 
 
+const char* operation_result_name(Int32 op_res) {
+
+    switch (op_res) {
+
+    case kOpOk:
+
+        return "ok";
+
+    case kOpUnsupportedMethod:
+
+        return "unsupported_method";
+
+    case kOpDataError:
+
+        return "data_error";
+
+    case kOpCrcError:
+
+        return "crc_error";
+
+    case kOpUnavailable:
+
+        return "unavailable";
+
+    case kOpUnexpectedEnd:
+
+        return "unexpected_end";
+
+    case kOpDataAfterEnd:
+
+        return "data_after_end";
+
+    case kOpIsNotArc:
+
+        return "is_not_archive";
+
+    case kOpHeadersError:
+
+        return "headers_error";
+
+    case kOpWrongPassword:
+
+        return "wrong_password";
+
+    }
+
+    return "unknown";
+
+}
+
+
+
 #endif
 
 
@@ -77,4 +129,3 @@ const char* status_name(PasswordTestStatus status) {
 
 
 }  // namespace smart_unpacker::sevenzip
-

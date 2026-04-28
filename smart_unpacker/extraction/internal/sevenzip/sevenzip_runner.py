@@ -10,6 +10,7 @@ import psutil
 
 from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
 from smart_unpacker.contracts.tasks import ArchiveTask
+from smart_unpacker.extraction.internal.sevenzip.worker_diagnostics import attach_worker_diagnostics
 from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 
 
@@ -164,7 +165,17 @@ class SevenZipRunner:
                 task=task,
             )
         except (OSError, FileNotFoundError) as exc:
-            return subprocess.CompletedProcess(["sevenzip_worker.exe"], -100, "", f"sevenzip_worker setup failed: {exc}")
+            return self._completed_process(
+                ["sevenzip_worker.exe"],
+                -100,
+                "",
+                f"sevenzip_worker setup failed: {exc}",
+                process_failure={
+                    "failure_stage": "worker_setup",
+                    "failure_kind": "process_start",
+                    "message": str(exc),
+                },
+            )
         return self._run_worker(job, startupinfo=startupinfo, runtime_scheduler=runtime_scheduler, task=task)
 
     def run_extract_command(
@@ -242,13 +253,29 @@ class SevenZipRunner:
             format_hint=str(raw.get("format_hint") or raw.get("format") or ""),
         )
 
+    @staticmethod
+    def _completed_process(
+        args,
+        returncode: int | None,
+        stdout: str,
+        stderr: str,
+        *,
+        request_payload: dict | None = None,
+        process_failure: dict | None = None,
+    ) -> subprocess.CompletedProcess:
+        return attach_worker_diagnostics(
+            subprocess.CompletedProcess(args, returncode, stdout or "", stderr or ""),
+            request_payload=request_payload,
+            process_failure=process_failure,
+        )
+
     def _run_worker(self, job: dict, startupinfo, runtime_scheduler: Any, task: ArchiveTask) -> subprocess.CompletedProcess:
         payload = json.dumps(job, ensure_ascii=False, separators=(",", ":"))
         if self._persistent_workers_enabled():
-            return self._run_persistent_worker(payload, startupinfo=startupinfo, runtime_scheduler=runtime_scheduler, task=task)
+            return self._run_persistent_worker(payload, startupinfo=startupinfo, runtime_scheduler=runtime_scheduler, task=task, job=job)
         if runtime_scheduler is None:
             try:
-                return subprocess.run(
+                completed = subprocess.run(
                     [self._worker_path()],
                     input=payload,
                     capture_output=True,
@@ -257,8 +284,20 @@ class SevenZipRunner:
                     errors="replace",
                     startupinfo=startupinfo,
                 )
+                return attach_worker_diagnostics(completed, request_payload=job)
             except (OSError, FileNotFoundError) as exc:
-                return subprocess.CompletedProcess([self.worker_path or "sevenzip_worker.exe"], -100, "", f"sevenzip_worker failed to start: {exc}")
+                return self._completed_process(
+                    [self.worker_path or "sevenzip_worker.exe"],
+                    -100,
+                    "",
+                    f"sevenzip_worker failed to start: {exc}",
+                    request_payload=job,
+                    process_failure={
+                        "failure_stage": "worker_start",
+                        "failure_kind": "process_start",
+                        "message": str(exc),
+                    },
+                )
         try:
             worker_path = self._worker_path()
             process = subprocess.Popen(
@@ -272,10 +311,27 @@ class SevenZipRunner:
                 startupinfo=startupinfo,
             )
         except (OSError, FileNotFoundError) as exc:
-            return subprocess.CompletedProcess([self.worker_path or "sevenzip_worker.exe"], -100, "", f"sevenzip_worker failed to start: {exc}")
+            return self._completed_process(
+                [self.worker_path or "sevenzip_worker.exe"],
+                -100,
+                "",
+                f"sevenzip_worker failed to start: {exc}",
+                request_payload=job,
+                process_failure={
+                    "failure_stage": "worker_start",
+                    "failure_kind": "process_start",
+                    "message": str(exc),
+                },
+            )
 
         stdout, stderr = self._communicate_observed_worker(process, payload, runtime_scheduler, task)
-        return subprocess.CompletedProcess([self.worker_path or "sevenzip_worker.exe"], process.returncode, stdout, stderr)
+        return self._completed_process(
+            [self.worker_path or "sevenzip_worker.exe"],
+            process.returncode,
+            stdout,
+            stderr,
+            request_payload=job,
+        )
 
     def _persistent_workers_enabled(self) -> bool:
         return bool(self.process_config.get("persistent_workers", True))
@@ -292,20 +348,49 @@ class SevenZipRunner:
         startupinfo,
         runtime_scheduler: Any,
         task: ArchiveTask,
+        job: dict,
     ) -> subprocess.CompletedProcess:
         try:
             worker = self._pool().acquire(startupinfo)
         except (OSError, FileNotFoundError, RuntimeError) as exc:
-            return subprocess.CompletedProcess([self.worker_path or "sevenzip_worker.exe"], -100, "", f"sevenzip_worker failed to start: {exc}")
+            return self._completed_process(
+                [self.worker_path or "sevenzip_worker.exe"],
+                -100,
+                "",
+                f"sevenzip_worker failed to start: {exc}",
+                request_payload=job,
+                process_failure={
+                    "failure_stage": "worker_start",
+                    "failure_kind": "process_start",
+                    "message": str(exc),
+                },
+            )
 
         reusable = False
         try:
             worker.send(payload)
             stdout, stderr, returncode, reusable = self._read_persistent_worker_result(worker, runtime_scheduler, task)
-            return subprocess.CompletedProcess([worker.worker_path, "--persistent"], returncode, stdout, stderr)
+            return self._completed_process(
+                [worker.worker_path, "--persistent"],
+                returncode,
+                stdout,
+                stderr,
+                request_payload=job,
+            )
         except Exception as exc:
             worker.close()
-            return subprocess.CompletedProcess([self.worker_path or "sevenzip_worker.exe"], -100, "", f"sevenzip_worker communication failed: {exc}")
+            return self._completed_process(
+                [self.worker_path or "sevenzip_worker.exe"],
+                -100,
+                "",
+                f"sevenzip_worker communication failed: {exc}",
+                request_payload=job,
+                process_failure={
+                    "failure_stage": "worker_communication",
+                    "failure_kind": "process_io",
+                    "message": str(exc),
+                },
+            )
         finally:
             self._pool().release(worker, reusable=reusable)
 
@@ -427,7 +512,7 @@ class SevenZipRunner:
         runtime_scheduler: Any,
         task: ArchiveTask,
     ) -> tuple[str, str]:
-        return self._communicate_observed_process(process, runtime_scheduler, task)
+        return self._communicate_observed_process(process, "", runtime_scheduler, task)
 
     def _communicate_observed_process(
         self,

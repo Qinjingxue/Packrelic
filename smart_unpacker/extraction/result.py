@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 
 @dataclass
@@ -11,3 +11,4 @@ class ExtractionResult:
     error: str = ""
     password_used: Optional[str] = None
     selected_codepage: Optional[str] = None
+    diagnostics: dict[str, Any] = field(default_factory=dict)

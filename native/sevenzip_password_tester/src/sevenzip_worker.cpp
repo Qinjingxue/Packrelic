@@ -5,10 +5,13 @@
 #endif
 
 #include <algorithm>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include "internal/sevenzip_status.hpp"
 
 namespace {
 
@@ -436,6 +439,118 @@ std::string status_to_string(smart_unpacker::sevenzip::PasswordTestStatus status
     return smart_unpacker::sevenzip::status_name(status);
 }
 
+std::string hresult_hex(int value) {
+    std::ostringstream stream;
+    stream << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0')
+           << static_cast<unsigned int>(value);
+    return stream.str();
+}
+
+std::string input_trace_json(const smart_unpacker::sevenzip::ExtractInputTrace& trace) {
+    return std::string("{") +
+        "\"mode\":\"" + json_escape(wide_to_utf8(trace.mode)) +
+        "\",\"virtual_size\":" + std::to_string(trace.virtual_size) +
+        ",\"position\":" + std::to_string(trace.position) +
+        ",\"max_position_seen\":" + std::to_string(trace.max_position_seen) +
+        ",\"total_bytes_returned\":" + std::to_string(trace.total_bytes_returned) +
+        ",\"read_error\":" + std::string(trace.read_error ? "true" : "false") +
+        ",\"last_hresult\":" + std::to_string(trace.last_hresult) +
+        ",\"last_hresult_hex\":\"" + hresult_hex(trace.last_hresult) +
+        "\",\"last_win32_error\":" + std::to_string(trace.last_win32_error) +
+        ",\"last_read\":{\"virtual_offset\":" + std::to_string(trace.last_read_virtual_offset) +
+        ",\"source_path\":\"" + json_escape(wide_to_utf8(trace.last_source_path)) +
+        "\",\"source_offset\":" + std::to_string(trace.last_read_source_offset) +
+        ",\"range_index\":" + std::to_string(trace.last_range_index) +
+        ",\"requested\":" + std::to_string(trace.last_read_requested) +
+        ",\"returned\":" + std::to_string(trace.last_read_returned) +
+        "},\"last_seek\":{\"origin\":" + std::to_string(trace.last_seek_origin) +
+        ",\"offset\":" + std::to_string(trace.last_seek_offset) +
+        ",\"new_position\":" + std::to_string(trace.last_seek_new_position) +
+        "}}";
+}
+
+std::string output_item_traces_json(const std::vector<smart_unpacker::sevenzip::ExtractOutputItemTrace>& items) {
+    std::string out = "[";
+    for (std::size_t index = 0; index < items.size(); ++index) {
+        const auto& item = items[index];
+        if (index) {
+            out += ",";
+        }
+        out += "{\"index\":" + std::to_string(item.index) +
+            ",\"path\":\"" + json_escape(wide_to_utf8(item.path)) +
+            "\",\"is_dir\":" + std::string(item.is_dir ? "true" : "false") +
+            ",\"bytes_written\":" + std::to_string(item.bytes_written) +
+            ",\"operation_result\":" + std::to_string(item.operation_result) +
+            ",\"operation_result_name\":\"" + json_escape(smart_unpacker::sevenzip::operation_result_name(item.operation_result)) +
+            "\",\"hresult\":" + std::to_string(item.hresult) +
+            ",\"hresult_hex\":\"" + hresult_hex(item.hresult) +
+            "\",\"win32_error\":" + std::to_string(item.win32_error) +
+            ",\"done\":" + std::string(item.done ? "true" : "false") +
+            ",\"failed\":" + std::string(item.failed ? "true" : "false") +
+            "}";
+    }
+    out += "]";
+    return out;
+}
+
+std::string output_trace_json(const smart_unpacker::sevenzip::ExtractOutputTrace& trace) {
+    return std::string("{") +
+        "\"total_bytes_written\":" + std::to_string(trace.total_bytes_written) +
+        ",\"current_item_index\":" + std::to_string(trace.current_item_index) +
+        ",\"current_item_path\":\"" + json_escape(wide_to_utf8(trace.current_item_path)) +
+        "\",\"current_item_bytes_written\":" + std::to_string(trace.current_item_bytes_written) +
+        ",\"last_write_size\":" + std::to_string(trace.last_write_size) +
+        ",\"last_hresult\":" + std::to_string(trace.last_hresult) +
+        ",\"last_hresult_hex\":\"" + hresult_hex(trace.last_hresult) +
+        "\",\"last_win32_error\":" + std::to_string(trace.last_win32_error) +
+        ",\"items\":" + output_item_traces_json(trace.items) +
+        "}";
+}
+
+std::string handler_attempts_json(const std::vector<smart_unpacker::sevenzip::ExtractHandlerAttempt>& attempts) {
+    std::string out = "[";
+    for (std::size_t index = 0; index < attempts.size(); ++index) {
+        const auto& attempt = attempts[index];
+        if (index) {
+            out += ",";
+        }
+        out += "{\"format\":\"" + json_escape(wide_to_utf8(attempt.format)) +
+            "\",\"created\":" + std::string(attempt.created ? "true" : "false") +
+            ",\"opened\":" + std::string(attempt.opened ? "true" : "false") +
+            ",\"create_hresult\":" + std::to_string(attempt.create_hresult) +
+            ",\"create_hresult_hex\":\"" + hresult_hex(attempt.create_hresult) +
+            "\",\"open_hresult\":" + std::to_string(attempt.open_hresult) +
+            ",\"open_hresult_hex\":\"" + hresult_hex(attempt.open_hresult) + "\"}";
+    }
+    out += "]";
+    return out;
+}
+
+std::string failed_item_json(const smart_unpacker::sevenzip::ExtractArchiveResult& result) {
+    return std::string("{") +
+        "\"index\":" + std::to_string(result.failed_item_index) +
+        ",\"path\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
+        "\",\"bytes_written\":" + std::to_string(result.failed_item_bytes_written) +
+        ",\"operation_result\":" + std::to_string(result.operation_result) +
+        ",\"operation_result_name\":\"" + json_escape(smart_unpacker::sevenzip::operation_result_name(result.operation_result)) +
+        "\"}";
+}
+
+std::string diagnostics_json(const smart_unpacker::sevenzip::ExtractArchiveResult& result) {
+    return std::string("{") +
+        "\"failure_stage\":\"" + json_escape(result.failure_stage) +
+        "\",\"failure_kind\":\"" + json_escape(result.failure_kind) +
+        "\",\"hresult\":" + std::to_string(result.hresult) +
+        ",\"hresult_hex\":\"" + hresult_hex(result.hresult) +
+        "\",\"operation_result\":" + std::to_string(result.operation_result) +
+        ",\"operation_result_name\":\"" + json_escape(smart_unpacker::sevenzip::operation_result_name(result.operation_result)) +
+        "\",\"handler_attempts\":" + handler_attempts_json(result.handler_attempts) +
+        ",\"input_trace\":" + input_trace_json(result.input_trace) +
+        ",\"output_trace\":" + output_trace_json(result.output_trace) +
+        ",\"failed_item\":" + failed_item_json(result) +
+        "}";
+}
+
 }  // namespace
 
 int run_request(const std::string& request) {
@@ -484,11 +599,19 @@ int run_request(const std::string& request) {
         : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, progress);
 
     const bool ok = result.status == PasswordTestStatus::Ok && result.command_ok;
+    const std::string failure_fields = ok ? "" :
+        ",\"failure_stage\":\"" + json_escape(result.failure_stage) +
+        "\",\"failure_kind\":\"" + json_escape(result.failure_kind) +
+        "\",\"hresult\":" + std::to_string(result.hresult) +
+        ",\"hresult_hex\":\"" + hresult_hex(result.hresult) +
+        "\",\"diagnostics\":" + diagnostics_json(result);
     print_json_line(
         "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
         "\",\"status\":\"" + std::string(ok ? "ok" : "failed") +
         "\",\"native_status\":\"" + json_escape(status_to_string(result.status)) +
         "\",\"operation_result\":" + std::to_string(result.operation_result) +
+        ",\"operation_result_name\":\"" + json_escape(operation_result_name(result.operation_result)) +
+        "\"" +
         ",\"encrypted\":" + std::string(result.encrypted ? "true" : "false") +
         ",\"damaged\":" + std::string(result.damaged ? "true" : "false") +
         ",\"checksum_error\":" + std::string(result.checksum_error ? "true" : "false") +
@@ -502,7 +625,8 @@ int run_request(const std::string& request) {
         ",\"open_mode\":\"" + json_escape(wide_to_utf8(archive_input.open_mode)) +
         "\",\"archive_type\":\"" + json_escape(wide_to_utf8(result.archive_type)) +
         "\",\"failed_item\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
-        "\",\"message\":\"" + json_escape(result.message) + "\"}");
+        "\",\"message\":\"" + json_escape(result.message) + "\"" +
+        failure_fields + "}");
     return ok ? 0 : 1;
 }
 

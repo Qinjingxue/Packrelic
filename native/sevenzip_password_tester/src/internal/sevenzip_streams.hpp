@@ -36,11 +36,43 @@ class FileInStream final : public IInStream {
 
 public:
 
-    explicit FileInStream(const std::wstring& path)
+    explicit FileInStream(const std::wstring& path, ExtractInputTrace* trace = nullptr, std::wstring mode = L"file")
 
-        : handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        : path_(path),
 
-                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {}
+          trace_(trace),
+
+          handle_(CreateFileW(win32_extended_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {
+
+        if (trace_) {
+
+            trace_->mode = std::move(mode);
+
+            trace_->last_source_path = path_;
+
+            LARGE_INTEGER size{};
+
+            if (handle_ != INVALID_HANDLE_VALUE && GetFileSizeEx(handle_, &size)) {
+
+                trace_->virtual_size = static_cast<UInt64>(size.QuadPart);
+
+            } else if (handle_ == INVALID_HANDLE_VALUE) {
+
+                const DWORD error = GetLastError();
+
+                trace_->read_error = true;
+
+                trace_->last_hresult = HRESULT_FROM_WIN32(error);
+
+                trace_->last_win32_error = static_cast<int>(error);
+
+            }
+
+        }
+
+    }
 
     ~FileInStream() {
 
@@ -104,11 +136,59 @@ public:
 
         }
 
+        if (trace_) {
+
+            trace_->last_read_virtual_offset = position_;
+
+            trace_->last_read_source_offset = position_;
+
+            trace_->last_read_requested = size;
+
+            trace_->last_read_returned = 0;
+
+            trace_->last_source_path = path_;
+
+            trace_->last_range_index = 0;
+
+        }
+
         DWORD read = 0;
 
         if (!ReadFile(handle_, data, size, &read, nullptr)) {
 
-            return HRESULT_FROM_WIN32(GetLastError());
+            const DWORD error = GetLastError();
+
+            const HRESULT hr = HRESULT_FROM_WIN32(error);
+
+            if (trace_) {
+
+                trace_->read_error = true;
+
+                trace_->last_hresult = hr;
+
+                trace_->last_win32_error = static_cast<int>(error);
+
+            }
+
+            return hr;
+
+        }
+
+        position_ += read;
+
+        if (trace_) {
+
+            trace_->position = position_;
+
+            trace_->max_position_seen = std::max<UInt64>(trace_->max_position_seen, position_);
+
+            trace_->total_bytes_returned += read;
+
+            trace_->last_read_returned = read;
+
+            trace_->last_hresult = S_OK;
+
+            trace_->last_win32_error = 0;
 
         }
 
@@ -132,13 +212,49 @@ public:
 
         if (!SetFilePointerEx(handle_, distance, &new_pos, seekOrigin)) {
 
-            return HRESULT_FROM_WIN32(GetLastError());
+            const DWORD error = GetLastError();
+
+            const HRESULT hr = HRESULT_FROM_WIN32(error);
+
+            if (trace_) {
+
+                trace_->last_seek_offset = offset;
+
+                trace_->last_seek_origin = seekOrigin;
+
+                trace_->last_hresult = hr;
+
+                trace_->last_win32_error = static_cast<int>(error);
+
+            }
+
+            return hr;
+
+        }
+
+        position_ = static_cast<UInt64>(new_pos.QuadPart);
+
+        if (trace_) {
+
+            trace_->position = position_;
+
+            trace_->max_position_seen = std::max<UInt64>(trace_->max_position_seen, position_);
+
+            trace_->last_seek_offset = offset;
+
+            trace_->last_seek_origin = seekOrigin;
+
+            trace_->last_seek_new_position = position_;
+
+            trace_->last_hresult = S_OK;
+
+            trace_->last_win32_error = 0;
 
         }
 
         if (newPosition) {
 
-            *newPosition = static_cast<UInt64>(new_pos.QuadPart);
+            *newPosition = position_;
 
         }
 
@@ -152,7 +268,13 @@ private:
 
     LONG refs_ = 1;
 
+    std::wstring path_;
+
+    ExtractInputTrace* trace_ = nullptr;
+
     HANDLE handle_ = INVALID_HANDLE_VALUE;
+
+    UInt64 position_ = 0;
 
 };
 
@@ -162,7 +284,9 @@ class MultiFileInStream final : public IInStream {
 
 public:
 
-    explicit MultiFileInStream(std::vector<std::wstring> paths) : paths_(std::move(paths)) {
+    explicit MultiFileInStream(std::vector<std::wstring> paths, ExtractInputTrace* trace = nullptr)
+
+        : paths_(std::move(paths)), trace_(trace) {
 
         UInt64 total = 0;
 
@@ -193,6 +317,14 @@ public:
         total_size_ = total;
 
         valid_ = valid_ && !paths_.empty();
+
+        if (trace_) {
+
+            trace_->mode = L"multi_file";
+
+            trace_->virtual_size = total_size_;
+
+        }
 
     }
 
@@ -284,6 +416,22 @@ public:
 
             }
 
+            if (trace_) {
+
+                trace_->last_read_virtual_offset = position_;
+
+                trace_->last_read_source_offset = part_offset;
+
+                trace_->last_read_requested = want;
+
+                trace_->last_read_returned = 0;
+
+                trace_->last_source_path = paths_[index];
+
+                trace_->last_range_index = static_cast<UInt32>(index);
+
+            }
+
 
 
             HANDLE handle = CreateFileW(win32_extended_path(paths_[index]).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -292,7 +440,21 @@ public:
 
             if (handle == INVALID_HANDLE_VALUE) {
 
-                return HRESULT_FROM_WIN32(GetLastError());
+                const DWORD error = GetLastError();
+
+                const HRESULT hr = HRESULT_FROM_WIN32(error);
+
+                if (trace_) {
+
+                    trace_->read_error = true;
+
+                    trace_->last_hresult = hr;
+
+                    trace_->last_win32_error = static_cast<int>(error);
+
+                }
+
+                return hr;
 
             }
 
@@ -306,7 +468,19 @@ public:
 
                 CloseHandle(handle);
 
-                return HRESULT_FROM_WIN32(error);
+                const HRESULT hr = HRESULT_FROM_WIN32(error);
+
+                if (trace_) {
+
+                    trace_->read_error = true;
+
+                    trace_->last_hresult = hr;
+
+                    trace_->last_win32_error = static_cast<int>(error);
+
+                }
+
+                return hr;
 
             }
 
@@ -320,7 +494,19 @@ public:
 
             if (!ok) {
 
-                return HRESULT_FROM_WIN32(error);
+                const HRESULT hr = HRESULT_FROM_WIN32(error);
+
+                if (trace_) {
+
+                    trace_->read_error = true;
+
+                    trace_->last_hresult = hr;
+
+                    trace_->last_win32_error = static_cast<int>(error);
+
+                }
+
+                return hr;
 
             }
 
@@ -333,6 +519,22 @@ public:
             total_read += read;
 
             position_ += read;
+
+            if (trace_) {
+
+                trace_->position = position_;
+
+                trace_->max_position_seen = std::max<UInt64>(trace_->max_position_seen, position_);
+
+                trace_->total_bytes_returned += read;
+
+                trace_->last_read_returned = read;
+
+                trace_->last_hresult = S_OK;
+
+                trace_->last_win32_error = 0;
+
+            }
 
         }
 
@@ -369,6 +571,24 @@ public:
         }
 
         position_ = static_cast<UInt64>(next);
+
+        if (trace_) {
+
+            trace_->position = position_;
+
+            trace_->max_position_seen = std::max<UInt64>(trace_->max_position_seen, position_);
+
+            trace_->last_seek_offset = offset;
+
+            trace_->last_seek_origin = seekOrigin;
+
+            trace_->last_seek_new_position = position_;
+
+            trace_->last_hresult = S_OK;
+
+            trace_->last_win32_error = 0;
+
+        }
 
         if (newPosition) {
 
@@ -414,6 +634,8 @@ private:
 
     UInt64 position_ = 0;
 
+    ExtractInputTrace* trace_ = nullptr;
+
     bool valid_ = true;
 
 };
@@ -438,7 +660,9 @@ class MultiRangeInStream final : public IInStream {
 
 public:
 
-    explicit MultiRangeInStream(const std::vector<ExtractInputRange>& ranges) {
+    explicit MultiRangeInStream(const std::vector<ExtractInputRange>& ranges, ExtractInputTrace* trace = nullptr)
+
+        : trace_(trace) {
 
         UInt64 virtual_offset = 0;
 
@@ -495,6 +719,14 @@ public:
         total_size_ = virtual_offset;
 
         valid_ = valid_ && !ranges_.empty();
+
+        if (trace_) {
+
+            trace_->mode = ranges_.size() == 1 ? L"file_range" : L"concat_ranges";
+
+            trace_->virtual_size = total_size_;
+
+        }
 
     }
 
@@ -578,13 +810,43 @@ public:
 
             const UInt32 want = static_cast<UInt32>(std::min<UInt64>(size - total_read, remaining));
 
+            if (trace_) {
+
+                trace_->last_read_virtual_offset = position_;
+
+                trace_->last_read_source_offset = range->start + offset_in_range;
+
+                trace_->last_read_requested = want;
+
+                trace_->last_read_returned = 0;
+
+                trace_->last_source_path = range->path;
+
+                trace_->last_range_index = range_index(position_);
+
+            }
+
             HANDLE handle = CreateFileW(win32_extended_path(range->path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 
                                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
             if (handle == INVALID_HANDLE_VALUE) {
 
-                return HRESULT_FROM_WIN32(GetLastError());
+                const DWORD error = GetLastError();
+
+                const HRESULT hr = HRESULT_FROM_WIN32(error);
+
+                if (trace_) {
+
+                    trace_->read_error = true;
+
+                    trace_->last_hresult = hr;
+
+                    trace_->last_win32_error = static_cast<int>(error);
+
+                }
+
+                return hr;
 
             }
 
@@ -598,7 +860,19 @@ public:
 
                 CloseHandle(handle);
 
-                return HRESULT_FROM_WIN32(error);
+                const HRESULT hr = HRESULT_FROM_WIN32(error);
+
+                if (trace_) {
+
+                    trace_->read_error = true;
+
+                    trace_->last_hresult = hr;
+
+                    trace_->last_win32_error = static_cast<int>(error);
+
+                }
+
+                return hr;
 
             }
 
@@ -612,7 +886,19 @@ public:
 
             if (!ok) {
 
-                return HRESULT_FROM_WIN32(error);
+                const HRESULT hr = HRESULT_FROM_WIN32(error);
+
+                if (trace_) {
+
+                    trace_->read_error = true;
+
+                    trace_->last_hresult = hr;
+
+                    trace_->last_win32_error = static_cast<int>(error);
+
+                }
+
+                return hr;
 
             }
 
@@ -625,6 +911,22 @@ public:
             total_read += read;
 
             position_ += read;
+
+            if (trace_) {
+
+                trace_->position = position_;
+
+                trace_->max_position_seen = std::max<UInt64>(trace_->max_position_seen, position_);
+
+                trace_->total_bytes_returned += read;
+
+                trace_->last_read_returned = read;
+
+                trace_->last_hresult = S_OK;
+
+                trace_->last_win32_error = 0;
+
+            }
 
         }
 
@@ -662,6 +964,24 @@ public:
 
         position_ = static_cast<UInt64>(next);
 
+        if (trace_) {
+
+            trace_->position = position_;
+
+            trace_->max_position_seen = std::max<UInt64>(trace_->max_position_seen, position_);
+
+            trace_->last_seek_offset = offset;
+
+            trace_->last_seek_origin = seekOrigin;
+
+            trace_->last_seek_new_position = position_;
+
+            trace_->last_hresult = S_OK;
+
+            trace_->last_win32_error = 0;
+
+        }
+
         if (newPosition) {
 
             *newPosition = position_;
@@ -692,6 +1012,24 @@ private:
 
     }
 
+    UInt32 range_index(UInt64 position) const {
+
+        for (std::size_t index = 0; index < ranges_.size(); ++index) {
+
+            const auto& range = ranges_[index];
+
+            if (position >= range.virtual_offset && position < range.virtual_offset + range.length) {
+
+                return static_cast<UInt32>(index);
+
+            }
+
+        }
+
+        return 0;
+
+    }
+
 
 
     LONG refs_ = 1;
@@ -701,6 +1039,8 @@ private:
     UInt64 total_size_ = 0;
 
     UInt64 position_ = 0;
+
+    ExtractInputTrace* trace_ = nullptr;
 
     bool valid_ = true;
 
@@ -716,7 +1056,9 @@ ComPtr<IInStream> open_archive_stream(
 
     const std::vector<std::wstring>& part_paths,
 
-    bool& opened
+    bool& opened,
+
+    ExtractInputTrace* trace = nullptr
 
 );
 
@@ -731,4 +1073,3 @@ std::wstring callback_archive_path(const std::wstring& archive_path, const std::
 
 
 }  // namespace smart_unpacker::sevenzip
-

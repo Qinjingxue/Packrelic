@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import pytest
@@ -6,7 +7,7 @@ from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor, Archi
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
-from smart_unpacker.support.resources import get_sevenzip_worker_path
+from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 from tests.helpers.tool_config import get_test_tools
 
 
@@ -25,6 +26,13 @@ def _require_7z_or_skip():
     return seven_zip
 
 
+def _require_7z_dll_or_skip():
+    try:
+        return get_7z_dll_path()
+    except Exception as exc:
+        pytest.skip(f"7z.dll is required: {exc}")
+
+
 def _create_7z(tmp_path, name: str, text: str):
     seven_zip = _require_7z_or_skip()
     source = tmp_path / f"{name}.txt"
@@ -39,6 +47,106 @@ def _create_7z(tmp_path, name: str, text: str):
     if result.returncode != 0:
         raise RuntimeError(f"7z failed:\n{result.stdout}\n{result.stderr}")
     return archive, source.name
+
+
+def _create_7z_with_nested_file(tmp_path):
+    seven_zip = _require_7z_or_skip()
+    nested_dir = tmp_path / "conflict"
+    nested_dir.mkdir()
+    child = nested_dir / "child.txt"
+    child.write_text("nested payload", encoding="utf-8")
+    archive = tmp_path / "nested.7z"
+    result = subprocess.run(
+        [str(seven_zip), "a", str(archive), "conflict\\child.txt", "-mx=0", "-y"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"7z failed:\n{result.stdout}\n{result.stderr}")
+    return archive
+
+
+def test_worker_failed_result_includes_diagnostics(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    missing = tmp_path / "missing.7z"
+    payload = {
+        "job_id": "diagnostics",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(missing),
+        "output_dir": str(tmp_path / "out"),
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line.strip().startswith("{")]
+    worker_result = next(item for item in lines if item.get("type") == "result")
+
+    assert result.returncode != 0
+    assert worker_result["status"] == "failed"
+    assert worker_result["failure_stage"] == "input_open"
+    assert worker_result["failure_kind"] == "input_stream"
+    assert worker_result["operation_result_name"] == "ok"
+    assert worker_result["diagnostics"]["input_trace"]["read_error"] is True
+    assert worker_result["diagnostics"]["input_trace"]["last_win32_error"] != 0
+    assert "handler_attempts" in worker_result["diagnostics"]
+    assert "output_trace" in worker_result["diagnostics"]
+
+
+def test_worker_output_trace_includes_per_item_failure(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive = _create_7z_with_nested_file(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "conflict").write_text("blocks directory creation", encoding="utf-8")
+    payload = {
+        "job_id": "output-trace",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(out_dir),
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line.strip().startswith("{")]
+    worker_result = next(item for item in lines if item.get("type") == "result")
+    output_items = worker_result["diagnostics"]["output_trace"]["items"]
+    failed_items = [item for item in output_items if item["failed"]]
+
+    assert result.returncode != 0
+    assert worker_result["failure_stage"] == "output_write"
+    assert failed_items
+    assert failed_items[-1]["bytes_written"] == 0
+    assert "conflict" in failed_items[-1]["path"].replace("\\", "/")
+
+
+def test_extraction_scheduler_saves_process_failure_diagnostics(tmp_path):
+    archive = tmp_path / "sample.bin"
+    archive.write_bytes(b"not an archive")
+    scheduler = ExtractionScheduler(max_retries=1)
+    scheduler.sevenzip_runner.worker_path = str(tmp_path / "missing_worker.exe")
+
+    try:
+        result = scheduler.extract(_task(archive), str(tmp_path / "out"))
+    finally:
+        scheduler.close()
+
+    assert result.success is False
+    assert result.diagnostics["process_failure"]["failure_stage"] == "worker_start"
+    assert result.diagnostics["process_failure"]["failure_kind"] == "process_start"
+    assert result.diagnostics["repro"]["request"]["archive_path"] == str(archive)
 
 
 def _task(path, archive_input=None):
@@ -74,6 +182,19 @@ def test_extraction_scheduler_uses_worker_for_file_range(tmp_path):
 
     assert result.success is True
     assert (tmp_path / "out" / filename).read_text(encoding="utf-8") == "range payload"
+
+
+def test_extraction_scheduler_saves_worker_diagnostics_on_failure(tmp_path):
+    _require_worker_or_skip()
+    _require_7z_dll_or_skip()
+    missing = tmp_path / "missing.7z"
+    result = ExtractionScheduler(max_retries=1).extract(_task(missing), str(tmp_path / "out"))
+
+    assert result.success is False
+    assert result.diagnostics["result"]["failure_stage"] == "input_open"
+    assert result.diagnostics["result"]["failure_kind"] == "input_stream"
+    assert result.diagnostics["result"]["diagnostics"]["input_trace"]["read_error"] is True
+    assert result.diagnostics["repro"]["request"]["archive_path"] == str(missing)
 
 
 def test_extraction_scheduler_uses_worker_for_concat_ranges(tmp_path):

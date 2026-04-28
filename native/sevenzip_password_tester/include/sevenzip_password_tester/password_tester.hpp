@@ -33,6 +33,57 @@ struct ExtractProgressEvent {
     std::wstring item_path;
 };
 
+struct ExtractHandlerAttempt {
+    std::wstring format;
+    int create_hresult = 0;
+    int open_hresult = 0;
+    bool created = false;
+    bool opened = false;
+};
+
+struct ExtractInputTrace {
+    std::wstring mode;
+    unsigned long long virtual_size = 0;
+    unsigned long long position = 0;
+    unsigned long long max_position_seen = 0;
+    unsigned long long total_bytes_returned = 0;
+    unsigned long long last_read_virtual_offset = 0;
+    unsigned long long last_read_source_offset = 0;
+    unsigned long long last_seek_new_position = 0;
+    unsigned int last_read_requested = 0;
+    unsigned int last_read_returned = 0;
+    unsigned int last_seek_origin = 0;
+    unsigned int last_range_index = 0;
+    long long last_seek_offset = 0;
+    int last_hresult = 0;
+    int last_win32_error = 0;
+    bool read_error = false;
+    std::wstring last_source_path;
+};
+
+struct ExtractOutputItemTrace {
+    unsigned int index = 0;
+    unsigned long long bytes_written = 0;
+    int operation_result = 0;
+    int hresult = 0;
+    int win32_error = 0;
+    bool is_dir = false;
+    bool done = false;
+    bool failed = false;
+    std::wstring path;
+};
+
+struct ExtractOutputTrace {
+    unsigned long long total_bytes_written = 0;
+    unsigned long long current_item_bytes_written = 0;
+    unsigned long long last_write_size = 0;
+    unsigned int current_item_index = 0;
+    int last_hresult = 0;
+    int last_win32_error = 0;
+    std::wstring current_item_path;
+    std::vector<ExtractOutputItemTrace> items;
+};
+
 struct ExtractArchiveResult {
     PasswordTestStatus status = PasswordTestStatus::BackendUnavailable;
     bool backend_available = false;
@@ -48,9 +99,17 @@ struct ExtractArchiveResult {
     unsigned int files_written = 0;
     unsigned int dirs_written = 0;
     unsigned long long bytes_written = 0;
+    unsigned int failed_item_index = 0;
+    unsigned long long failed_item_bytes_written = 0;
+    int hresult = 0;
     std::wstring archive_type;
     std::wstring failed_item;
+    std::string failure_stage;
+    std::string failure_kind;
     std::string message;
+    ExtractInputTrace input_trace;
+    ExtractOutputTrace output_trace;
+    std::vector<ExtractHandlerAttempt> handler_attempts;
 };
 
 using ExtractProgressCallback = std::function<void(const ExtractProgressEvent&)>;

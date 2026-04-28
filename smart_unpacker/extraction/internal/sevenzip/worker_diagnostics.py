@@ -1,0 +1,153 @@
+import json
+import subprocess
+from copy import deepcopy
+from typing import Any
+
+
+_STDIO_TAIL_LINES = 40
+
+
+def attach_worker_diagnostics(
+    completed: subprocess.CompletedProcess,
+    *,
+    request_payload: dict[str, Any] | None = None,
+    process_failure: dict[str, Any] | None = None,
+) -> subprocess.CompletedProcess:
+    completed.worker_diagnostics = build_worker_diagnostics(
+        stdout=str(completed.stdout or ""),
+        stderr=str(completed.stderr or ""),
+        returncode=completed.returncode,
+        args=completed.args,
+        request_payload=request_payload,
+        process_failure=process_failure,
+    )
+    return completed
+
+
+def build_worker_diagnostics(
+    *,
+    stdout: str,
+    stderr: str,
+    returncode: int | None,
+    args: Any = None,
+    request_payload: dict[str, Any] | None = None,
+    process_failure: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    events = _json_events(stdout)
+    result = next((event for event in reversed(events) if event.get("type") == "result"), {})
+    progress_events = [event for event in events if event.get("type") == "progress"]
+    diagnostics: dict[str, Any] = {
+        "source": "sevenzip_worker",
+        "returncode": returncode,
+        "result": result,
+        "progress_events": progress_events,
+        "last_progress_event": progress_events[-1] if progress_events else {},
+        "process": {
+            "args": list(args) if isinstance(args, (list, tuple)) else args,
+            "stderr_tail": _tail_lines(stderr),
+            "stdout_tail": _tail_lines(stdout),
+        },
+        "repro": {
+            "args": list(args) if isinstance(args, (list, tuple)) else args,
+            "request": _redact_request(request_payload),
+        },
+    }
+    failure = process_failure or _infer_process_failure(returncode, result, stderr)
+    if failure:
+        diagnostics["process_failure"] = failure
+        diagnostics.setdefault("failure_stage", failure.get("failure_stage", "worker_process"))
+        diagnostics.setdefault("failure_kind", failure.get("failure_kind", "process"))
+    elif result:
+        if result.get("failure_stage"):
+            diagnostics["failure_stage"] = result.get("failure_stage")
+        if result.get("failure_kind"):
+            diagnostics["failure_kind"] = result.get("failure_kind")
+    return diagnostics
+
+
+def worker_result_payload(completed_or_text: Any) -> dict[str, Any]:
+    diagnostics = getattr(completed_or_text, "worker_diagnostics", None)
+    if isinstance(diagnostics, dict):
+        result = diagnostics.get("result")
+        if isinstance(result, dict) and result:
+            return result
+    text = completed_or_text if isinstance(completed_or_text, str) else ""
+    if not text and completed_or_text is not None:
+        text = f"{getattr(completed_or_text, 'stdout', '')}\n{getattr(completed_or_text, 'stderr', '')}"
+    for event in reversed(_json_events(str(text or ""))):
+        if event.get("type") == "result":
+            return event
+    return {}
+
+
+def _json_events(text: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            events.append(payload)
+    return events
+
+
+def _tail_lines(text: str, limit: int = _STDIO_TAIL_LINES) -> list[str]:
+    lines = (text or "").splitlines()
+    return lines[-limit:]
+
+
+def _infer_process_failure(returncode: int | None, result: dict[str, Any], stderr: str) -> dict[str, Any]:
+    if result:
+        return {}
+    message = (stderr or "").strip()
+    if returncode == -100:
+        return {
+            "failure_stage": "worker_start",
+            "failure_kind": "process_start",
+            "message": message or "sevenzip_worker failed to start",
+        }
+    if returncode == -101:
+        return {
+            "failure_stage": "worker_timeout",
+            "failure_kind": "process_timeout",
+            "message": message or "sevenzip_worker timed out",
+        }
+    if returncode == -102:
+        return {
+            "failure_stage": "worker_no_progress",
+            "failure_kind": "process_stall",
+            "message": message or "sevenzip_worker made no observable progress",
+        }
+    if returncode is not None and returncode < 0:
+        return {
+            "failure_stage": "worker_terminated",
+            "failure_kind": "process_signal",
+            "message": message or f"sevenzip_worker terminated with code {returncode}",
+        }
+    if returncode not in (None, 0):
+        return {
+            "failure_stage": "worker_exit",
+            "failure_kind": "process_exit",
+            "message": message or f"sevenzip_worker exited with code {returncode}",
+        }
+    return {}
+
+
+def _redact_request(request_payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(request_payload, dict):
+        return {}
+    payload = deepcopy(request_payload)
+    if "password" in payload:
+        password = payload.get("password")
+        payload["password_present"] = bool(password)
+        payload["password_length"] = len(str(password)) if password is not None else 0
+        payload["password"] = "<redacted>" if password else ""
+    if "passwords" in payload:
+        passwords = payload.get("passwords")
+        payload["password_count"] = len(passwords) if isinstance(passwords, list) else 0
+        payload["passwords"] = "<redacted>"
+    return payload

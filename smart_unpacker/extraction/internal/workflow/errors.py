@@ -1,8 +1,8 @@
 import os
-import json
 import subprocess
 from typing import Optional
 
+from smart_unpacker.extraction.internal.sevenzip.worker_diagnostics import worker_result_payload
 from smart_unpacker.support.archive_error_signals import (
     has_archive_damage_signals,
     has_definite_wrong_password,
@@ -21,7 +21,7 @@ def should_retry_extract_failure(
     is_split_archive: bool = False,
 ) -> bool:
     err_lower = _norm(err_text)
-    worker_result = _worker_result_payload(err_text)
+    worker_result = worker_result_payload(run_result) or worker_result_payload(err_text)
     if worker_result:
         if worker_result.get("wrong_password") or worker_result.get("damaged") or worker_result.get("missing_volume"):
             return False
@@ -58,7 +58,7 @@ def classify_extract_error(
     archive_name = os.path.basename(archive or "").lower()
     is_split_archive = is_split_archive or looks_like_split_archive_name(archive_name)
     err_lower = _norm(err_text)
-    worker_result = _worker_result_payload(err_text)
+    worker_result = worker_result_payload(run_result) or worker_result_payload(err_text)
     if worker_result:
         if worker_result.get("missing_volume"):
             return "分卷缺失或不完整"
@@ -120,17 +120,3 @@ def classify_extract_error(
             error_msg = f"7z进程异常退出 (退出码 {code})"
 
     return error_msg
-
-
-def _worker_result_payload(text: str) -> dict:
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and payload.get("type") == "result":
-            return payload
-    return {}

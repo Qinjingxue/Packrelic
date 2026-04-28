@@ -16,7 +16,9 @@ ComPtr<IInStream> open_archive_stream(
 
     const std::vector<std::wstring>& part_paths,
 
-    bool& opened
+    bool& opened,
+
+    ExtractInputTrace* trace
 
 ) {
 
@@ -28,7 +30,7 @@ ComPtr<IInStream> open_archive_stream(
 
         if (!volumes.empty() && is_sfx_path(volumes.front())) {
 
-            auto* stream = new FileInStream(volumes.front());
+            auto* stream = new FileInStream(volumes.front(), trace, L"sfx_file");
 
             opened = stream->is_open();
 
@@ -38,7 +40,7 @@ ComPtr<IInStream> open_archive_stream(
 
         if (volumes.size() > 1) {
 
-            auto* stream = new MultiFileInStream(std::move(volumes));
+            auto* stream = new MultiFileInStream(std::move(volumes), trace);
 
             opened = stream->is_open();
 
@@ -48,7 +50,7 @@ ComPtr<IInStream> open_archive_stream(
 
         if (volumes.size() == 1) {
 
-            auto* stream = new FileInStream(volumes.front());
+            auto* stream = new FileInStream(volumes.front(), trace, L"file");
 
             opened = stream->is_open();
 
@@ -56,7 +58,7 @@ ComPtr<IInStream> open_archive_stream(
 
         }
 
-        auto* stream = new FileInStream(archive_path);
+        auto* stream = new FileInStream(archive_path, trace, L"file");
 
         opened = stream->is_open();
 
@@ -76,7 +78,7 @@ ComPtr<IInStream> open_archive_stream(
 
     if (paths.size() > 1) {
 
-        auto* stream = new MultiFileInStream(std::move(paths));
+        auto* stream = new MultiFileInStream(std::move(paths), trace);
 
         opened = stream->is_open();
 
@@ -86,7 +88,7 @@ ComPtr<IInStream> open_archive_stream(
 
 
 
-    auto* stream = new FileInStream(archive_path);
+    auto* stream = new FileInStream(archive_path, trace, L"file");
 
     opened = stream->is_open();
 
@@ -121,4 +123,3 @@ std::wstring callback_archive_path(const std::wstring& archive_path, const std::
 
 
 }  // namespace smart_unpacker::sevenzip
-
