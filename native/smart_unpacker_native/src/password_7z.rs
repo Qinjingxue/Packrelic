@@ -2,8 +2,7 @@ use crate::password_input::{parse_ranges, VirtualRangeReader};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use sevenz_rust2::{Archive, Error as SevenZipError, Password};
-use std::fs::File;
-use std::io::{Read, Seek};
+use std::io::{Cursor, Read, Seek};
 
 const SEVEN_Z_SIGNATURE: &[u8] = b"7z\xbc\xaf\x27\x1c";
 
@@ -18,18 +17,19 @@ pub(crate) fn seven_zip_fast_verify_passwords(
         .map(|item| item.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
 
-    let Ok(mut probe_file) = File::open(&archive_path) else {
-        return status(py, "damaged", -1, 0, "7z archive could not be opened");
+    let file_data = match std::fs::read(&archive_path) {
+        Ok(data) => data,
+        Err(_) => return status(py, "damaged", -1, 0, "7z archive could not be opened"),
     };
+
     let mut signature = [0u8; 6];
-    if std::io::Read::read_exact(&mut probe_file, &mut signature).is_err() {
-        return status(py, "damaged", -1, 0, "7z archive is too small");
-    }
-    if signature != SEVEN_Z_SIGNATURE {
+    if Cursor::new(&file_data).read_exact(&mut signature).is_err()
+        || signature != SEVEN_Z_SIGNATURE
+    {
         return status(py, "unsupported_method", -1, 0, "7z signature not found");
     }
 
-    match read_archive_header(&archive_path, "") {
+    match read_archive_header_from_reader(Cursor::new(&file_data), "") {
         HeaderRead::Ok => {
             return status(py, "unsupported_method", -1, 0, "7z header is readable without password");
         }
@@ -43,7 +43,7 @@ pub(crate) fn seven_zip_fast_verify_passwords(
     }
 
     for (index, password) in candidates.iter().enumerate() {
-        match read_archive_header(&archive_path, password) {
+        match read_archive_header_from_reader(Cursor::new(&file_data), password) {
             HeaderRead::Ok => {
                 return status(py, "match", index as i32, (index + 1) as i32, "7z encrypted header opened");
             }
@@ -117,13 +117,6 @@ enum HeaderRead {
     WrongPasswordOrPasswordRequired,
     Unsupported(String),
     Damaged(String),
-}
-
-fn read_archive_header(path: &str, password: &str) -> HeaderRead {
-    let Ok(mut file) = File::open(path) else {
-        return HeaderRead::Damaged("7z archive could not be opened".to_string());
-    };
-    read_archive_header_from_reader(&mut file, password)
 }
 
 fn read_archive_header_from_reader<R: Read + Seek>(mut reader: R, password: &str) -> HeaderRead {

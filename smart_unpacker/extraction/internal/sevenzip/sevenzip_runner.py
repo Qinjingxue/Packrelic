@@ -65,12 +65,18 @@ class _PersistentWorker:
             except Exception:
                 pass
         try:
-            self.process.wait(timeout=1.0)
-        except Exception:
+            self.process.wait(timeout=0.1)
+        except subprocess.TimeoutExpired:
             try:
-                self.process.kill()
+                self.process.terminate()
+                self.process.wait(timeout=0.5)
             except Exception:
-                pass
+                try:
+                    self.process.kill()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 
 class _PersistentWorkerPool:
