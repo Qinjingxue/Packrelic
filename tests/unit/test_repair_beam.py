@@ -1,3 +1,5 @@
+from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor
+from smart_unpacker.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from smart_unpacker.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
 from smart_unpacker.repair.candidate import CandidateValidation, RepairCandidate, RepairCandidateBatch
 
@@ -147,6 +149,37 @@ def test_repair_beam_materializes_only_assessment_window():
     assert round_result.states_out[0].source_input["path"] == "first.zip"
 
 
+def test_repair_beam_keeps_three_patch_plan_branches_virtual_without_copying_archive(tmp_path):
+    source = tmp_path / "broken.zip"
+    source.write_bytes(b"abcdef")
+    workspace = tmp_path / "repair-workspace"
+    workspace.mkdir()
+    calls = []
+    scheduler = _FakeLazyCandidateScheduler([
+        _lazy_patch_candidate("trim_tail", source, calls=calls, patch=PatchOperation(op="truncate", offset=5), workspace=workspace),
+        _lazy_patch_candidate("rewrite_byte", source, calls=calls, patch=PatchOperation.replace_bytes(offset=1, data=b"Z"), workspace=workspace),
+        _lazy_patch_candidate("append_marker", source, calls=calls, patch=PatchOperation.append_bytes(b"!"), workspace=workspace),
+    ])
+    loop = RepairBeamLoop(
+        scheduler,
+        beam_width=3,
+        max_analyze_candidates=3,
+        max_assess_candidates=3,
+        assess=lambda item: {"assessment_status": "partial", "decision_hint": "repair", "completeness": 0.5},
+    )
+
+    round_result = loop.expand_round([
+        RepairBeamState(source_input={"kind": "file", "path": str(source), "format_hint": "zip"}, format="zip", archive_key="broken")
+    ], round_index=1)
+
+    assert calls == ["trim_tail", "rewrite_byte", "append_marker"]
+    assert len(round_result.states_out) == 3
+    assert all(state.source_input["kind"] == "archive_state" for state in round_result.states_out)
+    assert all(state.archive_state["patches"] for state in round_result.states_out)
+    assert not list(workspace.iterdir())
+    assert source.read_bytes() == b"abcdef"
+
+
 class _FakeCandidateScheduler:
     def __init__(self, candidates):
         self.candidates = candidates
@@ -193,4 +226,41 @@ def _lazy_candidate(module_name, *, confidence, calls):
         materializer=materialize,
         materialized=False,
         plan={"module": module_name},
+    )
+
+
+def _lazy_patch_candidate(module_name, source, *, calls, patch, workspace):
+    def materialize():
+        calls.append(module_name)
+        descriptor = ArchiveInputDescriptor.from_parts(archive_path=str(source), format_hint="zip")
+        state = ArchiveState.from_archive_input(
+            descriptor,
+            patches=[PatchPlan(operations=[patch], provenance={"module": module_name}, confidence=0.8)],
+        )
+        return RepairCandidate(
+            module_name=module_name,
+            format="zip",
+            repaired_input={
+                "kind": "archive_state",
+                "patch_digest": state.effective_patch_digest(),
+                "format_hint": "zip",
+            },
+            confidence=0.8,
+            actions=[module_name],
+            validations=[CandidateValidation(name="module_result", accepted=True, score=0.8)],
+            materialized=True,
+            workspace_paths=[],
+            plan={"archive_state": state.to_dict(), "workspace": str(workspace)},
+        )
+
+    return RepairCandidate(
+        module_name=module_name,
+        format="zip",
+        repaired_input={},
+        confidence=0.8,
+        actions=["plan_repair", module_name],
+        validations=[CandidateValidation(name="repair_plan", accepted=True, score=0.8)],
+        materializer=materialize,
+        materialized=False,
+        plan={"module": module_name, "workspace": str(workspace), "lazy": True},
     )
