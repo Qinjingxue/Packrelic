@@ -309,11 +309,21 @@ class NativePasswordTester:
         archive_input: dict | None = None,
     ) -> NativePasswordAttempt:
         normalized_passwords = list(passwords or [""])
+        if archive_input:
+            worker_attempt = self._try_passwords_with_worker(
+                archive_path,
+                normalized_passwords,
+                part_paths=part_paths,
+                archive_input=archive_input,
+            )
+            if worker_attempt is not None:
+                return worker_attempt
+
         if len(normalized_passwords) <= 16:
             return self._try_passwords_ctypes(archive_path, normalized_passwords, part_paths)
         worker_attempt = self._try_passwords_with_worker(
             archive_path,
-            passwords,
+            normalized_passwords,
             part_paths=part_paths,
             archive_input=archive_input,
         )

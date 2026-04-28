@@ -123,6 +123,73 @@ def test_analysis_stage_expands_carrier_into_logical_archive_tasks(tmp_path):
     assert tasks[1].key.endswith("#segment2:7z")
 
 
+def test_analysis_stage_prefers_compressed_tar_over_stream_for_same_range(tmp_path):
+    archive = tmp_path / "payload.tar.gz"
+    archive.write_bytes(b"gzipped tar")
+    gzip = ArchiveFormatEvidence(
+        format="gzip",
+        confidence=0.88,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=0, end_offset=100, confidence=0.88)],
+    )
+    tar_gz = ArchiveFormatEvidence(
+        format="tar.gz",
+        confidence=0.93,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=0, end_offset=100, confidence=0.93)],
+    )
+    task = _task(archive)
+    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage.enabled = True
+    stage.scheduler = _FakeAnalysisScheduler(_multi_report(archive, [gzip, tar_gz]))
+
+    tasks = stage.analyze_tasks([task])
+
+    assert tasks == [task]
+    assert task.fact_bag.get("analysis.selected_format") == "tar.gz"
+
+
+def test_analysis_stage_uses_range_input_for_embedded_password_required_archive(tmp_path):
+    carrier = tmp_path / "payload.exe"
+    carrier.write_bytes(b"MZ" + b"x" * 198)
+    evidence = ArchiveFormatEvidence(
+        format="rar",
+        confidence=0.72,
+        status="damaged",
+        segments=[
+            ArchiveSegment(
+                start_offset=64,
+                end_offset=None,
+                confidence=0.72,
+                damage_flags=["valid_encrypted_but_unwalkable"],
+            )
+        ],
+        details={"password_required": True, "header_encrypted": True},
+    )
+    task = _task(carrier)
+    stage = ArchiveAnalysisStage({"analysis": {"enabled": False}})
+    stage.enabled = True
+    stage.scheduler = _FakeAnalysisScheduler(_multi_report(carrier, [evidence]))
+
+    stage.analyze_task(task)
+
+    assert task.fact_bag.get("analysis.selected_format") == "rar"
+    assert task.fact_bag.get("archive.input") == {
+        "kind": "archive_input",
+        "entry_path": str(carrier),
+        "open_mode": "file_range",
+        "format_hint": "rar",
+        "logical_name": "case",
+        "parts": [{"path": str(carrier), "role": "main", "start": 64}],
+        "segment": {"start": 64, "source": "analysis", "confidence": 0.72},
+        "analysis": {
+            "status": "damaged",
+            "confidence": 0.72,
+            "damage_flags": ["valid_encrypted_but_unwalkable"],
+        },
+    }
+
+
 def test_analysis_stage_maps_split_logical_segment_to_concat_ranges(tmp_path):
     part1 = tmp_path / "case.7z.001"
     part2 = tmp_path / "case.7z.002"

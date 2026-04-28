@@ -42,7 +42,11 @@ class PasswordResolver:
             search = self._run_password_search(archive_path, fact_bag=fact_bag, part_paths=part_paths)
             password, result, error = search.password, search.test_result, search.error_text
             if password is None and self._should_recheck_failed_encrypted_search(error):
-                test_result, error_text = self.password_tester.test_without_password(archive_path, part_paths=part_paths)
+                test_result, error_text = self._test_without_password(
+                    archive_path,
+                    fact_bag=fact_bag,
+                    part_paths=part_paths,
+                )
                 if has_archive_damage_signals(error_text) and not has_definite_wrong_password(error_text):
                     return PasswordResolution(
                         password=None,
@@ -59,7 +63,11 @@ class PasswordResolver:
                 remember_only_on_success=True,
             )
 
-        test_result, error_text = self.password_tester.test_without_password(archive_path, part_paths=part_paths)
+        test_result, error_text = self._test_without_password(
+            archive_path,
+            fact_bag=fact_bag,
+            part_paths=part_paths,
+        )
         if test_result.returncode == 0:
             return self._remember(archive_key, "", test_result=test_result, encrypted=False)
 
@@ -102,6 +110,26 @@ class PasswordResolver:
             archive_input=archive_input if isinstance(archive_input, dict) else None,
             candidates=candidates,
         ))
+
+    def _test_without_password(
+        self,
+        archive_path: str,
+        *,
+        fact_bag: FactBag | None = None,
+        part_paths: list[str] | None = None,
+    ):
+        archive_input = fact_bag.get("archive.input") if fact_bag is not None else None
+        if isinstance(archive_input, dict):
+            try:
+                return self.password_tester.test_without_password(
+                    archive_path,
+                    part_paths=part_paths,
+                    archive_input=archive_input,
+                )
+            except TypeError as error:
+                if "archive_input" not in str(error):
+                    raise
+        return self.password_tester.test_without_password(archive_path, part_paths=part_paths)
 
     def _remember(
         self,

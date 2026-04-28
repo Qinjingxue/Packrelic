@@ -81,6 +81,10 @@ class ArchiveAnalysisStage:
         task.fact_bag.set("analysis.report_path", report.path)
         candidates = self._extractable_segments(report)
         if not candidates:
+            password_candidate = self._password_required_embedded_segment(report)
+            if password_candidate is not None:
+                evidence, segment, index = password_candidate
+                self._apply_selected_segment(task, evidence, segment, index=index)
             return report, [task]
         if len(candidates) == 1:
             evidence, segment, _ = candidates[0]
@@ -138,10 +142,55 @@ class ArchiveAnalysisStage:
                 candidates.append((evidence, segment, index))
                 index += 1
         candidates.sort(key=lambda item: (int(item[1].start_offset), item[0].format, item[2]))
+        candidates = self._prefer_specific_segments(candidates)
         return [
             (evidence, segment, position)
             for position, (evidence, segment, _) in enumerate(candidates, start=1)
         ]
+
+    def _prefer_specific_segments(
+        self,
+        candidates: list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]],
+    ) -> list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]]:
+        stream_to_container = {
+            "gzip": "tar.gz",
+            "bzip2": "tar.bz2",
+            "xz": "tar.xz",
+            "zstd": "tar.zst",
+        }
+        by_range = {
+            (int(segment.start_offset), int(segment.end_offset), evidence.format)
+            for evidence, segment, _ in candidates
+            if segment.end_offset is not None
+        }
+        filtered = []
+        for evidence, segment, index in candidates:
+            if segment.end_offset is not None:
+                container_format = stream_to_container.get(evidence.format)
+                if container_format and (
+                    int(segment.start_offset),
+                    int(segment.end_offset),
+                    container_format,
+                ) in by_range:
+                    continue
+            filtered.append((evidence, segment, index))
+        return filtered
+
+    def _password_required_embedded_segment(
+        self,
+        report: ArchiveAnalysisReport,
+    ) -> tuple[ArchiveFormatEvidence, ArchiveSegment, int] | None:
+        candidates: list[tuple[ArchiveFormatEvidence, ArchiveSegment, int]] = []
+        for evidence in report.evidences:
+            if not evidence.details.get("password_required"):
+                continue
+            for index, segment in enumerate(evidence.segments, start=1):
+                if int(segment.start_offset) <= 0:
+                    continue
+                candidates.append((evidence, segment, 0))
+        if not candidates:
+            return None
+        return sorted(candidates, key=lambda item: (-item[0].confidence, int(item[1].start_offset)))[0]
 
     def _segment_payload(self, task: ArchiveTask, evidence: ArchiveFormatEvidence, segment: ArchiveSegment) -> dict:
         payload = asdict(segment)

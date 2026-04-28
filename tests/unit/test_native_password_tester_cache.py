@@ -226,3 +226,45 @@ def test_archive_crc_manifest_cache_is_password_and_limit_specific(tmp_path, mon
     assert second.files[0]["path"] == "inside.txt"
     assert fake.crc_manifest_calls == 1
     _clear_native_7z_caches()
+from smart_unpacker.support.sevenzip_native import NativePasswordAttempt, NativePasswordTester, STATUS_OK
+
+
+class _ArchiveInputAwareTester(NativePasswordTester):
+    def __init__(self):
+        self.worker_calls = []
+        self.ctypes_calls = []
+
+    def _try_passwords_with_worker(self, archive_path, passwords, *, part_paths=None, archive_input=None):
+        self.worker_calls.append((archive_path, list(passwords), part_paths, archive_input))
+        return NativePasswordAttempt(
+            status=STATUS_OK,
+            matched_index=0,
+            attempts=1,
+            message="ok",
+        )
+
+    def _try_passwords_ctypes(self, archive_path, passwords, part_paths=None):
+        self.ctypes_calls.append((archive_path, list(passwords), part_paths))
+        return NativePasswordAttempt(
+            status=STATUS_OK,
+            matched_index=0,
+            attempts=1,
+            message="ctypes",
+        )
+
+
+def test_native_password_tester_uses_worker_for_archive_input_even_for_small_batches():
+    tester = _ArchiveInputAwareTester()
+    archive_input = {
+        "kind": "archive_input",
+        "entry_path": "carrier.exe",
+        "open_mode": "file_range",
+        "format_hint": "zip",
+        "parts": [{"path": "carrier.exe", "start": 4096, "end": 8192}],
+    }
+
+    result = tester.try_passwords("carrier.exe", ["secret"], archive_input=archive_input)
+
+    assert result.ok
+    assert tester.worker_calls == [("carrier.exe", ["secret"], None, archive_input)]
+    assert tester.ctypes_calls == []
