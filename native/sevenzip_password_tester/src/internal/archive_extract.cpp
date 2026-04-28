@@ -440,6 +440,23 @@ ExtractArchiveResult extract_archive_internal(
 
             }
 
+            if (!password.empty() && (last_op_res == kOpDataError || last_op_res == kOpCrcError) &&
+                (result.files_written > 0 || result.failed_item_bytes_written > 0)) {
+
+                result.status = PasswordTestStatus::Damaged;
+
+                result.damaged = true;
+
+                result.checksum_error = last_op_res == kOpCrcError;
+
+                set_failure(result, "item_extract", kind_for_operation_result(last_op_res), hr);
+
+                result.message = result.checksum_error ? "archive checksum error" : "archive appears damaged";
+
+                return result;
+
+            }
+
             result.status = PasswordTestStatus::WrongPassword;
 
             result.encrypted = true;
@@ -533,6 +550,23 @@ ExtractArchiveResult extract_archive_internal(
             set_failure(result, "archive_open", kind_for_operation_result(last_op_res), last_hr);
 
             result.message = result.checksum_error ? "archive checksum error" : "archive appears damaged";
+
+            return result;
+
+        }
+
+        if (has_split_volume_gap(part_paths) || likely_missing_split_tail(part_paths) ||
+            (has_split_volume_evidence(archive_path, part_paths) && looks_missing_volume(archive_path, last_op_res))) {
+
+            result.status = PasswordTestStatus::Damaged;
+
+            result.damaged = true;
+
+            result.missing_volume = true;
+
+            set_failure(result, "archive_open", "missing_volume", last_hr);
+
+            result.message = "archive split volume appears incomplete";
 
             return result;
 

@@ -225,9 +225,10 @@ def _coverage_sources_from_issues(issues: list[VerificationIssue]) -> list[dict]
     sources = []
     for issue in issues:
         actual = issue.actual if isinstance(issue.actual, dict) else {}
-        if not _looks_like_coverage(actual):
+        coverage = actual.get("coverage") if isinstance(actual.get("coverage"), dict) else actual
+        if not _looks_like_coverage(coverage):
             continue
-        source = dict(actual)
+        source = dict(coverage)
         source["method"] = issue.method
         source["code"] = issue.code
         sources.append(source)

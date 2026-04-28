@@ -88,7 +88,16 @@ def coverage_from_archive_and_output(
 
         state = "complete"
         progress = size_progress
-        if expected_has_crc and not crc_ok:
+        output_status = str(output_item.get("status") or "")
+        if output_status == "failed":
+            state = "failed"
+            progress = size_progress if size_progress is not None else 0.0
+            failed_files += 1
+        elif output_status == "partial":
+            state = "partial"
+            progress = size_progress if size_progress is not None else 0.5
+            partial_files += 1
+        elif expected_has_crc and not crc_ok:
             state = "failed"
             progress = 0.0
             failed_files += 1

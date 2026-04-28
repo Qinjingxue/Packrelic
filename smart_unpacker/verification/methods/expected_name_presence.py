@@ -52,7 +52,7 @@ class ExpectedNamePresenceMethod:
 
         output_paths = {normalize_match_path(path) for path in stats.relative_paths}
         output_basenames = {normalize_match_name(os.path.basename(path)) for path in stats.relative_paths}
-        output_files = output_files_from_directory(evidence.output_dir)
+        output_files = _output_files_for_coverage(evidence)
         coverage = coverage_from_archive_and_output(
             archive_files_from_names(expected_names),
             output_files,
@@ -160,6 +160,25 @@ def _fact_value(fact_bag: Any, key: str) -> Any:
     if fact_bag is not None and hasattr(fact_bag, "get"):
         return fact_bag.get(key)
     return None
+
+
+def _output_files_for_coverage(evidence: VerificationEvidence) -> list[dict[str, Any]]:
+    manifest = evidence.progress_manifest or {}
+    manifest_files = []
+    for item in manifest.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("archive_path") or item.get("path")
+        if not path:
+            continue
+        manifest_files.append({
+            "path": path,
+            "archive_path": item.get("archive_path"),
+            "size": item.get("bytes_written"),
+            "bytes_written": item.get("bytes_written"),
+            "status": item.get("status"),
+        })
+    return manifest_files or output_files_from_directory(evidence.output_dir)
 
 
 def _iter_name_values(value: Any):
