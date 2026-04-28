@@ -2699,24 +2699,14 @@ PasswordTestResult test_passwords_with_parts(
         part_paths.empty() ? std::vector<std::wstring>{archive_path} : part_paths;
     const std::vector<GUID> formats = candidate_formats(archive_path, effective_part_paths);
 
-    bool stream_opened = false;
-    ComPtr<IInStream> stream = open_archive_stream(archive_path, effective_part_paths, stream_opened);
-    if (!stream_opened) {
-        PasswordTestResult result;
-        result.status = PasswordTestStatus::Error;
-        result.message = "archive file could not be opened";
-        return result;
-    }
-
     for (int i = 0; i < password_count; ++i) {
         const wchar_t* raw_password = passwords[i] ? passwords[i] : L"";
-        PasswordTestResult current = test_one_password_reuse_stream(
+        PasswordTestResult current = test_one_password(
             create_object,
             archive_path,
             raw_password,
             effective_part_paths,
-            formats,
-            stream.get());
+            formats);
         current.attempts = i + 1;
         last = current;
         if (current.status == PasswordTestStatus::Ok) {

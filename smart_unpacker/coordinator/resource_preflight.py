@@ -84,6 +84,8 @@ class ResourcePreflightInspector:
     def _ensure_resource_health(self, task: ArchiveTask) -> None:
         if task.fact_bag.has("resource.health"):
             return
+        if self._needs_offset_detection(task):
+            return
         try:
             part_paths = (task.all_parts if task.all_parts and len(task.all_parts) > 1 else None) or None
             health = cached_check_archive_health(task.main_path, part_paths=part_paths)
@@ -99,6 +101,10 @@ class ResourcePreflightInspector:
             })
         except Exception:
             pass
+
+    @staticmethod
+    def _needs_offset_detection(task: ArchiveTask) -> bool:
+        return isinstance(task.fact_bag.get("archive.input"), dict)
 
     def _password_for(self, task: ArchiveTask) -> str:
         if self.password_session is None:
