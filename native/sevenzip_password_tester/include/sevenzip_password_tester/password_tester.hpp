@@ -228,6 +228,53 @@ struct Sup7zArchiveResourceAnalysis {
     wchar_t dominant_method[128];
 };
 
+enum Sup7zOperationKind {
+    SUP7Z_OPERATION_PROBE = 1,
+    SUP7Z_OPERATION_TEST = 2,
+    SUP7Z_OPERATION_TRY_PASSWORDS = 3,
+};
+
+struct Sup7zInputRange {
+    const wchar_t* path;
+    unsigned long long start;
+    unsigned long long end;
+    int has_end;
+};
+
+struct Sup7zOperationRequest {
+    int operation;
+    const wchar_t* seven_zip_dll_path;
+    const wchar_t* archive_path;
+    const wchar_t* const* part_paths;
+    int part_count;
+    const Sup7zInputRange* ranges;
+    int range_count;
+    const wchar_t* format_hint;
+    const wchar_t* password;
+    const wchar_t* const* passwords;
+    int password_count;
+};
+
+struct Sup7zOperationResult {
+    int status;
+    int command_ok;
+    int is_archive;
+    int is_encrypted;
+    int is_broken;
+    int checksum_error;
+    int matched_index;
+    int attempts;
+    unsigned long long archive_offset;
+    int item_count;
+    wchar_t archive_type[64];
+    wchar_t message[512];
+};
+
+SUP7Z_API int sup7z_run_operation(
+    const Sup7zOperationRequest* request,
+    Sup7zOperationResult* result
+);
+
 SUP7Z_API int sup7z_check_archive_health(
     const wchar_t* seven_zip_dll_path,
     const wchar_t* archive_path,

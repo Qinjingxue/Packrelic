@@ -60,6 +60,41 @@ def test_native_probe_identifies_embedded_7z_payload_offset(tmp_path, case_kwarg
         assert tester.test_archive(str(case.entry_path), part_paths=parts).ok
 
 
+def test_native_password_attempts_use_dll_ranges_for_archive_input(tmp_path):
+    require_7z()
+    case = ArchiveFixtureFactory().create(
+        tmp_path,
+        "native_password_dll_archive_input_range",
+        "7z",
+        password=PASSWORD,
+        carrier="jpg",
+    )
+    tester = get_native_password_tester()
+    probe = tester.probe_archive(str(case.entry_path), part_paths=_parts(case))
+    archive_input = {
+        "kind": "archive_input",
+        "entry_path": str(case.entry_path),
+        "open_mode": "file_range",
+        "format_hint": "7z",
+        "parts": [{"path": str(case.entry_path), "start": probe.offset}],
+    }
+
+    range_probe = tester.probe_archive(str(case.entry_path), archive_input=archive_input)
+    assert range_probe.is_archive
+    assert range_probe.is_encrypted
+    assert range_probe.archive_type == "7z"
+    assert tester.test_archive(str(case.entry_path), password=PASSWORD, archive_input=archive_input).ok
+
+    attempt = tester.try_passwords(
+        str(case.entry_path),
+        [WRONG_PASSWORD, PASSWORD],
+        archive_input=archive_input,
+    )
+
+    assert attempt.ok
+    assert attempt.matched_index == 1
+
+
 @pytest.mark.parametrize("password", [None, PASSWORD])
 def test_native_wrapper_handles_7z_sfx_split_health_password_and_resources(tmp_path, password):
     require_7z()

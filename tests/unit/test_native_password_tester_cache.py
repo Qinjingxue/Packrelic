@@ -231,20 +231,10 @@ from smart_unpacker.support.sevenzip_native import NativePasswordAttempt, Native
 
 class _ArchiveInputAwareTester(NativePasswordTester):
     def __init__(self):
-        self.worker_calls = []
         self.ctypes_calls = []
 
-    def _try_passwords_with_worker(self, archive_path, passwords, *, part_paths=None, archive_input=None):
-        self.worker_calls.append((archive_path, list(passwords), part_paths, archive_input))
-        return NativePasswordAttempt(
-            status=STATUS_OK,
-            matched_index=0,
-            attempts=1,
-            message="ok",
-        )
-
-    def _try_passwords_ctypes(self, archive_path, passwords, part_paths=None):
-        self.ctypes_calls.append((archive_path, list(passwords), part_paths))
+    def _try_passwords_ctypes(self, archive_path, passwords, part_paths=None, archive_input=None):
+        self.ctypes_calls.append((archive_path, list(passwords), part_paths, archive_input))
         return NativePasswordAttempt(
             status=STATUS_OK,
             matched_index=0,
@@ -253,7 +243,7 @@ class _ArchiveInputAwareTester(NativePasswordTester):
         )
 
 
-def test_native_password_tester_uses_worker_for_archive_input_even_for_small_batches():
+def test_native_password_tester_uses_dll_for_archive_input_even_for_small_batches():
     tester = _ArchiveInputAwareTester()
     archive_input = {
         "kind": "archive_input",
@@ -266,5 +256,4 @@ def test_native_password_tester_uses_worker_for_archive_input_even_for_small_bat
     result = tester.try_passwords("carrier.exe", ["secret"], archive_input=archive_input)
 
     assert result.ok
-    assert tester.worker_calls == [("carrier.exe", ["secret"], None, archive_input)]
-    assert tester.ctypes_calls == []
+    assert tester.ctypes_calls == [("carrier.exe", ["secret"], None, archive_input)]

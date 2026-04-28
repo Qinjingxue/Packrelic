@@ -1,5 +1,6 @@
 #include "sevenzip_password_tester/password_tester.hpp"
 #include "archive_operations.hpp"
+#include "embedded_7z.hpp"
 
 #ifdef _WIN32
 #include <objbase.h>
@@ -13,7 +14,6 @@
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
-#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -2061,158 +2061,24 @@ struct ArchiveOpenPlan {
     }
 };
 
-bool read_file_range_exact(
-    const std::wstring& path,
-    UInt64 offset,
-    UInt64 size,
-    std::vector<unsigned char>& data
-) {
-    data.clear();
-    if (size > static_cast<UInt64>(std::numeric_limits<DWORD>::max())) {
-        return false;
-    }
-    data.resize(static_cast<std::size_t>(size));
-    HANDLE handle = CreateFileW(win32_extended_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    LARGE_INTEGER distance{};
-    distance.QuadPart = static_cast<LONGLONG>(offset);
-    if (!SetFilePointerEx(handle, distance, nullptr, FILE_BEGIN)) {
-        CloseHandle(handle);
-        return false;
-    }
-    DWORD read = 0;
-    const BOOL ok = data.empty() || ReadFile(handle, data.data(), static_cast<DWORD>(data.size()), &read, nullptr);
-    CloseHandle(handle);
-    return ok && read == data.size();
-}
-
-UInt64 le64_at(const std::vector<unsigned char>& data, std::size_t offset) {
-    return static_cast<UInt64>(le32_at(data, offset)) |
-        (static_cast<UInt64>(le32_at(data, offset + 4)) << 32);
-}
-
-bool seven_zip_header_ok_at(const std::wstring& path, UInt64 offset, UInt64 file_size) {
-    if (offset + 32u > file_size) {
-        return false;
-    }
-    std::vector<unsigned char> header;
-    if (!read_file_range_exact(path, offset, 32, header)) {
-        return false;
-    }
-    const unsigned char signature[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
-    if (!std::equal(std::begin(signature), std::end(signature), header.begin())) {
-        return false;
-    }
-    const UInt32 stored_start_crc = le32_at(header, 8);
-    if (crc32_bytes(header.data() + 12, 20) != stored_start_crc) {
-        return false;
-    }
-    const UInt64 next_offset = le64_at(header, 12);
-    const UInt64 next_size = le64_at(header, 20);
-    if (next_offset > file_size || next_size > file_size) {
-        return false;
-    }
-    const UInt64 next_start = offset + 32u + next_offset;
-    if (next_start < offset || next_start > file_size || next_start + next_size < next_start || next_start + next_size > file_size) {
-        return false;
-    }
-    if (next_size == 0) {
-        return true;
-    }
-    constexpr UInt64 kMaxNextHeaderCrcBytes = 64ull * 1024ull * 1024ull;
-    if (next_size > kMaxNextHeaderCrcBytes) {
-        return true;
-    }
-    std::vector<unsigned char> next_header;
-    if (!read_file_range_exact(path, next_start, next_size, next_header)) {
-        return false;
-    }
-    return crc32_bytes(next_header.data(), static_cast<std::size_t>(next_header.size())) == le32_at(header, 28);
-}
-
-std::vector<UInt64> find_seven_zip_signature_offsets(const std::wstring& path, std::size_t max_candidates = 16) {
-    std::vector<UInt64> offsets;
-    const UInt64 file_size = file_size_or_zero(path);
-    if (file_size <= 32) {
-        return offsets;
-    }
-    HANDLE handle = CreateFileW(win32_extended_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) {
-        return offsets;
-    }
-
-    const unsigned char signature[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
-    constexpr DWORD kChunkSize = 4u * 1024u * 1024u;
-    std::vector<unsigned char> carry;
-    UInt64 file_offset = 0;
-    while (file_offset < file_size && offsets.size() < max_candidates) {
-        const UInt64 remaining = file_size - file_offset;
-        const DWORD want = static_cast<DWORD>(std::min<UInt64>(remaining, kChunkSize));
-        std::vector<unsigned char> buffer(carry.size() + want);
-        std::copy(carry.begin(), carry.end(), buffer.begin());
-        DWORD read = 0;
-        const BOOL ok = ReadFile(handle, buffer.data() + carry.size(), want, &read, nullptr);
-        if (!ok || read == 0) {
-            break;
-        }
-        buffer.resize(carry.size() + read);
-        const UInt64 scan_base = file_offset - carry.size();
-        for (std::size_t index = 0; index + sizeof(signature) <= buffer.size(); ++index) {
-            if (!std::equal(std::begin(signature), std::end(signature), buffer.begin() + index)) {
-                continue;
-            }
-            const UInt64 absolute = scan_base + index;
-            if (absolute == 0) {
-                continue;
-            }
-            if (seven_zip_header_ok_at(path, absolute, file_size)) {
-                offsets.push_back(absolute);
-                if (offsets.size() >= max_candidates) {
-                    break;
-                }
-            }
-        }
-        file_offset += read;
-        const std::size_t keep = std::min<std::size_t>(sizeof(signature) - 1, buffer.size());
-        carry.assign(buffer.end() - keep, buffer.end());
-    }
-    CloseHandle(handle);
-    return offsets;
-}
-
-bool is_standard_seven_zip_path(const std::wstring& path) {
-    const std::wstring ext = lower_extension(path);
-    if (ext == L".7z") {
-        return true;
-    }
-    const std::wstring name = filename_lower(path);
-    return name.size() >= 7 && name.compare(name.size() - 7, 7, L".7z.001") == 0;
-}
-
 std::vector<ArchiveOpenPlan> embedded_seven_zip_open_plans(
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths
 ) {
     std::vector<ArchiveOpenPlan> plans;
-    for (const auto& path : unique_existing_paths(archive_path, part_paths)) {
-        for (const UInt64 offset : find_seven_zip_signature_offsets(path)) {
-            ExtractInputRange range;
-            range.path = path;
-            range.start = offset;
-            range.has_end = false;
+    for (const auto& candidate : find_embedded_seven_zip_candidates(archive_path, part_paths)) {
+        ExtractInputRange range;
+        range.path = candidate.path;
+        range.start = candidate.offset;
+        range.has_end = false;
 
-            ArchiveOpenPlan plan;
-            plan.ranges = {range};
-            plan.formats = {format_guid(0x07)};
-            plan.archive_offset = offset;
-            plan.archive_type = L"7z";
-            plan.source = "embedded_7z";
-            plans.push_back(std::move(plan));
-        }
+        ArchiveOpenPlan plan;
+        plan.ranges = {range};
+        plan.formats = {format_guid(0x07)};
+        plan.archive_offset = candidate.offset;
+        plan.archive_type = L"7z";
+        plan.source = "embedded_7z";
+        plans.push_back(std::move(plan));
     }
     return plans;
 }

@@ -28,6 +28,8 @@ endfunction()
 
 add_library(sevenzip_password_tester STATIC
     src/internal/sevenzip_engine.cpp
+    src/internal/embedded_7z.cpp
+    src/internal/operation_dispatch.cpp
 )
 apply_release_optimizations(sevenzip_password_tester)
 
@@ -45,10 +47,13 @@ add_library(sevenzip_password_tester_capi SHARED
     src/archive_probe.cpp
     src/archive_test.cpp
     src/c_api_health.cpp
+    src/c_api_operation.cpp
     src/c_api_passwords.cpp
     src/c_api_crc_manifest.cpp
     src/c_api_resources.cpp
     src/internal/sevenzip_engine.cpp
+    src/internal/embedded_7z.cpp
+    src/internal/operation_dispatch.cpp
 )
 apply_release_optimizations(sevenzip_password_tester_capi)
 

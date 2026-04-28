@@ -1,14 +1,11 @@
 import ctypes
-import atexit
 import json
-import subprocess
 import sys
 import threading
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from smart_unpacker.support.resources import candidate_resource_roots, get_7z_dll_path, get_sevenzip_worker_path
+from smart_unpacker.support.resources import candidate_resource_roots, get_7z_dll_path
 from smart_unpacker.support.global_cache_manager import cached_value, file_identity
 
 
@@ -117,140 +114,6 @@ class NativeArchiveCrcManifest:
         return self.status == STATUS_OK and self.is_archive and not self.damaged and not self.checksum_error
 
 
-class _PasswordWorker:
-    def __init__(self, worker_path: str):
-        startupinfo = None
-        if sys.platform == "win32":
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        self.worker_path = worker_path
-        self.process = subprocess.Popen(
-            [worker_path, "--persistent"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            startupinfo=startupinfo,
-        )
-        self.lock = threading.Lock()
-
-    def request(self, payload: dict) -> dict:
-        with self.lock:
-            if self.process.poll() is not None or self.process.stdin is None or self.process.stdout is None:
-                raise RuntimeError("sevenzip password worker is not running")
-            self.process.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
-            self.process.stdin.flush()
-            while True:
-                line = self.process.stdout.readline()
-                if not line:
-                    raise RuntimeError("sevenzip password worker closed stdout")
-                event = json.loads(line)
-                if event.get("type") == "result" and event.get("job_id") == payload.get("job_id"):
-                    return event
-
-    def close(self) -> None:
-        with self.lock:
-            if self.process.poll() is not None:
-                return
-            try:
-                if self.process.stdin is not None:
-                    self.process.stdin.write('{"worker_command":"shutdown","job_id":"shutdown"}\n')
-                    self.process.stdin.flush()
-            except OSError:
-                pass
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=2)
-            for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
-                try:
-                    if stream is not None:
-                        stream.close()
-                except OSError:
-                    pass
-
-
-class _PasswordWorkerPool:
-    def __init__(self, worker_path: str, size: int | None = None):
-        self.worker_path = worker_path
-        self.size = max(1, int(size or 2))
-        self._workers: list[_PasswordWorker] = []
-        self._lock = threading.Lock()
-        self._next = 0
-
-    def try_passwords(
-        self,
-        *,
-        seven_zip_dll_path: str,
-        archive_path: str,
-        passwords: list[str],
-        part_paths: list[str] | None = None,
-        archive_input: dict | None = None,
-    ) -> NativePasswordAttempt:
-        worker = self._borrow()
-        payload = {
-            "worker_command": "try_passwords",
-            "job_id": f"pw-{uuid.uuid4().hex}",
-            "seven_zip_dll_path": seven_zip_dll_path,
-            "archive_path": archive_path,
-            "part_paths": list(part_paths or []),
-            "passwords": list(passwords or [""]),
-        }
-        if archive_input:
-            payload["archive_input"] = archive_input
-        result = worker.request(payload)
-        native_status = str(result.get("native_status") or "")
-        return NativePasswordAttempt(
-            status=_password_status_from_worker(native_status),
-            matched_index=_json_int(result, "matched_index", -1),
-            attempts=_json_int(result, "attempts", 0),
-            message=str(result.get("message") or native_status or "password worker failed"),
-        )
-
-    def _borrow(self) -> _PasswordWorker:
-        with self._lock:
-            while len(self._workers) < self.size:
-                self._workers.append(_PasswordWorker(self.worker_path))
-            worker = self._workers[self._next % len(self._workers)]
-            self._next += 1
-            return worker
-
-    def close(self) -> None:
-        with self._lock:
-            workers = list(self._workers)
-            self._workers.clear()
-        for worker in workers:
-            worker.close()
-
-
-def _password_status_from_worker(native_status: str) -> int:
-    normalized = native_status.lower()
-    if normalized == "ok":
-        return STATUS_OK
-    if normalized == "wrong_password":
-        return STATUS_WRONG_PASSWORD
-    if normalized == "damaged":
-        return STATUS_DAMAGED
-    if normalized == "unsupported":
-        return STATUS_UNSUPPORTED
-    if normalized == "backend_unavailable":
-        return STATUS_BACKEND_UNAVAILABLE
-    return STATUS_ERROR
-
-
-def _json_int(payload: dict, key: str, default: int) -> int:
-    value = payload.get(key, default)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 class _Sup7zArchiveHealth(ctypes.Structure):
     _fields_ = [
         ("status", ctypes.c_int),
@@ -284,14 +147,59 @@ class _Sup7zArchiveResourceAnalysis(ctypes.Structure):
     ]
 
 
+SUP7Z_OPERATION_PROBE = 1
+SUP7Z_OPERATION_TEST = 2
+SUP7Z_OPERATION_TRY_PASSWORDS = 3
+
+
+class _Sup7zInputRange(ctypes.Structure):
+    _fields_ = [
+        ("path", ctypes.c_wchar_p),
+        ("start", ctypes.c_ulonglong),
+        ("end", ctypes.c_ulonglong),
+        ("has_end", ctypes.c_int),
+    ]
+
+
+class _Sup7zOperationRequest(ctypes.Structure):
+    _fields_ = [
+        ("operation", ctypes.c_int),
+        ("seven_zip_dll_path", ctypes.c_wchar_p),
+        ("archive_path", ctypes.c_wchar_p),
+        ("part_paths", ctypes.POINTER(ctypes.c_wchar_p)),
+        ("part_count", ctypes.c_int),
+        ("ranges", ctypes.POINTER(_Sup7zInputRange)),
+        ("range_count", ctypes.c_int),
+        ("format_hint", ctypes.c_wchar_p),
+        ("password", ctypes.c_wchar_p),
+        ("passwords", ctypes.POINTER(ctypes.c_wchar_p)),
+        ("password_count", ctypes.c_int),
+    ]
+
+
+class _Sup7zOperationResult(ctypes.Structure):
+    _fields_ = [
+        ("status", ctypes.c_int),
+        ("command_ok", ctypes.c_int),
+        ("is_archive", ctypes.c_int),
+        ("is_encrypted", ctypes.c_int),
+        ("is_broken", ctypes.c_int),
+        ("checksum_error", ctypes.c_int),
+        ("matched_index", ctypes.c_int),
+        ("attempts", ctypes.c_int),
+        ("archive_offset", ctypes.c_ulonglong),
+        ("item_count", ctypes.c_int),
+        ("archive_type", ctypes.c_wchar * 64),
+        ("message", ctypes.c_wchar * 512),
+    ]
+
+
 class NativePasswordTester:
     def __init__(self, wrapper_path: str | None = None, seven_zip_dll_path: str | None = None):
         self.wrapper_path = wrapper_path or self._default_wrapper_path()
         self.seven_zip_dll_path = seven_zip_dll_path or get_7z_dll_path()
         self._library = None
         self._load_lock = threading.Lock()
-        self._password_worker_pool: _PasswordWorkerPool | None = None
-        self._password_worker_lock = threading.Lock()
 
     def available(self) -> bool:
         return bool(self.wrapper_path and self.seven_zip_dll_path and Path(self.wrapper_path).exists())
@@ -301,6 +209,113 @@ class NativePasswordTester:
         array_type = ctypes.c_wchar_p * len(normalized_parts)
         return normalized_parts, array_type(*normalized_parts)
 
+    def _archive_operation_input(
+        self,
+        archive_path: str,
+        part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
+    ) -> tuple[str, list[str], list[dict], str]:
+        effective_archive = str(archive_path)
+        effective_parts = list(dict.fromkeys(part_paths or [archive_path]))
+        ranges: list[dict] = []
+        format_hint = ""
+        if not isinstance(archive_input, dict):
+            return effective_archive, effective_parts, ranges, format_hint
+
+        effective_archive = str(archive_input.get("entry_path") or effective_archive)
+        format_hint = str(archive_input.get("format_hint") or archive_input.get("format") or "")
+        mode = str(archive_input.get("open_mode") or archive_input.get("kind") or "file")
+        raw_parts = [item for item in archive_input.get("parts") or [] if isinstance(item, dict)]
+        part_paths_from_descriptor = [
+            str(item.get("path") or effective_archive)
+            for item in raw_parts
+            if item.get("path") or effective_archive
+        ]
+        if part_paths_from_descriptor:
+            effective_parts = list(dict.fromkeys(part_paths_from_descriptor))
+
+        if mode == "file_range":
+            ranges = self._ranges_from_objects(raw_parts, effective_archive)
+            if not ranges and isinstance(archive_input.get("segment"), dict):
+                segment = archive_input["segment"]
+                ranges = [self._range_from_mapping(segment, effective_archive)]
+        elif mode == "concat_ranges":
+            raw_ranges = [item for item in archive_input.get("ranges") or [] if isinstance(item, dict)]
+            ranges = self._ranges_from_objects(raw_ranges or raw_parts, effective_archive)
+        return effective_archive, effective_parts, ranges, format_hint
+
+    def _ranges_from_objects(self, items: list[dict], default_path: str) -> list[dict]:
+        return [
+            self._range_from_mapping(item, default_path)
+            for item in items
+            if item.get("start") is not None or item.get("start_offset") is not None or item.get("end") is not None or item.get("end_offset") is not None
+        ]
+
+    def _range_from_mapping(self, item: dict, default_path: str) -> dict:
+        end = item.get("end", item.get("end_offset"))
+        return {
+            "path": str(item.get("path") or default_path),
+            "start": int(item.get("start", item.get("start_offset", 0)) or 0),
+            "end": int(end) if end is not None else None,
+        }
+
+    def _run_operation(
+        self,
+        operation: int,
+        archive_path: str,
+        *,
+        part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
+        password: str = "",
+        passwords: list[str] | None = None,
+    ) -> _Sup7zOperationResult:
+        library = self._load()
+        effective_archive, effective_parts, ranges, format_hint = self._archive_operation_input(
+            archive_path,
+            part_paths=part_paths,
+            archive_input=archive_input,
+        )
+        part_array = None
+        if effective_parts:
+            part_array_type = ctypes.c_wchar_p * len(effective_parts)
+            part_array = part_array_type(*effective_parts)
+
+        range_array = None
+        if ranges:
+            range_array_type = _Sup7zInputRange * len(ranges)
+            range_array = range_array_type(*[
+                _Sup7zInputRange(
+                    str(item.get("path") or effective_archive),
+                    int(item.get("start") or 0),
+                    int(item["end"]) if item.get("end") is not None else 0,
+                    1 if item.get("end") is not None else 0,
+                )
+                for item in ranges
+            ])
+
+        normalized_passwords = list(passwords or [])
+        password_array = None
+        if normalized_passwords:
+            password_array_type = ctypes.c_wchar_p * len(normalized_passwords)
+            password_array = password_array_type(*normalized_passwords)
+
+        request = _Sup7zOperationRequest(
+            operation,
+            ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
+            ctypes.c_wchar_p(str(effective_archive)),
+            part_array,
+            ctypes.c_int(len(effective_parts)),
+            range_array,
+            ctypes.c_int(len(ranges)),
+            ctypes.c_wchar_p(format_hint),
+            ctypes.c_wchar_p(str(password or "")),
+            password_array,
+            ctypes.c_int(len(normalized_passwords)),
+        )
+        result = _Sup7zOperationResult()
+        library.sup7z_run_operation(ctypes.byref(request), ctypes.byref(result))
+        return result
+
     def try_passwords(
         self,
         archive_path: str,
@@ -309,126 +324,59 @@ class NativePasswordTester:
         archive_input: dict | None = None,
     ) -> NativePasswordAttempt:
         normalized_passwords = list(passwords or [""])
-        if archive_input:
-            worker_attempt = self._try_passwords_with_worker(
-                archive_path,
-                normalized_passwords,
-                part_paths=part_paths,
-                archive_input=archive_input,
-            )
-            if worker_attempt is not None:
-                return worker_attempt
-
-        if len(normalized_passwords) <= 16:
-            return self._try_passwords_ctypes(archive_path, normalized_passwords, part_paths)
-        worker_attempt = self._try_passwords_with_worker(
-            archive_path,
-            normalized_passwords,
-            part_paths=part_paths,
-            archive_input=archive_input,
-        )
-        if worker_attempt is not None:
-            return worker_attempt
-
-        return self._try_passwords_ctypes(archive_path, normalized_passwords, part_paths)
+        return self._try_passwords_ctypes(archive_path, normalized_passwords, part_paths, archive_input=archive_input)
 
     def _try_passwords_ctypes(
         self,
         archive_path: str,
         passwords: list[str],
         part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
     ) -> NativePasswordAttempt:
-        library = self._load()
-        password_array_type = ctypes.c_wchar_p * len(passwords)
-        password_array = password_array_type(*passwords)
-        normalized_parts, part_array = self._part_array(archive_path, part_paths)
-        matched_index = ctypes.c_int(-1)
-        attempts = ctypes.c_int(0)
-        message = ctypes.create_unicode_buffer(512)
-
-        status = library.sup7z_try_passwords_with_parts(
-            ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
-            ctypes.c_wchar_p(str(archive_path)),
-            part_array,
-            ctypes.c_int(len(normalized_parts)),
-            password_array,
-            ctypes.c_int(len(passwords)),
-            ctypes.byref(matched_index),
-            ctypes.byref(attempts),
-            message,
-            ctypes.c_int(len(message)),
+        result = self._run_operation(
+            SUP7Z_OPERATION_TRY_PASSWORDS,
+            archive_path,
+            part_paths=part_paths,
+            archive_input=archive_input,
+            passwords=list(passwords or [""]),
         )
         return NativePasswordAttempt(
-            status=int(status),
-            matched_index=int(matched_index.value),
-            attempts=int(attempts.value),
-            message=message.value,
+            status=int(result.status),
+            matched_index=int(result.matched_index),
+            attempts=int(result.attempts),
+            message=result.message,
         )
 
-    def _try_passwords_with_worker(
+    def test_archive(
         self,
         archive_path: str,
-        passwords: list[str],
-        *,
+        password: str = "",
         part_paths: list[str] | None = None,
         archive_input: dict | None = None,
-    ) -> NativePasswordAttempt | None:
-        try:
-            pool = self._get_password_worker_pool()
-            return pool.try_passwords(
-                seven_zip_dll_path=str(self.seven_zip_dll_path),
-                archive_path=str(archive_path),
-                passwords=list(passwords or [""]),
-                part_paths=part_paths,
-                archive_input=archive_input,
-            )
-        except Exception:
-            return None
-
-    def _get_password_worker_pool(self) -> "_PasswordWorkerPool":
-        if self._password_worker_pool is not None:
-            return self._password_worker_pool
-        with self._password_worker_lock:
-            if self._password_worker_pool is None:
-                self._password_worker_pool = _PasswordWorkerPool(get_sevenzip_worker_path())
-                atexit.register(self._password_worker_pool.close)
-            return self._password_worker_pool
-
-    def test_archive(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveTest:
-        library = self._load()
-
-        normalized_parts, part_array = self._part_array(archive_path, part_paths)
-        command_ok = ctypes.c_int(0)
-        encrypted = ctypes.c_int(0)
-        checksum_error = ctypes.c_int(0)
-        archive_type = ctypes.create_unicode_buffer(64)
-        message = ctypes.create_unicode_buffer(512)
-
-        status = library.sup7z_test_archive_with_parts(
-            ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
-            ctypes.c_wchar_p(str(archive_path)),
-            part_array,
-            ctypes.c_int(len(normalized_parts)),
-            ctypes.c_wchar_p(str(password or "")),
-            ctypes.byref(command_ok),
-            ctypes.byref(encrypted),
-            ctypes.byref(checksum_error),
-            archive_type,
-            ctypes.c_int(len(archive_type)),
-            message,
-            ctypes.c_int(len(message)),
+    ) -> NativeArchiveTest:
+        result = self._run_operation(
+            SUP7Z_OPERATION_TEST,
+            archive_path,
+            part_paths=part_paths,
+            archive_input=archive_input,
+            password=password or "",
         )
         return NativeArchiveTest(
-            status=int(status),
-            command_ok=bool(command_ok.value),
-            encrypted=bool(encrypted.value),
-            checksum_error=bool(checksum_error.value),
-            archive_type=archive_type.value,
-            message=message.value,
+            status=int(result.status),
+            command_ok=bool(result.command_ok),
+            encrypted=bool(result.is_encrypted),
+            checksum_error=bool(result.checksum_error),
+            archive_type=result.archive_type,
+            message=result.message,
         )
 
-    def probe_archive(self, archive_path: str, part_paths: list[str] | None = None) -> NativeArchiveProbe:
-        if part_paths and len(part_paths) > 1:
+    def probe_archive(
+        self,
+        archive_path: str,
+        part_paths: list[str] | None = None,
+        archive_input: dict | None = None,
+    ) -> NativeArchiveProbe:
+        if archive_input is None and part_paths and len(part_paths) > 1:
             health = self.check_archive_health(archive_path, part_paths=part_paths)
             return NativeArchiveProbe(
                 status=health.status,
@@ -442,41 +390,22 @@ class NativePasswordTester:
                 message=health.message,
             )
 
-        library = self._load()
-
-        is_archive = ctypes.c_int(0)
-        is_encrypted = ctypes.c_int(0)
-        is_broken = ctypes.c_int(0)
-        checksum_error = ctypes.c_int(0)
-        offset = ctypes.c_ulonglong(0)
-        item_count = ctypes.c_int(0)
-        archive_type = ctypes.create_unicode_buffer(64)
-        message = ctypes.create_unicode_buffer(512)
-
-        status = library.sup7z_probe_archive(
-            ctypes.c_wchar_p(str(self.seven_zip_dll_path)),
-            ctypes.c_wchar_p(str(archive_path)),
-            ctypes.byref(is_archive),
-            ctypes.byref(is_encrypted),
-            ctypes.byref(is_broken),
-            ctypes.byref(checksum_error),
-            ctypes.byref(offset),
-            ctypes.byref(item_count),
-            archive_type,
-            ctypes.c_int(len(archive_type)),
-            message,
-            ctypes.c_int(len(message)),
+        result = self._run_operation(
+            SUP7Z_OPERATION_PROBE,
+            archive_path,
+            part_paths=part_paths,
+            archive_input=archive_input,
         )
         return NativeArchiveProbe(
-            status=int(status),
-            is_archive=bool(is_archive.value),
-            is_encrypted=bool(is_encrypted.value),
-            is_broken=bool(is_broken.value),
-            checksum_error=bool(checksum_error.value),
-            offset=int(offset.value),
-            item_count=int(item_count.value),
-            archive_type=archive_type.value,
-            message=message.value,
+            status=int(result.status),
+            is_archive=bool(result.is_archive),
+            is_encrypted=bool(result.is_encrypted),
+            is_broken=bool(result.is_broken),
+            checksum_error=bool(result.checksum_error),
+            offset=int(result.archive_offset),
+            item_count=int(result.item_count),
+            archive_type=result.archive_type,
+            message=result.message,
         )
 
     def check_archive_health(self, archive_path: str, password: str = "", part_paths: list[str] | None = None) -> NativeArchiveHealth:
@@ -596,6 +525,11 @@ class NativePasswordTester:
                 raise FileNotFoundError("Required 7z.dll was not found.")
 
             library = ctypes.WinDLL(str(self.wrapper_path))
+            library.sup7z_run_operation.argtypes = [
+                ctypes.POINTER(_Sup7zOperationRequest),
+                ctypes.POINTER(_Sup7zOperationResult),
+            ]
+            library.sup7z_run_operation.restype = ctypes.c_int
             library.sup7z_try_passwords.argtypes = [
                 ctypes.c_wchar_p,
                 ctypes.c_wchar_p,
