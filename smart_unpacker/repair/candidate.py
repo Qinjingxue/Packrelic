@@ -262,10 +262,19 @@ class CandidateSelector:
 
     @staticmethod
     def _score(candidate: RepairCandidate) -> float:
-        validation_score = max([item.score for item in candidate.validations] or [0.0])
-        score = float(candidate.confidence or 0.0)
-        score += min(1.0, max(0.0, validation_score)) * 0.1
-        score += min(1.0, max(0.0, candidate.score_hint)) * 0.05
+        confidence = _clamp01(float(candidate.confidence or 0.0))
+        score_hint = _clamp01(float(candidate.score_hint or 0.0))
+        native_validation = _native_validation(candidate.validations)
+        validation_score = max([_clamp01(float(item.score or 0.0)) for item in candidate.validations] or [0.0])
+
+        if native_validation is not None and not _native_validation_skipped(native_validation):
+            score = confidence * 0.45
+            score += _native_validation_strength(native_validation) * 0.48
+            score += validation_score * 0.04
+        else:
+            score = confidence * 0.86
+            score += validation_score * 0.09
+        score += score_hint * 0.05
         if candidate.stage == "deep":
             score -= 0.12
         if candidate.partial:
@@ -281,6 +290,41 @@ def _selection_warnings(candidates: list[RepairCandidate]) -> list[str]:
                 continue
             warnings.extend(validation.warnings)
     return _dedupe(warnings)
+
+
+def _native_validation(validations: list[CandidateValidation]) -> CandidateValidation | None:
+    native = [item for item in validations if item.name == "native_candidate_validation"]
+    if not native:
+        return None
+    return max(native, key=lambda item: float(item.score or 0.0))
+
+
+def _native_validation_skipped(validation: CandidateValidation) -> bool:
+    details = validation.details if isinstance(validation.details, dict) else {}
+    return bool(details.get("skipped"))
+
+
+def _native_validation_strength(validation: CandidateValidation) -> float:
+    details = validation.details if isinstance(validation.details, dict) else {}
+    score = _clamp01(float(validation.score or 0.0))
+    probe = details.get("probe") if isinstance(details.get("probe"), dict) else {}
+    test = details.get("test") if isinstance(details.get("test"), dict) else {}
+    dry_run = details.get("dry_run") if isinstance(details.get("dry_run"), dict) else {}
+
+    strength = score * 0.4
+    if probe.get("is_archive") and not probe.get("is_broken"):
+        strength += 0.16
+    if test.get("ok"):
+        strength += 0.2
+    if dry_run.get("ok"):
+        strength += 0.24
+    elif int(dry_run.get("files_written", 0) or 0) > 0 or int(dry_run.get("bytes_written", 0) or 0) > 0:
+        strength += 0.1
+    return _clamp01(strength)
+
+
+def _clamp01(value: float) -> float:
+    return min(1.0, max(0.0, value))
 
 
 def _dedupe(values: list[str]) -> list[str]:

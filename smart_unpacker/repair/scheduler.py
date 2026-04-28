@@ -51,6 +51,13 @@ class RepairScheduler:
                         module_config,
                     )
                     if not generated:
+                        capability = _record_module_feedback(
+                            capability,
+                            module.spec.name,
+                            "no_candidates",
+                            execution_status="no_candidates",
+                            execution_message="module produced no repair candidates",
+                        )
                         warnings.append(f"{module.spec.name}: produced no repair candidates")
                         continue
                     for candidate in generated:
@@ -58,16 +65,21 @@ class RepairScheduler:
                             candidate,
                             score_hint=max(score, route_score, candidate.score_hint),
                             stage=candidate.stage or module.spec.stage,
-                            diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability),
                         ))
                     continue
 
                 result = module.repair(job, diagnosis, str(workspace), module_config)
             except Exception as exc:
+                capability = _record_module_feedback(
+                    capability,
+                    module.spec.name,
+                    "module_exception",
+                    execution_status="exception",
+                    execution_message=str(exc),
+                )
                 warnings.append(f"{module.spec.name}: {exc}")
                 continue
             if result.ok:
-                result = replace(result, diagnosis=_with_capability_diagnosis(result.diagnosis, capability))
                 candidate = RepairCandidate.from_result(
                     result,
                     score_hint=max(score, route_score),
@@ -76,8 +88,20 @@ class RepairScheduler:
                 if candidate is not None:
                     repair_candidates.append(candidate)
                 continue
+            capability = _record_module_feedback(
+                capability,
+                module.spec.name,
+                f"module_returned_{result.status}",
+                execution_status=result.status,
+                execution_message=result.message,
+                execution_warnings=result.warnings,
+            )
             warnings.extend(result.warnings)
         if repair_candidates:
+            repair_candidates = [
+                replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability))
+                for candidate in repair_candidates
+            ]
             selected, selection = selector.select(repair_candidates)
             if selected is not None:
                 return selected.to_result(selection=selection)
@@ -168,7 +192,7 @@ class RepairScheduler:
                 fine_score=fine_score,
             ))
             candidates.append((score, module, route_score))
-        candidates.sort(key=lambda item: item[0], reverse=True)
+        candidates.sort(key=lambda item: self._module_sort_key(item[0], item[1], item[2]))
         limit = max(1, int(self.config.get("max_modules_per_job", 4) or 4))
         selected_names = {module.spec.name for _, module, _ in candidates[:limit]}
         if selected_names:
@@ -192,6 +216,18 @@ class RepairScheduler:
             modules=decisions,
         )
         return candidates[:limit], decision
+
+    def _module_sort_key(self, score: float, module, route_score: float) -> tuple:
+        return (
+            -float(score or 0.0),
+            -float(route_score or 0.0),
+            -_route_specificity(module.spec.routes),
+            -_stage_rank(module.spec.stage),
+            0 if module.spec.safe else 1,
+            1 if module.spec.lossy else 0,
+            1 if module.spec.partial else 0,
+            module.spec.name,
+        )
 
     def _route_score(self, routes: tuple[RepairRoute, ...], context: RepairContext) -> float:
         best = 0.0
@@ -360,6 +396,57 @@ def _with_capability_diagnosis(
     if capability is not None:
         payload["capability_decision"] = capability.as_dict()
     return payload
+
+
+def _record_module_feedback(
+    capability: RepairCapabilityDecision,
+    module_name: str,
+    reason: str,
+    *,
+    execution_status: str,
+    execution_message: str = "",
+    execution_warnings: list[str] | None = None,
+) -> RepairCapabilityDecision:
+    modules = []
+    for item in capability.modules:
+        if item.name != module_name:
+            modules.append(item)
+            continue
+        modules.append(replace(
+            item,
+            reasons=_dedupe([*item.reasons, reason]),
+            dynamic_reasons=_dedupe([*item.dynamic_reasons, reason]),
+            execution_status=execution_status,
+            execution_message=execution_message,
+            execution_warnings=_dedupe([*item.execution_warnings, *(execution_warnings or [])]),
+        ))
+    return replace(capability, modules=modules)
+
+
+def _route_specificity(routes: tuple[RepairRoute, ...]) -> int:
+    if not routes:
+        return 0
+    return max(
+        len(route.formats)
+        + len(route.require_any_categories)
+        + len(route.require_any_flags)
+        + len(route.require_any_fuzzy_hints)
+        + len(route.require_any_failure_stages)
+        + len(route.require_any_failure_kinds)
+        + len(route.reject_any_flags)
+        + len(route.reject_any_failure_stages)
+        + len(route.reject_any_failure_kinds)
+        for route in routes
+    )
+
+
+def _stage_rank(stage: str) -> int:
+    ranks = {
+        "targeted": 40,
+        "safe_repair": 30,
+        "deep": 20,
+    }
+    return ranks.get(str(stage or ""), 10)
 
 
 def _dedupe(values: list[str]) -> list[str]:

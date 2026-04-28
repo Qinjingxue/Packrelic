@@ -18,6 +18,9 @@ class ModuleCapabilityDecision:
     declarative_reasons: list[str] = field(default_factory=list)
     policy_reasons: list[str] = field(default_factory=list)
     dynamic_reasons: list[str] = field(default_factory=list)
+    execution_status: str = ""
+    execution_message: str = ""
+    execution_warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -33,6 +36,9 @@ class ModuleCapabilityDecision:
             "declarative_reasons": list(self.declarative_reasons),
             "policy_reasons": list(self.policy_reasons),
             "dynamic_reasons": list(self.dynamic_reasons),
+            "execution_status": self.execution_status,
+            "execution_message": self.execution_message,
+            "execution_warnings": list(self.execution_warnings),
         }
 
 

@@ -12,7 +12,7 @@ import pytest
 
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from smart_unpacker.config.schema import normalize_config
-from smart_unpacker.repair.candidate import CandidateValidation, RepairCandidate
+from smart_unpacker.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate
 from smart_unpacker.repair import RepairJob, RepairScheduler
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.registry import get_repair_module_registry
@@ -247,6 +247,117 @@ def test_repair_scheduler_records_policy_filter_reasons(tmp_path):
     decision = result.diagnosis["capability_decision"]
     assert decision["automatic_unrepairable"] is False
     assert decision["modules"][0]["policy_reasons"] == ["unsafe_module_blocked"]
+
+
+def test_repair_scheduler_uses_explicit_tie_breaker_for_equal_module_scores(tmp_path):
+    later = _DummyNamedBoundaryModule("z_tie_boundary")
+    earlier = _DummyNamedBoundaryModule("a_tie_boundary")
+    registry = get_repair_module_registry()
+    previous_later = registry.get(later.spec.name)
+    previous_earlier = registry.get(earlier.spec.name)
+    registry.register(later)
+    registry.register(earlier)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path),
+                "max_modules_per_job": 1,
+                "modules": [
+                    {"name": later.spec.name, "enabled": True},
+                    {"name": earlier.spec.name, "enabled": True},
+                ],
+            }
+        })
+        result = scheduler.repair(RepairJob(
+            source_input={"kind": "file_range", "path": "mixed.bin", "start": 10},
+            format="zip",
+            confidence=0.8,
+            damage_flags=["boundary_unreliable"],
+            archive_key="sample",
+        ))
+    finally:
+        if previous_later is not None:
+            registry.register(previous_later)
+        if previous_earlier is not None:
+            registry.register(previous_earlier)
+
+    assert result.ok is True
+    assert result.module_name == earlier.spec.name
+
+
+def test_candidate_selector_prefers_validated_candidate_over_module_confidence():
+    high_confidence = RepairCandidate(
+        module_name="high_confidence",
+        format="zip",
+        repaired_input={"kind": "file", "path": "high.zip"},
+        confidence=0.9,
+        validations=[CandidateValidation(name="module_result", accepted=True, score=0.9)],
+    )
+    validated = RepairCandidate(
+        module_name="validated",
+        format="zip",
+        repaired_input={"kind": "file", "path": "validated.zip"},
+        confidence=0.8,
+        validations=[
+            CandidateValidation(name="module_result", accepted=True, score=0.8),
+            CandidateValidation(
+                name="native_candidate_validation",
+                accepted=True,
+                score=1.0,
+                details={
+                    "probe": {"is_archive": True, "is_broken": False},
+                    "test": {"ok": True},
+                    "dry_run": {"ok": True},
+                },
+            ),
+        ],
+    )
+
+    selected, selection = CandidateSelector().select([high_confidence, validated])
+
+    assert selected is validated
+    assert selection["selected_module"] == "validated"
+
+
+def test_repair_scheduler_records_module_failure_feedback_for_later_decision(tmp_path):
+    failing = _DummyFailingBoundaryModule()
+    succeeding = _DummyNamedBoundaryModule("z_success_boundary")
+    registry = get_repair_module_registry()
+    previous_failing = registry.get(failing.spec.name)
+    previous_succeeding = registry.get(succeeding.spec.name)
+    registry.register(failing)
+    registry.register(succeeding)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path),
+                "modules": [
+                    {"name": failing.spec.name, "enabled": True},
+                    {"name": succeeding.spec.name, "enabled": True},
+                ],
+            }
+        })
+        result = scheduler.repair(RepairJob(
+            source_input={"kind": "file_range", "path": "mixed.bin", "start": 10},
+            format="zip",
+            confidence=0.8,
+            damage_flags=["boundary_unreliable"],
+            archive_key="sample",
+        ))
+    finally:
+        if previous_failing is not None:
+            registry.register(previous_failing)
+        if previous_succeeding is not None:
+            registry.register(previous_succeeding)
+
+    assert result.ok is True
+    modules = {
+        item["name"]: item
+        for item in result.diagnosis["capability_decision"]["modules"]
+    }
+    assert modules[failing.spec.name]["execution_status"] == "unrepairable"
+    assert modules[failing.spec.name]["dynamic_reasons"] == ["module_returned_unrepairable"]
+    assert modules[succeeding.spec.name]["selected"] is True
 
 
 def test_repair_scheduler_blocks_process_level_failures(tmp_path):
@@ -935,6 +1046,48 @@ class _DummyBoundaryModule:
             module_name=self.spec.name,
             diagnosis=diagnosis.as_dict(),
             workspace_paths=[workspace],
+        )
+
+
+@dataclass
+class _DummyNamedBoundaryModule:
+    name: str
+
+    @property
+    def spec(self):
+        return RepairModuleSpec(
+            name=self.name,
+            formats=("zip",),
+            categories=("boundary_repair",),
+        )
+
+    def can_handle(self, job, diagnosis, config):
+        return 1.0 if "boundary_repair" in diagnosis.categories else 0.0
+
+    def repair(self, job, diagnosis, workspace, config):
+        return _dummy_result(self.spec.name, job, diagnosis, workspace)
+
+
+@dataclass
+class _DummyFailingBoundaryModule:
+    spec = RepairModuleSpec(
+        name="a_failing_boundary",
+        formats=("zip",),
+        categories=("boundary_repair",),
+    )
+
+    def can_handle(self, job, diagnosis, config):
+        return 1.0 if "boundary_repair" in diagnosis.categories else 0.0
+
+    def repair(self, job, diagnosis, workspace, config):
+        return RepairResult(
+            status="unrepairable",
+            confidence=0.2,
+            format=diagnosis.format,
+            module_name=self.spec.name,
+            diagnosis=diagnosis.as_dict(),
+            warnings=["dummy failure"],
+            message="dummy module failed",
         )
 
 
