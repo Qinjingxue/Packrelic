@@ -164,6 +164,7 @@ def _extraction_evidence(job: RepairJob) -> DamageEvidence:
         flags.append("unsupported_method")
     if failure.get("partial_outputs"):
         flags.append("partial_extract_available")
+    flags.extend(_coverage_flags(failure.get("archive_coverage") if isinstance(failure.get("archive_coverage"), dict) else {}))
     failure_stage = str(failure.get("failure_stage") or "")
     failure_kind = str(failure.get("failure_kind") or "")
     if failure_stage:
@@ -234,6 +235,25 @@ def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], li
     if job.attempts >= 2:
         return False, unsafe, ["repair attempt limit reached"]
     return True, unsafe, []
+
+
+def _coverage_flags(coverage: dict[str, Any]) -> list[str]:
+    if not coverage:
+        return []
+    flags: list[str] = []
+    completeness = float(coverage.get("completeness", 0.0) or 0.0)
+    expected = int(coverage.get("expected_files", 0) or 0)
+    matched = int(coverage.get("matched_files", 0) or 0)
+    missing = int(coverage.get("missing_files", 0) or 0)
+    failed = int(coverage.get("failed_files", 0) or 0)
+    partial = int(coverage.get("partial_files", 0) or 0)
+    if completeness < 1.0:
+        flags.append("partial_extract_available")
+    if (expected and matched < expected) or missing:
+        flags.extend(["missing_entries", "directory_integrity_bad_or_unknown"])
+    if failed or partial:
+        flags.append("content_integrity_bad_or_unknown")
+    return flags
 
 
 def _first_text(values) -> str:

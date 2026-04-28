@@ -167,6 +167,7 @@ class ArchiveRepairStage:
             "failed_files": verification.failed_files,
             "missing_files": verification.missing_files,
             "unverified_files": verification.unverified_files,
+            "archive_coverage": asdict(verification.archive_coverage),
             "issues": [
                 {
                     "method": item.method,

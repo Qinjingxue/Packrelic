@@ -94,6 +94,8 @@ def handle(args, ctx):
             "success_count": summary.success_count,
             "failed_count": len(failed_tasks),
             "processed_count": len(set(processed_keys)),
+            "partial_success_count": getattr(summary, "partial_success_count", 0),
+            "recovered_outputs": list(getattr(summary, "recovered_outputs", []) or []),
             "wrong_password_failure": has_wrong_password_failure(failed_tasks),
         })
         if not _should_retry_password_failure(args, failed_tasks):
@@ -134,6 +136,8 @@ def handle(args, ctx):
             "success_count": summary.success_count,
             "failed_count": len(failed_tasks),
             "processed_count": len(set(processed_keys)),
+            "partial_success_count": getattr(summary, "partial_success_count", 0),
+            "recovered_outputs": list(getattr(summary, "recovered_outputs", []) or []),
             "use_builtin_passwords": not args.no_builtin_passwords,
             "password_retry_count": retry_count,
         },

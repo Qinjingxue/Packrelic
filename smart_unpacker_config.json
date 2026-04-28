@@ -94,7 +94,7 @@
       "verify_candidates": true
     },
     "beam": {
-      "enabled": false,
+      "enabled": true,
       "beam_width": 4,
       "max_candidates_per_state": 4,
       "max_analyze_candidates": 8,

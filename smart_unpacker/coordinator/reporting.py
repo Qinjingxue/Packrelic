@@ -16,6 +16,7 @@ class RunReporter:
         start_time: float,
         success_count: int,
         failed_tasks: List[str],
+        recovered_outputs: List[dict] | None = None,
     ):
         title = self.text(" Processing Summary ", " 处理汇总 ")
         print("\n" + "=" * 20 + title + "=" * 20)
@@ -24,6 +25,19 @@ class RunReporter:
             f"总耗时：{(time.time() - start_time) / 60:.2f} 分钟",
         ))
         print(self.text(f"Successfully extracted: {success_count}", f"成功解压：{success_count}"))
+
+        recovered = list(recovered_outputs or [])
+        if recovered:
+            print(self.text(f"Partial recoveries: {len(recovered)}", f"部分恢复：{len(recovered)}"))
+            for item in recovered:
+                archive = os.path.basename(str(item.get("archive") or ""))
+                coverage = item.get("archive_coverage") if isinstance(item.get("archive_coverage"), dict) else {}
+                completeness = _percent(coverage.get("completeness", item.get("completeness", 0.0)))
+                files = _file_coverage(coverage)
+                print(self.text(
+                    f" [partial] {archive}: coverage {completeness}{files} -> {item.get('out_dir', '')}",
+                    f" [partial] {archive}：覆盖度 {completeness}{files} -> {item.get('out_dir', '')}",
+                ))
 
         if failed_tasks:
             print(self.text(f"Failed tasks: {len(failed_tasks)}", f"失败任务：{len(failed_tasks)}"))
@@ -46,3 +60,19 @@ class RunReporter:
             print(self.text(" [v] All tasks processed successfully!", " [v] 所有任务处理完成！"))
 
         print("=" * 54)
+
+
+def _percent(value) -> str:
+    try:
+        return f"{float(value or 0.0) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "0.0%"
+
+
+def _file_coverage(coverage: dict) -> str:
+    expected = int(coverage.get("expected_files", 0) or 0)
+    matched = int(coverage.get("matched_files", 0) or 0)
+    complete = int(coverage.get("complete_files", 0) or 0)
+    if expected <= 0:
+        return ""
+    return f" ({complete}/{matched}/{expected} complete/matched/expected)"

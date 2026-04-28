@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from smart_unpacker.repair.candidate import CandidateSelector, RepairCandidate
@@ -45,6 +45,7 @@ class RepairBeamState:
     verification: dict[str, Any] = field(default_factory=dict)
     actions: list[str] = field(default_factory=list)
     history: list[dict[str, Any]] = field(default_factory=list)
+    job_template: RepairJob | None = field(default=None, compare=False, repr=False)
 
     @property
     def digest(self) -> str:
@@ -66,6 +67,17 @@ class RepairBeamState:
                 "recoverable_upper_bound": self.recoverable_upper_bound,
                 "verification": dict(self.verification),
             }
+        if self.job_template is not None:
+            return replace(
+                self.job_template,
+                source_input=dict(self.source_input),
+                format=self.format,
+                confidence=self.confidence,
+                extraction_failure=extraction_failure or self.job_template.extraction_failure,
+                damage_flags=list(self.damage_flags),
+                archive_key=self.archive_key,
+                attempts=self.round_index,
+            )
         return RepairJob(
             source_input=dict(self.source_input),
             format=self.format,
@@ -231,6 +243,7 @@ class RepairBeamLoop:
                 source_integrity=str(item.assessment.get("source_integrity") or item.state.source_integrity or SOURCE_INTEGRITY_UNKNOWN),
                 decision_hint=str(item.assessment.get("decision_hint") or item.state.decision_hint or DECISION_NONE),
                 verification=dict(item.assessment),
+                job_template=item.state.job_template,
                 actions=[*item.state.actions, *item.candidate.actions],
                 history=[
                     *item.state.history,

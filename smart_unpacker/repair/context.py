@@ -23,6 +23,7 @@ class RepairContext:
     operation_result_name: str = ""
     failed_item: str = ""
     structure_evidence: Any = None
+    archive_coverage: dict[str, Any] = field(default_factory=dict)
     prepass: dict[str, Any] = field(default_factory=dict)
     fuzzy_profile: dict[str, Any] = field(default_factory=dict)
     extraction_failure: dict[str, Any] = field(default_factory=dict)
@@ -70,6 +71,7 @@ def build_repair_context(job: RepairJob, diagnosis: RepairDiagnosis) -> RepairCo
         ]),
         failed_item=_first_text([failure.get("failed_item"), result_payload.get("failed_item")]),
         structure_evidence=job.analysis_evidence,
+        archive_coverage=_archive_coverage(failure),
         prepass=dict(job.analysis_prepass or {}),
         fuzzy_profile=fuzzy_profile,
         extraction_failure=failure,
@@ -118,6 +120,8 @@ def _damage_flags(
         flags.append("unsupported_method")
     if failure.get("partial_outputs"):
         flags.append("partial_extract_available")
+    coverage = _archive_coverage(failure)
+    flags.extend(_coverage_flags(coverage))
     if failure_kind:
         flags.append(failure_kind)
     if failure_stage == "archive_open" and failure_kind == "structure_recognition":
@@ -131,6 +135,30 @@ def _damage_flags(
     if failure_stage.startswith("worker_") or failure_kind.startswith("process_"):
         flags.append("process_failure")
     return _dedupe([str(item) for item in flags if item])
+
+
+def _archive_coverage(failure: dict[str, Any]) -> dict[str, Any]:
+    coverage = failure.get("archive_coverage")
+    return dict(coverage) if isinstance(coverage, dict) else {}
+
+
+def _coverage_flags(coverage: dict[str, Any]) -> list[str]:
+    if not coverage:
+        return []
+    flags: list[str] = []
+    completeness = float(coverage.get("completeness", 0.0) or 0.0)
+    expected = int(coverage.get("expected_files", 0) or 0)
+    matched = int(coverage.get("matched_files", 0) or 0)
+    failed = int(coverage.get("failed_files", 0) or 0)
+    partial = int(coverage.get("partial_files", 0) or 0)
+    missing = int(coverage.get("missing_files", 0) or 0)
+    if completeness < 1.0:
+        flags.append("partial_extract_available")
+    if (expected and matched < expected) or missing:
+        flags.append("missing_entries")
+    if failed or partial:
+        flags.append("content_integrity_bad_or_unknown")
+    return flags
 
 
 def _first_text(values: list[Any]) -> str:

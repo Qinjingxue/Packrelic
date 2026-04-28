@@ -119,11 +119,19 @@ class PipelineRunner:
             self._apply_postprocess_actions()
 
         log_dir = first_target if os.path.isdir(first_target) else os.path.dirname(first_target)
-        self.logger.log_final_summary(log_dir, start_time, self.context.success_count, self.context.failed_tasks)
+        self.logger.log_final_summary(
+            log_dir,
+            start_time,
+            self.context.success_count,
+            self.context.failed_tasks,
+            recovered_outputs=self.context.recovered_outputs,
+        )
         self.extractor.close()
         
         return RunSummary(
             success_count=self.context.success_count,
             failed_tasks=self.context.failed_tasks,
-            processed_keys=list(self.context.processed_keys)
+            processed_keys=list(self.context.processed_keys),
+            partial_success_count=self.context.partial_success_count,
+            recovered_outputs=list(self.context.recovered_outputs),
         )

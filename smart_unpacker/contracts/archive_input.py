@@ -249,6 +249,10 @@ class ArchiveInputDescriptor:
     def from_legacy(cls, raw: dict[str, Any], *, archive_path: str, part_paths: list[str] | None = None) -> "ArchiveInputDescriptor":
         kind = str(raw.get("kind") or "file").lower()
         format_hint = str(raw.get("format_hint") or raw.get("format") or "")
+        if kind == "file":
+            path = str(raw.get("path") or raw.get("archive_path") or archive_path)
+            parts = [ArchiveInputPart(path=path, role="main", volume_number=1)]
+            return cls(entry_path=path, open_mode="file", format_hint=format_hint, parts=parts)
         if kind == "file_range":
             path = str(raw.get("path") or archive_path)
             start = int(raw.get("start", raw.get("start_offset", 0)) or 0)

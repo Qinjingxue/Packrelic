@@ -112,13 +112,23 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     )
     runner.repair_stage = _NoCandidateRepairStage()
 
-    outcome = runner._extract_verify_with_retries(_task(archive), str(out_dir), runtime_scheduler=None)
+    task = _task(archive)
+    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
 
     assert outcome.success is True
     assert outcome.verification is not None
     assert outcome.verification.decision_hint == "accept_partial"
     assert good.exists()
     assert not failed.exists()
+    assert runner.collect_result(task, outcome) == str(out_dir)
+    assert runner.context.partial_success_count == 1
+    recovered = runner.context.recovered_outputs[0]
+    assert recovered["archive_coverage"]["expected_files"] == 2
+    report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    assert report["success_kind"] == "partial"
+    assert report["archive_coverage"]["expected_files"] == 2
+    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert manifest_payload["recovery"]["verification"]["decision_hint"] == "accept_partial"
 
 
 class _SingleResultExtractor:

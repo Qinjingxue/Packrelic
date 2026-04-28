@@ -38,7 +38,7 @@ DEFAULT_REPAIR_CONFIG = {
         "verify_candidates": True,
     },
     "beam": {
-        "enabled": False,
+        "enabled": True,
         "beam_width": 4,
         "max_candidates_per_state": 4,
         "max_analyze_candidates": 8,
@@ -213,7 +213,7 @@ def _normalize_beam(value: Any) -> dict[str, Any]:
         raise ValueError("repair.beam must be an object")
     return {
         **value,
-        "enabled": _bool_value(value.get("enabled", False), "repair.beam.enabled"),
+        "enabled": _bool_value(value.get("enabled", True), "repair.beam.enabled"),
         "beam_width": _int_at_least(value, "beam_width", 1),
         "max_candidates_per_state": _int_at_least(value, "max_candidates_per_state", 1),
         "max_analyze_candidates": _int_at_least(value, "max_analyze_candidates", 1),

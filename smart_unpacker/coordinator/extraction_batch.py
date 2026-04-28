@@ -1,11 +1,15 @@
 import os
 import shutil
+import hashlib
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, List
 
 from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
+from smart_unpacker.coordinator.repair_beam import RepairBeamCandidate, RepairBeamLoop, RepairBeamState
 from smart_unpacker.coordinator.repair_loop import RepairLoopLimits, RepairLoopState
 from smart_unpacker.coordinator.repair_stage import ArchiveRepairStage
 from smart_unpacker.coordinator.resource_preflight import ResourcePreflightInspector
@@ -20,6 +24,7 @@ from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
 from smart_unpacker.extraction.progress import filter_extraction_outputs
 from smart_unpacker.rename.scheduler import RenameScheduler
+from smart_unpacker.repair.candidate import RepairCandidate
 from smart_unpacker.verification import VerificationResult, VerificationScheduler
 from smart_unpacker.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
 from smart_unpacker.support.path_keys import absolute_path_key
@@ -210,6 +215,17 @@ class ExtractionBatchRunner:
             if verification.decision_hint == DECISION_REPAIR:
                 state = RepairLoopState(task, self.repair_loop_limits)
                 if state.can_attempt(trigger="verification"):
+                    if self._beam_enabled():
+                        beam_outcome = self._repair_after_verification_with_beam(
+                            task,
+                            result,
+                            verification,
+                            out_dir,
+                            runtime_scheduler,
+                            state,
+                        )
+                        if beam_outcome is not None:
+                            return beam_outcome
                     repair_result = self.repair_stage.repair_after_verification_assessment_result(task, result, verification)
                     if state.record_result(repair_result, trigger="verification"):
                         shutil.rmtree(out_dir, ignore_errors=True)
@@ -261,6 +277,127 @@ class ExtractionBatchRunner:
     def _retry_on_verification_failure(self) -> bool:
         return bool(self.verifier.config.get("retry_on_verification_failure", True))
 
+    def _beam_enabled(self) -> bool:
+        beam = self.repair_stage.config.get("beam") if isinstance(self.repair_stage.config.get("beam"), dict) else {}
+        return bool(beam.get("enabled", False)) and self.repair_stage.scheduler is not None
+
+    def _repair_after_verification_with_beam(
+        self,
+        task: ArchiveTask,
+        result: ExtractionResult,
+        verification: VerificationResult,
+        out_dir: str,
+        runtime_scheduler: ConcurrencyScheduler,
+        loop_state: RepairLoopState,
+    ) -> BatchExtractionOutcome | None:
+        scheduler = self.repair_stage.scheduler
+        if scheduler is None:
+            return None
+        job = self.repair_stage._job_from_verification_assessment(task, result, verification)
+        if job is None:
+            return None
+
+        evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]] = {}
+        beam = RepairBeamLoop.from_config(
+            scheduler,
+            self.repair_stage.config,
+            analyze=lambda candidate: {"confidence": float(candidate.confidence or 0.0)},
+            assess=lambda item: self._assess_beam_candidate(task, item, out_dir, runtime_scheduler, evaluated),
+        )
+        initial = RepairBeamState(
+            source_input=dict(job.source_input),
+            format=job.format,
+            confidence=job.confidence,
+            damage_flags=list(job.damage_flags),
+            archive_key=job.archive_key,
+            completeness=verification.completeness,
+            recoverable_upper_bound=verification.recoverable_upper_bound,
+            assessment_status=verification.assessment_status,
+            source_integrity=verification.source_integrity,
+            decision_hint=verification.decision_hint,
+            verification=_verification_payload(verification),
+            job_template=job,
+        )
+        max_rounds = int((self.repair_stage.config.get("beam") or {}).get("max_rounds", 1) or 1)
+        run = beam.run([initial], max_rounds=max_rounds)
+        best = run.best_state
+        if best is None:
+            self._cleanup_beam_evaluations(evaluated)
+            return None
+
+        digest = _source_input_digest(best.source_input)
+        selected = evaluated.get(digest)
+        if selected is None:
+            self._cleanup_beam_evaluations(evaluated)
+            return None
+        candidate, extracted, assessed, temp_dir = selected
+        repair_result = candidate.to_result(selection={
+            "strategy": "beam",
+            "score": best.score,
+            "completeness": assessed.completeness,
+            "decision_hint": assessed.decision_hint,
+            "archive_coverage": _coverage_payload(assessed),
+        })
+        if not loop_state.record_result(repair_result, trigger="verification_beam"):
+            self._cleanup_beam_evaluations(evaluated)
+            return None
+        self.analysis_stage.analyze_task(task)
+
+        if _verification_accepts(assessed):
+            final_result = self._promote_beam_output(extracted, temp_dir, out_dir)
+            self._cleanup_beam_evaluations(evaluated, keep=temp_dir)
+            if self._accept_partial_output(final_result, assessed):
+                self._filter_partial_outputs(final_result)
+            return BatchExtractionOutcome(result=final_result, verification=assessed, attempts=1)
+
+        self._cleanup_beam_evaluations(evaluated)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return None
+
+    def _assess_beam_candidate(
+        self,
+        task: ArchiveTask,
+        item: RepairBeamCandidate,
+        out_dir: str,
+        runtime_scheduler: ConcurrencyScheduler,
+        evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]],
+    ) -> VerificationResult:
+        original = task.archive_input()
+        digest = _source_input_digest(item.candidate.repaired_input)
+        temp_dir = f"{out_dir}.beam_{len(evaluated) + 1:02d}_{item.candidate.module_name}"
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        try:
+            descriptor = self.repair_stage._descriptor_from_repaired_input(task, item.candidate.repaired_input)
+            task.set_archive_input(descriptor or item.candidate.repaired_input)
+            extracted = self.extractor.extract(task, temp_dir, runtime_scheduler=runtime_scheduler)
+            assessed = self.verifier.verify(task, extracted)
+            evaluated[digest] = (item.candidate, extracted, assessed, temp_dir)
+            return assessed
+        finally:
+            task.set_archive_input(original)
+
+    def _promote_beam_output(self, result: ExtractionResult, temp_dir: str, out_dir: str) -> ExtractionResult:
+        if os.path.abspath(temp_dir) != os.path.abspath(out_dir):
+            shutil.rmtree(out_dir, ignore_errors=True)
+            if os.path.exists(temp_dir):
+                shutil.move(temp_dir, out_dir)
+        result.out_dir = out_dir
+        manifest = Path(out_dir) / ".sunpack" / "extraction_manifest.json"
+        result.progress_manifest = str(manifest) if manifest.exists() else ""
+        return result
+
+    def _cleanup_beam_evaluations(
+        self,
+        evaluated: dict[str, tuple[RepairCandidate, ExtractionResult, VerificationResult, str]],
+        *,
+        keep: str = "",
+    ) -> None:
+        keep_abs = os.path.abspath(keep) if keep else ""
+        for _candidate, _result, _verification, temp_dir in evaluated.values():
+            if keep_abs and os.path.abspath(temp_dir) == keep_abs:
+                continue
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def _skip_tasks_inside_batch_outputs(self, tasks: List[ArchiveTask], output_dir_resolver=None) -> List[ArchiveTask]:
         output_dir_resolver = output_dir_resolver or self.extractor.default_output_dir_for_task
         output_roots = []
@@ -296,6 +433,19 @@ class ExtractionBatchRunner:
         with self.context.lock:
             if outcome.success:
                 self.context.success_count += 1
+                if outcome.verification is not None and outcome.verification.decision_hint == DECISION_ACCEPT_PARTIAL:
+                    recovery_report = _write_recovery_report(task, outcome, out_dir)
+                    self.context.partial_success_count += 1
+                    self.context.recovered_outputs.append({
+                        "archive": task.main_path,
+                        "out_dir": out_dir,
+                        "completeness": outcome.verification.completeness,
+                        "assessment_status": outcome.verification.assessment_status,
+                        "source_integrity": outcome.verification.source_integrity,
+                        "archive_coverage": _coverage_payload(outcome.verification),
+                        "progress_manifest": res.progress_manifest,
+                        "recovery_report": recovery_report,
+                    })
                 self.context.processed_keys.add(task.key)
                 self.context.unpacked_archives.append(res.all_parts or task.all_parts)
                 self.context.flatten_candidates.add(out_dir)
@@ -319,6 +469,7 @@ class ExtractionBatchRunner:
             f"completeness={getattr(verification, 'completeness', '')}, "
             f"assessment={getattr(verification, 'assessment_status', '')}, "
             f"decision={getattr(verification, 'decision_hint', '')}, "
+            f"coverage={getattr(getattr(verification, 'archive_coverage', None), 'completeness', '')}, "
             f"attempts={outcome.attempts}, "
             f"steps={steps}"
         )
@@ -331,3 +482,93 @@ def _verification_accepts(verification: VerificationResult | Any) -> bool:
 
 def _verification_accepts_partial(verification: VerificationResult | Any) -> bool:
     return getattr(verification, "decision_hint", "") == DECISION_ACCEPT_PARTIAL
+
+
+def _source_input_digest(source_input: dict[str, Any]) -> str:
+    payload = json.dumps(source_input or {}, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _coverage_payload(verification: VerificationResult) -> dict[str, Any]:
+    coverage = verification.archive_coverage
+    return {
+        "completeness": coverage.completeness,
+        "file_coverage": coverage.file_coverage,
+        "byte_coverage": coverage.byte_coverage,
+        "expected_files": coverage.expected_files,
+        "matched_files": coverage.matched_files,
+        "complete_files": coverage.complete_files,
+        "partial_files": coverage.partial_files,
+        "failed_files": coverage.failed_files,
+        "missing_files": coverage.missing_files,
+        "unverified_files": coverage.unverified_files,
+        "expected_bytes": coverage.expected_bytes,
+        "matched_bytes": coverage.matched_bytes,
+        "complete_bytes": coverage.complete_bytes,
+        "confidence": coverage.confidence,
+        "sources": list(coverage.sources),
+    }
+
+
+def _verification_payload(verification: VerificationResult) -> dict[str, Any]:
+    return {
+        "completeness": verification.completeness,
+        "recoverable_upper_bound": verification.recoverable_upper_bound,
+        "assessment_status": verification.assessment_status,
+        "source_integrity": verification.source_integrity,
+        "decision_hint": verification.decision_hint,
+        "archive_coverage": _coverage_payload(verification),
+    }
+
+
+def _write_recovery_report(task: ArchiveTask, outcome: BatchExtractionOutcome, out_dir: str) -> str:
+    verification = outcome.verification
+    if verification is None:
+        return ""
+    payload = {
+        "version": 1,
+        "archive": task.main_path,
+        "out_dir": out_dir,
+        "success_kind": "partial",
+        "progress_manifest": outcome.result.progress_manifest,
+        "verification": _verification_payload(verification),
+        "archive_coverage": _coverage_payload(verification),
+    }
+    target = Path(out_dir) / ".sunpack" / "recovery_report.json"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _annotate_progress_manifest(outcome.result.progress_manifest, payload)
+        return str(target)
+    except OSError:
+        return ""
+
+
+def _annotate_progress_manifest(manifest_path: str, recovery_report: dict[str, Any]) -> None:
+    if not manifest_path:
+        return
+    path = Path(manifest_path)
+    if not path.is_file():
+        return
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(manifest, dict):
+        return
+    manifest["recovery"] = {
+        "success_kind": recovery_report.get("success_kind"),
+        "verification": recovery_report.get("verification"),
+        "archive_coverage": recovery_report.get("archive_coverage"),
+    }
+    files = manifest.get("files")
+    if isinstance(files, list):
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "unverified")
+            item["recovery_status"] = "kept_complete" if status == "complete" else "kept_partial_or_unverified"
+    try:
+        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        return

@@ -7,7 +7,9 @@ from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
 from smart_unpacker.extraction.result import ExtractionResult
+from smart_unpacker.repair.candidate import RepairCandidate, RepairCandidateBatch
 from smart_unpacker.repair.result import RepairResult
+from smart_unpacker.verification.result import ArchiveCoverageSummary, VerificationResult
 
 
 def test_extraction_failure_repair_reanalysis_loop_runs_until_success(tmp_path):
@@ -82,6 +84,52 @@ def test_analysis_scheduler_reanalyzes_repaired_archive_input_file(tmp_path):
     assert scheduler.paths == [str(repaired)]
 
 
+def test_verification_repair_uses_beam_to_select_complete_candidate(tmp_path):
+    source = tmp_path / "broken.zip"
+    bad = tmp_path / "bad.zip"
+    good = tmp_path / "good.zip"
+    source.write_bytes(b"broken")
+    bad.write_bytes(b"bad")
+    good.write_bytes(b"good")
+    out_dir = tmp_path / "out"
+    task = _task(source)
+    task.fact_bag.set("analysis.selected_format", "zip")
+    extractor = _ArchiveInputExtractor()
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        extractor,
+        _FakeOutputScanPolicy(),
+        config={
+            "repair": {
+                "workspace": str(tmp_path / "repair"),
+                "max_repair_rounds_per_task": 2,
+                "beam": {
+                    "enabled": True,
+                    "beam_width": 2,
+                    "max_candidates_per_state": 2,
+                    "max_analyze_candidates": 2,
+                    "max_assess_candidates": 2,
+                    "max_rounds": 1,
+                    "min_improvement": 0.0,
+                },
+            },
+            "verification": {"enabled": True, "methods": []},
+        },
+    )
+    runner.verifier = _PathAwareVerifier()
+    runner.repair_stage.scheduler = _BeamCandidateScheduler(bad, good)
+    runner.analysis_stage = _FakeAnalysisStage()
+
+    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
+
+    assert outcome.success is True
+    assert outcome.verification.decision_hint == "accept"
+    selected_input = task.fact_bag.get("archive.input")
+    assert selected_input["entry_path"].endswith("round_01_good_candidate.zip")
+    assert Path(selected_input["entry_path"]).read_bytes() == good.read_bytes()
+    assert (out_dir / "good.txt").exists()
+
+
 class _FakeOutputScanPolicy:
     def scan_roots_from_outputs(self, outputs):
         return list(outputs)
@@ -117,6 +165,49 @@ class _FakeExtractor:
 
     def extract(self, task, out_dir, runtime_scheduler=None):
         return self.results.pop(0)
+
+
+class _ArchiveInputExtractor:
+    password_session = None
+
+    def default_output_dir_for_task(self, task):
+        return str(Path(task.main_path).with_suffix(""))
+
+    def inspect(self, task, out_dir):
+        return type("Preflight", (), {"skip_result": None})()
+
+    def extract(self, task, out_dir, runtime_scheduler=None):
+        descriptor = task.archive_input()
+        archive = descriptor.entry_path or task.main_path
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        if "good" in Path(archive).name:
+            (Path(out_dir) / "good.txt").write_text("ok", encoding="utf-8")
+        else:
+            (Path(out_dir) / "bad.txt").write_text("bad", encoding="utf-8")
+        return ExtractionResult(success=True, archive=archive, out_dir=str(out_dir), all_parts=[archive])
+
+
+class _PathAwareVerifier:
+    config = {"max_retries": 0, "cleanup_failed_output": True}
+
+    def verify(self, task, result):
+        if "good" in Path(result.archive).name:
+            return _verification("accept", 1.0)
+        return _verification("repair", 0.2)
+
+
+class _BeamCandidateScheduler:
+    def __init__(self, bad, good):
+        self.bad = bad
+        self.good = good
+        self.jobs = []
+
+    def generate_repair_candidates(self, job):
+        self.jobs.append(job)
+        return RepairCandidateBatch(candidates=[
+            _candidate("bad_candidate", self.bad, 0.9),
+            _candidate("good_candidate", self.good, 0.5),
+        ])
 
 
 class _FakeAnalysisStage:
@@ -175,6 +266,37 @@ def _runner(tmp_path, extractor):
     )
     runner.verifier = _FakeVerifier()
     return runner
+
+
+def _candidate(module, path, confidence):
+    return RepairCandidate(
+        module_name=module,
+        format="zip",
+        repaired_input={"kind": "file", "path": str(path), "format_hint": "zip"},
+        confidence=confidence,
+        actions=[module],
+        workspace_paths=[str(path)],
+    )
+
+
+def _verification(decision, completeness):
+    status = "complete" if decision == "accept" else "partial"
+    return VerificationResult(
+        completeness=completeness,
+        recoverable_upper_bound=1.0,
+        assessment_status=status,
+        source_integrity="complete",
+        decision_hint=decision,
+        archive_coverage=ArchiveCoverageSummary(
+            completeness=completeness,
+            file_coverage=completeness,
+            byte_coverage=completeness,
+            expected_files=1,
+            matched_files=1 if completeness > 0 else 0,
+            complete_files=1 if completeness >= 1 else 0,
+            confidence=0.9,
+        ),
+    )
 
 
 def _task(path: Path) -> ArchiveTask:

@@ -435,6 +435,7 @@ def test_repair_config_is_normalized_by_config_schema():
     assert config["repair"]["deep"]["max_output_size_mb"] == 64.0
     assert config["repair"]["deep"]["max_entry_uncompressed_mb"] == 8.0
     assert config["repair"]["deep"]["verify_candidates"] is False
+    assert config["repair"]["beam"]["enabled"] is True
 
 
 def test_zip_central_directory_rebuild_repairs_missing_eocd(tmp_path):
