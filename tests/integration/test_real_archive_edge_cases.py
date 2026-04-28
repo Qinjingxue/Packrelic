@@ -75,6 +75,14 @@ def marker_was_extracted(root: Path, marker_name: str, marker_text: str) -> bool
                 return True
         except OSError:
             continue
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            if path.read_text(encoding="utf-8") == marker_text:
+                return True
+        except (OSError, UnicodeDecodeError):
+            continue
     return False
 
 
@@ -100,6 +108,14 @@ def assert_failure_contains(case: ArchiveCase, expected_options: set[str], passw
     assert summary.success_count == 0
     assert summary.failed_tasks
     assert any(any(expected in item for expected in expected_options) for item in summary.failed_tasks)
+    assert not marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
+
+
+def assert_partial_success_without_marker(case: ArchiveCase):
+    summary = run_pipeline(case.archive_dir)
+
+    assert summary.success_count == 1
+    assert summary.failed_tasks == []
     assert not marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
 
 
@@ -256,6 +272,9 @@ def test_real_archive_edge_corrupted_single_archives_fail(tmp_path, archive_form
     require_7z()
     case = FACTORY.create(tmp_path, f"corrupted_single_{archive_format}", archive_format, corruption="truncate")
 
+    if archive_format == "zip":
+        assert_success(case)
+        return
     assert_failure_contains(case, {"压缩包损坏", "致命错误"})
 
 
@@ -265,6 +284,12 @@ def test_real_archive_edge_corruption_modes_fail(tmp_path, archive_format, corru
     require_7z()
     case = FACTORY.create(tmp_path, f"corrupt_{corruption}_{archive_format}", archive_format, corruption=corruption)
 
+    if archive_format == "zip" and corruption == "byte_flip":
+        assert_partial_success_without_marker(case)
+        return
+    if archive_format == "zip" and corruption == "tail_damage":
+        assert_success(case)
+        return
     assert_failure_contains(case, {"压缩包损坏", "致命错误"})
 
 

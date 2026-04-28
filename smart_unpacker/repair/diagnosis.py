@@ -226,9 +226,9 @@ def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], li
         return False, [], ["password must be resolved before structural repair"]
     if flags & {"output_filesystem", "process_failure"}:
         return False, [], ["failure is outside archive repair scope"]
-    unsafe: list[str] = []
     if "missing_volume" in flags:
-        unsafe.append("volume_synthesis")
+        return False, ["volume_synthesis"], ["missing archive volume must be supplied before repair"]
+    unsafe: list[str] = []
     if job.attempts >= 2:
         return False, unsafe, ["repair attempt limit reached"]
     return True, unsafe, []

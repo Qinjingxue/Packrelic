@@ -20,7 +20,6 @@ class ZipCentralDirectoryRebuild:
         routes=(
             RepairRoute(
                 formats=("zip",),
-                require_any_categories=("directory_rebuild",),
                 require_any_flags=("central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"),
                 require_any_failure_kinds=("structure_recognition", "corrupted_data"),
                 base_score=0.84,
@@ -30,8 +29,14 @@ class ZipCentralDirectoryRebuild:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        if "directory_rebuild" in diagnosis.categories:
-            return 0.95
+        if "eocd_bad" in flags and "local_header_recovery" not in flags:
+            return 0.0
+        if flags & {"data_descriptor", "compressed_size_bad", "bit3_data_descriptor"}:
+            return 0.0
+        if flags & {"central_directory_offset_bad", "central_directory_count_bad"} and not (
+            flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}
+        ):
+            return 0.0
         if flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}:
             return 0.9
         if "safe_repair" in diagnosis.categories:
@@ -39,6 +44,16 @@ class ZipCentralDirectoryRebuild:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
+        flags = set(job.damage_flags)
+        if "eocd_bad" in flags and "local_header_recovery" not in flags:
+            return RepairResult(
+                status="unrepairable",
+                confidence=0.0,
+                format="zip",
+                module_name=self.spec.name,
+                diagnosis=diagnosis.as_dict(),
+                message="EOCD-only damage is handled by the EOCD repair module first",
+            )
         data = load_source_bytes(job.source_input)
         scan = scan_local_file_headers(data)
         if not scan.entries:

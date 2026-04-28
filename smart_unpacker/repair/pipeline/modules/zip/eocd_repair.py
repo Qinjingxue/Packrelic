@@ -19,8 +19,7 @@ class ZipEocdRepair:
         routes=(
             RepairRoute(
                 formats=("zip",),
-                require_any_categories=("directory_rebuild", "boundary_repair"),
-                require_any_flags=("eocd_bad", "central_directory_bad", "directory_integrity_bad_or_unknown", "trailing_junk"),
+                require_any_flags=("eocd_bad", "central_directory_bad", "directory_integrity_bad_or_unknown"),
                 require_any_failure_kinds=("structure_recognition", "corrupted_data"),
                 base_score=0.82,
             ),
@@ -29,12 +28,10 @@ class ZipEocdRepair:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 0.0
         if flags & {"eocd_bad", "central_directory_bad", "directory_integrity_bad_or_unknown"}:
-            return 0.9
-        if "directory_rebuild" in diagnosis.categories:
-            return 0.82
-        if "boundary_repair" in diagnosis.categories:
-            return 0.55
+            return 0.97 if "eocd_bad" in flags else 0.9
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
@@ -53,7 +50,7 @@ class ZipEocdRepair:
         if cd is None:
             return _failed(self.spec.name, diagnosis, "no valid central directory was found for EOCD rebuild")
         path = write_candidate(rewrite_eocd(data, cd), workspace, "zip_eocd_repair.zip")
-        return _ok(self.spec.name, diagnosis, job, path, 0.86, ["scan_central_directory", "rebuild_eocd"])
+        return _ok(self.spec.name, diagnosis, job, path, 0.94, ["scan_central_directory", "rebuild_eocd"])
 
 
 def _ok(module_name, diagnosis, job, path, confidence, actions):

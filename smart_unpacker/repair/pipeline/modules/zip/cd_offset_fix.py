@@ -19,8 +19,7 @@ class ZipCentralDirectoryOffsetFix:
         routes=(
             RepairRoute(
                 formats=("zip",),
-                require_any_categories=("directory_rebuild",),
-                require_any_flags=("central_directory_offset_bad", "central_directory_bad", "trailing_junk"),
+                require_any_flags=("central_directory_offset_bad", "central_directory_bad"),
                 require_any_failure_kinds=("structure_recognition",),
                 base_score=0.8,
             ),
@@ -29,10 +28,10 @@ class ZipCentralDirectoryOffsetFix:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 0.0
         if flags & {"central_directory_offset_bad", "central_directory_bad"}:
             return 0.92
-        if "directory_rebuild" in diagnosis.categories:
-            return 0.72
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:

@@ -24,6 +24,7 @@ class ZipTrailingJunkTrim:
                 require_any_categories=("boundary_repair",),
                 require_any_flags=("trailing_junk", "boundary_unreliable", "trailing_padding"),
                 require_any_fuzzy_hints=("trailing_text_junk_likely", "trailing_padding_likely", "tail_printable_region"),
+                reject_any_flags=("wrong_password", "carrier_archive", "sfx", "embedded_archive", "carrier_prefix"),
                 base_score=0.82,
             ),
         ),
@@ -31,6 +32,8 @@ class ZipTrailingJunkTrim:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 0.0
         if flags & {"trailing_junk", "boundary_unreliable"}:
             return 0.88
         if "boundary_repair" in diagnosis.categories:

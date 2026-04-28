@@ -20,8 +20,8 @@ class GzipFooterFix:
         routes=(
             RepairRoute(
                 formats=("gzip", "gz"),
-                require_any_categories=("content_recovery", "boundary_repair"),
-                require_any_flags=("gzip_footer_bad", "crc_error", "checksum_error", "trailing_junk"),
+                require_any_categories=("content_recovery",),
+                require_any_flags=("gzip_footer_bad", "crc_error", "checksum_error"),
                 require_any_failure_kinds=("checksum_error", "corrupted_data", "data_error"),
                 base_score=0.78,
             ),
@@ -30,9 +30,9 @@ class GzipFooterFix:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        if flags & {"gzip_footer_bad", "crc_error", "checksum_error", "trailing_junk"}:
+        if flags & {"gzip_footer_bad", "crc_error", "checksum_error"}:
             return 0.88
-        if "content_recovery" in diagnosis.categories or "boundary_repair" in diagnosis.categories:
+        if "content_recovery" in diagnosis.categories:
             return 0.62
         return 0.0
 

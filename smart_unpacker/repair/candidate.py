@@ -266,6 +266,8 @@ class CandidateSelector:
         score = float(candidate.confidence or 0.0)
         score += min(1.0, max(0.0, validation_score)) * 0.1
         score += min(1.0, max(0.0, candidate.score_hint)) * 0.05
+        if candidate.stage == "deep":
+            score -= 0.12
         if candidate.partial:
             score -= 0.02
         return score

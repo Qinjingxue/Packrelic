@@ -22,7 +22,6 @@ class ZipCentralDirectoryCountFix:
         routes=(
             RepairRoute(
                 formats=("zip",),
-                require_any_categories=("directory_rebuild",),
                 require_any_flags=("central_directory_count_bad", "central_directory_bad"),
                 require_any_failure_kinds=("structure_recognition",),
                 base_score=0.78,
@@ -34,8 +33,6 @@ class ZipCentralDirectoryCountFix:
         flags = set(job.damage_flags)
         if flags & {"central_directory_count_bad", "central_directory_bad"}:
             return 0.88
-        if "directory_rebuild" in diagnosis.categories:
-            return 0.6
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:

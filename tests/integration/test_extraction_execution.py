@@ -23,6 +23,8 @@ def runner_config():
 
 
 class FakePasswordResolver:
+    password_tester = SimpleNamespace(passwords=[])
+
     def resolve(self, archive_path, fact_bag, part_paths=None):
         return SimpleNamespace(password="", test_result=None, error_text="")
 
@@ -33,7 +35,7 @@ class FakeMetadataScanner:
 
 
 class FakeStager:
-    def normalize_archive_paths(self, archive, all_parts, startupinfo=None):
+    def normalize_archive_paths(self, archive, all_parts, startupinfo=None, volume_entries=None):
         parts = list(all_parts)
         return SimpleNamespace(archive=archive, run_parts=parts, cleanup_parts=parts)
 
@@ -51,7 +53,7 @@ class ExtractionExecutionTests(unittest.TestCase):
             out_dir = Path(tmp) / "sample_out"
 
             class CandidateStager:
-                def normalize_archive_paths(self, archive, all_parts, startupinfo=None):
+                def normalize_archive_paths(self, archive, all_parts, startupinfo=None, volume_entries=None):
                     return SimpleNamespace(
                         archive=archive,
                         run_parts=[str(archive_path), str(candidate_path)],

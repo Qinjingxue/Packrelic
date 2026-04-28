@@ -26,17 +26,15 @@ class CompressionStreamPartialRecovery:
             routes=(
                 RepairRoute(
                     formats=self.aliases,
-                    require_any_categories=("content_recovery", "boundary_repair"),
+                    require_any_categories=("boundary_repair",),
                     require_any_flags=(
                         "probably_truncated",
                         "stream_truncated",
                         "input_truncated",
                         "unexpected_end",
                         "unexpected_eof",
-                        "data_error",
-                        "damaged",
                     ),
-                    require_any_failure_kinds=("unexpected_end", "corrupted_data", "data_error"),
+                    require_any_failure_kinds=("unexpected_end",),
                     base_score=0.82,
                 ),
             ),
@@ -50,12 +48,8 @@ class CompressionStreamPartialRecovery:
             "input_truncated",
             "unexpected_end",
             "unexpected_eof",
-            "data_error",
-            "damaged",
         }:
             return 0.94
-        if "content_recovery" in diagnosis.categories:
-            return 0.84
         if "boundary_repair" in diagnosis.categories and flags & {"checksum_error", "crc_error"}:
             return 0.68
         return 0.0

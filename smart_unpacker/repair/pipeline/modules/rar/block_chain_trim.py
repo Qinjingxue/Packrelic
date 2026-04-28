@@ -25,6 +25,7 @@ class RarBlockChainTrim:
                 require_any_flags=("trailing_junk", "boundary_unreliable", "probably_truncated", "input_truncated", "unexpected_end"),
                 require_any_fuzzy_hints=("trailing_text_junk_likely", "trailing_padding_likely"),
                 require_any_failure_kinds=("unexpected_end", "corrupted_data", "data_error"),
+                reject_any_flags=("wrong_password", "carrier_archive", "sfx", "embedded_archive", "carrier_prefix"),
                 base_score=0.82,
             ),
         ),
@@ -32,6 +33,8 @@ class RarBlockChainTrim:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 0.0
         if flags & {"trailing_junk", "boundary_unreliable", "probably_truncated", "input_truncated", "unexpected_end"}:
             return 0.9
         if "boundary_repair" in diagnosis.categories:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
@@ -32,6 +34,8 @@ class ArchiveCarrierCropDeepRecovery:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if diagnosis.format == "rar" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 0.65
         if flags & {"carrier_archive", "sfx", "embedded_archive", "boundary_unreliable", "start_trusted_only"}:
             return 0.9
         if "boundary_repair" in diagnosis.categories and diagnosis.format in {"7z", "seven_zip", "rar"}:
@@ -44,6 +48,7 @@ class ArchiveCarrierCropDeepRecovery:
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         result = self._run_native(job, diagnosis, workspace, config)
+        normalize_native_candidate_lengths(result)
         return candidates_from_native_result(
             self.spec.name,
             result,
@@ -66,6 +71,7 @@ class ArchiveCarrierCropDeepRecovery:
 
 
 def _result_from_native(module_name: str, result: dict, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> RepairResult:
+    normalize_native_candidate_lengths(result)
     status = str(result.get("status") or "unrepairable")
     selected_path = str(result.get("selected_path") or "")
     fmt = str(result.get("format") or diagnosis.format or job.format or "archive")
@@ -116,3 +122,35 @@ def _result_from_native(module_name: str, result: dict, job: RepairJob, diagnosi
 
 
 register_repair_module(ArchiveCarrierCropDeepRecovery())
+
+
+def normalize_native_candidate_lengths(result: dict) -> None:
+    candidates = list(result.get("candidates") or [])
+    selected_path = str(result.get("selected_path") or "")
+    if selected_path:
+        candidates.append({
+            "path": selected_path,
+            "output_bytes": result.get("output_bytes"),
+        })
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        try:
+            output_bytes = int(item.get("output_bytes") or 0)
+        except (TypeError, ValueError):
+            continue
+        if output_bytes <= 0 or not path:
+            continue
+        _truncate_if_longer(path, output_bytes)
+
+
+def _truncate_if_longer(path: str, output_bytes: int) -> None:
+    candidate = Path(path)
+    try:
+        if not candidate.is_file() or candidate.stat().st_size <= output_bytes:
+            return
+        with candidate.open("r+b") as handle:
+            handle.truncate(output_bytes)
+    except OSError:
+        return

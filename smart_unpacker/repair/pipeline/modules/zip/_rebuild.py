@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import struct
+import zlib
 
 from smart_unpacker.repair.pipeline.modules._common import load_source_bytes
 
@@ -182,6 +183,8 @@ def _parse_entry(data: bytes, offset: int) -> tuple[ZipEntryCandidate, int, str]
             return None
         descriptor_start, next_offset, crc32, compressed_size, uncompressed_size = descriptor
         payload = data[data_start:descriptor_start]
+        if not (flags & 0x01) and not _payload_matches_header(method, payload, crc32, compressed_size, uncompressed_size):
+            return None
         return (
             ZipEntryCandidate(
                 name=name,
@@ -201,12 +204,18 @@ def _parse_entry(data: bytes, offset: int) -> tuple[ZipEntryCandidate, int, str]
             warning,
         )
 
+    if compressed_size == 0 and uncompressed_size == 0:
+        next_record = _find_next_zip_record(data, data_start)
+        if next_record is not None and next_record > data_start:
+            return None
     data_end = data_start + compressed_size
     if data_end > len(data):
         return None
     if _looks_like_directory_or_archive_tail(data, data_start):
         return None
     payload = data[data_start:data_end]
+    if not (flags & 0x01) and not _payload_matches_header(method, payload, crc32, compressed_size, uncompressed_size):
+        return None
     return (
         ZipEntryCandidate(
             name=name,
@@ -273,6 +282,26 @@ def _find_next_zip_record(data: bytes, start: int) -> int | None:
     if not candidates:
         return None
     return min(candidates)
+
+
+def _payload_matches_header(
+    method: int,
+    payload: bytes,
+    crc32: int,
+    compressed_size: int,
+    uncompressed_size: int,
+) -> bool:
+    if compressed_size != len(payload):
+        return False
+    if method == 0:
+        return uncompressed_size == len(payload) and (zlib.crc32(payload) & 0xFFFFFFFF) == crc32
+    if method == 8:
+        try:
+            decoded = zlib.decompress(payload, -15)
+        except zlib.error:
+            return False
+        return len(decoded) == uncompressed_size and (zlib.crc32(decoded) & 0xFFFFFFFF) == crc32
+    return False
 
 
 def _looks_like_directory_or_archive_tail(data: bytes, offset: int) -> bool:

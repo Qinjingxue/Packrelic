@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules.archive_carrier_crop import _result_from_native
+from smart_unpacker.repair.pipeline.modules.archive_carrier_crop import _result_from_native, normalize_native_candidate_lengths
 from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
+from smart_unpacker.repair.pipeline.modules.rar._structure import walk_rar_blocks
 
 from smart_unpacker_native import archive_carrier_crop_recovery as _native_archive_carrier_crop_recovery
 
@@ -31,7 +35,9 @@ class RarCarrierCropDeepRecovery:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        if flags & {"carrier_archive", "sfx", "embedded_archive", "boundary_unreliable", "start_trusted_only"}:
+        if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 1.0
+        if flags & {"boundary_unreliable", "start_trusted_only"}:
             return 0.92
         if "boundary_repair" in diagnosis.categories:
             return 0.76
@@ -39,11 +45,15 @@ class RarCarrierCropDeepRecovery:
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         result = self._run_native(job, workspace, config)
-        return _result_from_native(self.spec.name, result, job, diagnosis, config)
+        repair_result = _result_from_native(self.spec.name, result, job, diagnosis, config)
+        if repair_result.ok and repair_result.repaired_input:
+            _trim_rar_file_to_end(str(repair_result.repaired_input.get("path") or ""))
+        return repair_result
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         result = self._run_native(job, workspace, config)
-        return candidates_from_native_result(
+        normalize_native_candidate_lengths(result)
+        candidates = candidates_from_native_result(
             self.spec.name,
             result,
             job,
@@ -53,6 +63,10 @@ class RarCarrierCropDeepRecovery:
             default_confidence=0.86,
             default_message="RAR carrier crop produced a candidate",
         )
+        return [
+            _trim_rar_candidate(_isolate_candidate_path(_boost_rar_specific_candidate(candidate), workspace))
+            for candidate in candidates
+        ]
 
     def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
@@ -66,3 +80,55 @@ class RarCarrierCropDeepRecovery:
 
 
 register_repair_module(RarCarrierCropDeepRecovery())
+
+
+def _boost_rar_specific_candidate(candidate):
+    validations = [
+        replace(validation, score=min(1.0, float(validation.score or 0.0) + 0.04))
+        if validation.name == "native_candidate"
+        else validation
+        for validation in candidate.validations
+    ]
+    return replace(
+        candidate,
+        confidence=min(1.0, float(candidate.confidence or 0.0) + 0.04),
+        validations=validations,
+    )
+
+
+def _isolate_candidate_path(candidate, workspace: str):
+    repaired_input = dict(candidate.repaired_input or {})
+    path = Path(str(repaired_input.get("path") or ""))
+    if not path.is_file():
+        return candidate
+    target = Path(workspace) / f"{candidate.module_name}_{path.name}"
+    if path.resolve() != target.resolve():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+    repaired_input["path"] = str(target)
+    workspace_paths = [str(target), *[item for item in candidate.workspace_paths if item != str(target)]]
+    return replace(candidate, repaired_input=repaired_input, workspace_paths=workspace_paths)
+
+
+def _trim_rar_candidate(candidate):
+    repaired_input = dict(candidate.repaired_input or {})
+    path = str(repaired_input.get("path") or "")
+    _trim_rar_file_to_end(path)
+    return candidate
+
+
+def _trim_rar_file_to_end(path: str) -> None:
+    if not path:
+        return
+    candidate = Path(path)
+    try:
+        data = candidate.read_bytes()
+    except OSError:
+        return
+    walk = walk_rar_blocks(data)
+    if walk is None or walk.end_offset is None or walk.end_offset >= len(data):
+        return
+    try:
+        candidate.write_bytes(data[:walk.end_offset])
+    except OSError:
+        return

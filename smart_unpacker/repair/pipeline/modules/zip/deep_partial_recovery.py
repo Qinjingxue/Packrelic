@@ -65,7 +65,7 @@ class ZipDeepPartialRecovery:
 
     def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
         result = self._run_native(job, workspace, config)
-        return candidates_from_native_result(
+        candidates = candidates_from_native_result(
             self.spec.name,
             result,
             job,
@@ -76,6 +76,11 @@ class ZipDeepPartialRecovery:
             default_confidence=0.7,
             default_message="ZIP deep partial recovery produced a candidate",
         )
+        return [
+            candidate
+            for candidate in candidates
+            if int(candidate.diagnosis.get("native_candidate", {}).get("verified_entries") or 0) > 0
+        ]
 
     def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}

@@ -20,8 +20,7 @@ class SevenZipCrcFieldRepair:
         routes=(
             RepairRoute(
                 formats=("7z", "seven_zip"),
-                require_any_categories=("directory_rebuild", "safe_repair", "boundary_repair"),
-                require_any_flags=("start_header_crc_bad", "next_header_crc_bad", "start_header_corrupt"),
+                require_any_flags=("next_header_crc_bad", "start_header_corrupt"),
                 require_any_failure_kinds=("structure_recognition", "checksum_error"),
                 base_score=0.86,
             ),
@@ -30,8 +29,10 @@ class SevenZipCrcFieldRepair:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        if flags & {"start_header_crc_bad", "next_header_crc_bad", "start_header_corrupt"}:
+        if flags & {"next_header_crc_bad", "start_header_corrupt"}:
             return 0.94
+        if "start_header_crc_bad" in flags:
+            return 0.0
         if diagnosis.format in {"7z", "seven_zip"} and "directory_rebuild" in diagnosis.categories:
             return 0.78
         return 0.0

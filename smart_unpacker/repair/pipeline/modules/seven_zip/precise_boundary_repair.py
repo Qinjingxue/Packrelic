@@ -31,10 +31,12 @@ class SevenZipPreciseBoundaryRepair:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        if flags & {"trailing_junk", "boundary_unreliable", "carrier_archive", "sfx", "embedded_archive"}:
+        if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
             return 0.98
+        if flags & {"trailing_junk", "boundary_unreliable"}:
+            return 0.62
         if "boundary_repair" in diagnosis.categories:
-            return 0.82
+            return 0.55
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
