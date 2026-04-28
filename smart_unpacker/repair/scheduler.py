@@ -1,9 +1,13 @@
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from smart_unpacker.repair.candidate import CandidateSelector, RepairCandidate
 from smart_unpacker.repair.config import enabled_module_configs, repair_config
+from smart_unpacker.repair.context import RepairContext, build_repair_context
 from smart_unpacker.repair.diagnosis import RepairDiagnosis, diagnose_repair_job
 from smart_unpacker.repair.job import RepairJob
+from smart_unpacker.repair.pipeline.module import RepairRoute
 from smart_unpacker.repair.pipeline.registry import discover_repair_modules, get_repair_module_registry
 from smart_unpacker.repair.result import RepairResult
 
@@ -18,34 +22,63 @@ class RepairScheduler:
 
     def repair(self, job: RepairJob) -> RepairResult:
         diagnosis = self.diagnose(job)
+        context = build_repair_context(job, diagnosis)
         if not self.config.get("enabled", True):
             return self._result("skipped", job, diagnosis, "repair layer is disabled")
         if not diagnosis.repairable:
             return self._result("unrepairable", job, diagnosis, "; ".join(diagnosis.notes) or "repair is blocked")
 
-        modules = self._select_modules(job, diagnosis)
+        modules = self._select_modules(job, diagnosis, context)
         if not modules:
             return self._result("unsupported", job, diagnosis, "no repair module is registered for this diagnosis")
 
         workspace = self._workspace_for(job)
         workspace.mkdir(parents=True, exist_ok=True)
         module_configs = enabled_module_configs(self.config)
+        selector = CandidateSelector(self.config)
         warnings = []
-        for score, module in modules:
+        repair_candidates: list[RepairCandidate] = []
+        for score, module, route_score in modules:
             module_config = self._module_runtime_config(module.spec.name, module_configs)
             try:
-                result = module.repair(
-                    job,
-                    diagnosis,
-                    str(workspace),
-                    module_config,
-                )
+                if hasattr(module, "generate_candidates"):
+                    generated = module.generate_candidates(  # type: ignore[attr-defined]
+                        job,
+                        diagnosis,
+                        str(workspace),
+                        module_config,
+                    )
+                    if not generated:
+                        warnings.append(f"{module.spec.name}: produced no repair candidates")
+                        continue
+                    for candidate in generated:
+                        repair_candidates.append(replace(
+                            candidate,
+                            score_hint=max(score, route_score, candidate.score_hint),
+                            stage=candidate.stage or module.spec.stage,
+                        ))
+                    continue
+
+                result = module.repair(job, diagnosis, str(workspace), module_config)
             except Exception as exc:
                 warnings.append(f"{module.spec.name}: {exc}")
                 continue
             if result.ok:
-                return result
+                candidate = RepairCandidate.from_result(
+                    result,
+                    score_hint=max(score, route_score),
+                    stage=module.spec.stage,
+                )
+                if candidate is not None:
+                    repair_candidates.append(candidate)
+                continue
             warnings.extend(result.warnings)
+        if repair_candidates:
+            selected, selection = selector.select(repair_candidates)
+            if selected is not None:
+                return selected.to_result(selection=selection)
+            warnings.extend(selection.get("warnings") or [])
+            warnings.append("repair candidates were produced but none passed selection")
         return RepairResult(
             status="unrepairable",
             confidence=diagnosis.confidence,
@@ -55,16 +88,17 @@ class RepairScheduler:
             message="registered repair modules did not produce a candidate",
         )
 
-    def _select_modules(self, job: RepairJob, diagnosis: RepairDiagnosis):
+    def _select_modules(self, job: RepairJob, diagnosis: RepairDiagnosis, context: RepairContext):
         enabled = enabled_module_configs(self.config)
         registry = get_repair_module_registry()
         candidates = []
         for name, module in registry.all().items():
             if name not in enabled:
                 continue
-            if diagnosis.format not in module.spec.formats and "archive" not in module.spec.formats:
+            route_score = self._route_score(module.spec.routes, context)
+            if route_score <= 0 and diagnosis.format not in module.spec.formats and "archive" not in module.spec.formats:
                 continue
-            if module.spec.categories and not (set(module.spec.categories) & set(diagnosis.categories)):
+            if route_score <= 0 and module.spec.categories and not (set(module.spec.categories) & set(diagnosis.categories)):
                 continue
             stages = self.config.get("stages", {}) if isinstance(self.config.get("stages"), dict) else {}
             if not stages.get(module.spec.stage, True):
@@ -74,13 +108,52 @@ class RepairScheduler:
                 continue
             if module.spec.stage == "deep" and not self._deep_input_allowed(job, module_config):
                 continue
-            score = float(module.can_handle(job, diagnosis, module_config) or 0.0)
+            fine_score = float(module.can_handle(job, diagnosis, module_config) or 0.0)
+            score = max(fine_score, route_score)
             if score <= 0:
                 continue
-            candidates.append((score, module))
+            candidates.append((score, module, route_score))
         candidates.sort(key=lambda item: item[0], reverse=True)
         limit = max(1, int(self.config.get("max_modules_per_job", 4) or 4))
         return candidates[:limit]
+
+    def _route_score(self, routes: tuple[RepairRoute, ...], context: RepairContext) -> float:
+        best = 0.0
+        for route in routes:
+            score = self._single_route_score(route, context)
+            if score > best:
+                best = score
+        return best
+
+    def _single_route_score(self, route: RepairRoute, context: RepairContext) -> float:
+        if route.formats and not _format_matches(context.format, route.formats):
+            return 0.0
+        if _intersects(route.reject_any_flags, context.damage_flags):
+            return 0.0
+        if context.failure_stage and _intersects(route.reject_any_failure_stages, (context.failure_stage,)):
+            return 0.0
+        if context.failure_kind and _intersects(route.reject_any_failure_kinds, (context.failure_kind,)):
+            return 0.0
+
+        score = float(route.base_score or 0.0)
+        requirements = [
+            (route.require_any_categories, context.categories, 0.08),
+            (route.require_any_flags, context.damage_flags, 0.12),
+            (route.require_any_fuzzy_hints, context.fuzzy_hints, 0.08),
+            (route.require_any_failure_stages, (context.failure_stage,), 0.1),
+            (route.require_any_failure_kinds, (context.failure_kind,), 0.14),
+        ]
+        active_requirements = [item for item in requirements if item[0]]
+        if not active_requirements:
+            return max(0.0, min(score, 1.0))
+        matched = False
+        for expected, actual, bonus in active_requirements:
+            if _intersects(expected, actual):
+                matched = True
+                score += bonus
+        if not matched:
+            return 0.0
+        return max(0.0, min(score, 1.0))
 
     def _safety_allows(self, module, module_config: dict[str, Any]) -> bool:
         safety = module_config.get("safety") if isinstance(module_config.get("safety"), dict) else {}
@@ -181,3 +254,28 @@ def _path_size(path: Any) -> int | None:
         return Path(str(path)).stat().st_size
     except (OSError, TypeError, ValueError):
         return None
+
+
+def _intersects(left, right) -> bool:
+    return bool({str(item).lower() for item in left} & {str(item).lower() for item in right if str(item or "")})
+
+
+def _format_matches(fmt: str, expected) -> bool:
+    normalized = _normalize_format(fmt)
+    formats = {_normalize_format(item) for item in expected}
+    return normalized in formats or "archive" in formats
+
+
+def _normalize_format(value: Any) -> str:
+    text = str(value or "").lower().lstrip(".")
+    aliases = {
+        "seven_zip": "7z",
+        "sevenzip": "7z",
+        "gz": "gzip",
+        "bz2": "bzip2",
+        "zst": "zstd",
+        "tgz": "tar.gz",
+        "tbz2": "tar.bz2",
+        "txz": "tar.xz",
+    }
+    return aliases.get(text, text or "unknown")

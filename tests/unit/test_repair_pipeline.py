@@ -12,8 +12,9 @@ import pytest
 
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from smart_unpacker.config.schema import normalize_config
+from smart_unpacker.repair.candidate import CandidateValidation, RepairCandidate
 from smart_unpacker.repair import RepairJob, RepairScheduler
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.registry import get_repair_module_registry
 from smart_unpacker.repair.result import RepairResult
 
@@ -95,6 +96,7 @@ def test_repair_scheduler_runs_registered_module(tmp_path):
     assert result.ok is True
     assert result.module_name == module.spec.name
     assert result.repaired_input == {"kind": "file_range", "path": "mixed.bin", "start": 10, "end": 100}
+    assert result.diagnosis["candidate_selection"]["selected_module"] == module.spec.name
 
 
 def test_repair_scheduler_filters_unsafe_modules_by_default(tmp_path):
@@ -146,6 +148,85 @@ def test_repair_scheduler_gates_deep_modules_and_passes_budget_config(tmp_path):
     assert size_blocked.status == "unsupported"
     assert allowed.ok is True
     assert allowed.actions == ["deep_candidates=2"]
+
+
+def test_repair_scheduler_selects_best_generated_candidate(tmp_path):
+    module = _DummyGeneratedCandidatesModule()
+    registry = get_repair_module_registry()
+    previous = registry.get(module.spec.name)
+    registry.register(module)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path / "repair"),
+                "stages": {"deep": True},
+                "deep": {"verify_candidates": False},
+                "modules": [{"name": module.spec.name, "enabled": True}],
+            }
+        })
+        result = scheduler.repair(RepairJob(
+            source_input={"kind": "file", "path": str(tmp_path / "source.zip")},
+            format="zip",
+            confidence=0.7,
+            damage_flags=["boundary_unreliable"],
+            archive_key="multi",
+        ))
+    finally:
+        if previous is not None:
+            registry.register(previous)
+
+    assert result.ok is True
+    assert result.actions == ["generated_best"]
+    assert result.diagnosis["candidate_selection"]["candidate_count"] == 2
+    assert result.diagnosis["candidate_selection"]["selected_module"] == module.spec.name
+
+
+def test_repair_scheduler_routes_module_from_fuzzy_profile(tmp_path):
+    module = _DummyFuzzyRouteModule()
+    registry = get_repair_module_registry()
+    previous = registry.get(module.spec.name)
+    registry.register(module)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path),
+                "modules": [{"name": module.spec.name, "enabled": True}],
+            }
+        })
+        result = scheduler.repair(RepairJob(
+            source_input={"kind": "file", "path": str(tmp_path / "carrier.bin")},
+            format="zip",
+            confidence=0.42,
+            fuzzy_profile={"hints": ["carrier_prefix_likely"]},
+            archive_key="carrier",
+        ))
+    finally:
+        if previous is not None:
+            registry.register(previous)
+
+    assert result.ok is True
+    assert result.module_name == module.spec.name
+    assert result.diagnosis["candidate_selection"]["selected_module"] == module.spec.name
+
+
+def test_repair_scheduler_blocks_process_level_failures(tmp_path):
+    scheduler = RepairScheduler({"repair": {"workspace": str(tmp_path)}})
+    result = scheduler.repair(RepairJob(
+        source_input={"kind": "file", "path": str(tmp_path / "broken.zip")},
+        format="zip",
+        extraction_failure={
+            "failure_stage": "worker_start",
+            "failure_kind": "process_start",
+            "error": "worker missing",
+        },
+        extraction_diagnostics={
+            "process_failure": {"failure_stage": "worker_start", "failure_kind": "process_start"},
+        },
+        archive_key="broken",
+    ))
+
+    assert result.status == "unrepairable"
+    assert "outside archive repair scope" in result.message
 
 
 def test_repair_config_is_normalized_by_config_schema():
@@ -869,6 +950,65 @@ class _DummyDeepModule:
             workspace,
             actions=[f"deep_candidates={config['deep']['max_candidates_per_module']}"],
         )
+
+
+@dataclass
+class _DummyGeneratedCandidatesModule:
+    spec = RepairModuleSpec(
+        name="dummy_generated_candidates",
+        formats=("zip",),
+        categories=("boundary_repair",),
+        stage="deep",
+    )
+
+    def can_handle(self, job, diagnosis, config):
+        return 1.0 if "boundary_repair" in diagnosis.categories else 0.0
+
+    def repair(self, job, diagnosis, workspace, config):
+        return RepairResult(status="unrepairable", format=diagnosis.format, module_name=self.spec.name)
+
+    def generate_candidates(self, job, diagnosis, workspace, config):
+        return [
+            RepairCandidate(
+                module_name=self.spec.name,
+                format="zip",
+                repaired_input={"kind": "file", "path": str(job.source_input.get("path")), "format_hint": "zip"},
+                stage="deep",
+                confidence=0.2,
+                actions=["generated_low"],
+                validations=[CandidateValidation(name="dummy", accepted=True, score=0.2)],
+            ),
+            RepairCandidate(
+                module_name=self.spec.name,
+                format="zip",
+                repaired_input={"kind": "file", "path": str(job.source_input.get("path")), "format_hint": "zip"},
+                stage="deep",
+                confidence=0.95,
+                actions=["generated_best"],
+                validations=[CandidateValidation(name="dummy", accepted=True, score=0.95)],
+            ),
+        ]
+
+
+@dataclass
+class _DummyFuzzyRouteModule:
+    spec = RepairModuleSpec(
+        name="dummy_fuzzy_route",
+        formats=("zip",),
+        routes=(
+            RepairRoute(
+                formats=("zip",),
+                require_any_fuzzy_hints=("carrier_prefix_likely",),
+                base_score=0.8,
+            ),
+        ),
+    )
+
+    def can_handle(self, job, diagnosis, config):
+        return 0.0
+
+    def repair(self, job, diagnosis, workspace, config):
+        return _dummy_result(self.spec.name, job, diagnosis, workspace)
 
 
 def _dummy_result(module_name, job, diagnosis, workspace, *, status="repaired", actions=None):

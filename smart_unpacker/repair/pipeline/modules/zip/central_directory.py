@@ -4,7 +4,7 @@ from pathlib import Path
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -17,6 +17,15 @@ class ZipCentralDirectoryRebuild:
         formats=("zip",),
         categories=("directory_rebuild",),
         stage="targeted",
+        routes=(
+            RepairRoute(
+                formats=("zip",),
+                require_any_categories=("directory_rebuild",),
+                require_any_flags=("central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"),
+                require_any_failure_kinds=("structure_recognition", "corrupted_data"),
+                base_score=0.84,
+            ),
+        ),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

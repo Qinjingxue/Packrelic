@@ -5,7 +5,7 @@ import zlib
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
@@ -17,6 +17,15 @@ class GzipFooterFix:
         formats=("gzip", "gz"),
         categories=("content_recovery", "boundary_repair"),
         stage="targeted",
+        routes=(
+            RepairRoute(
+                formats=("gzip", "gz"),
+                require_any_categories=("content_recovery", "boundary_repair"),
+                require_any_flags=("gzip_footer_bad", "crc_error", "checksum_error", "trailing_junk"),
+                require_any_failure_kinds=("checksum_error", "corrupted_data", "data_error"),
+                base_score=0.78,
+            ),
+        ),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

@@ -160,6 +160,24 @@ def _extraction_evidence(job: RepairJob) -> DamageEvidence:
         flags.append("damaged")
     if failure.get("wrong_password"):
         flags.append("wrong_password")
+    if failure.get("unsupported_method"):
+        flags.append("unsupported_method")
+    failure_stage = str(failure.get("failure_stage") or "")
+    failure_kind = str(failure.get("failure_kind") or "")
+    if failure_stage:
+        flags.append(failure_stage)
+    if failure_kind:
+        flags.append(failure_kind)
+    if failure_stage == "archive_open" and failure_kind == "structure_recognition":
+        flags.extend(["structure_recognition", "directory_integrity_bad_or_unknown"])
+    if failure_kind in {"corrupted_data", "data_error"}:
+        flags.extend(["damaged", "data_error"])
+    if failure_kind in {"unexpected_end", "input_truncated", "stream_truncated"}:
+        flags.extend(["unexpected_end", "input_truncated"])
+    if failure_kind == "output_filesystem":
+        flags.append("output_filesystem")
+    if failure_stage.startswith("worker_") or failure_kind.startswith("process_"):
+        flags.append("process_failure")
     return DamageEvidence(
         source="extraction",
         format=str(failure.get("archive_type") or failure.get("format") or job.format or ""),
@@ -206,6 +224,8 @@ def _severity(flags: set[str], failure: dict[str, Any], confidence: float) -> st
 def _repairability(job: RepairJob, flags: set[str]) -> tuple[bool, list[str], list[str]]:
     if "wrong_password" in flags:
         return False, [], ["password must be resolved before structural repair"]
+    if flags & {"output_filesystem", "process_failure"}:
+        return False, [], ["failure is outside archive repair scope"]
     unsafe: list[str] = []
     if "missing_volume" in flags:
         unsafe.append("volume_synthesis")

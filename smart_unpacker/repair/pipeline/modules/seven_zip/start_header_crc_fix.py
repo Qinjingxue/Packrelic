@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from pathlib import Path
 import struct
 
@@ -19,6 +19,15 @@ class SevenZipStartHeaderCrcFix:
         formats=("7z", "seven_zip"),
         categories=("directory_rebuild", "safe_repair"),
         stage="targeted",
+        routes=(
+            RepairRoute(
+                formats=("7z", "seven_zip"),
+                require_any_categories=("directory_rebuild", "safe_repair"),
+                require_any_flags=("start_header_crc_bad", "start_header_corrupt"),
+                require_any_failure_kinds=("structure_recognition",),
+                base_score=0.76,
+            ),
+        ),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

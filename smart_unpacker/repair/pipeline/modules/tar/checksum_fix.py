@@ -4,7 +4,7 @@ import math
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
@@ -16,6 +16,15 @@ class TarHeaderChecksumFix:
         formats=("tar",),
         categories=("directory_rebuild", "safe_repair"),
         stage="targeted",
+        routes=(
+            RepairRoute(
+                formats=("tar",),
+                require_any_categories=("directory_rebuild", "safe_repair"),
+                require_any_flags=("tar_checksum_bad", "header_checksum_bad"),
+                require_any_failure_kinds=("structure_recognition", "corrupted_data"),
+                base_score=0.78,
+            ),
+        ),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

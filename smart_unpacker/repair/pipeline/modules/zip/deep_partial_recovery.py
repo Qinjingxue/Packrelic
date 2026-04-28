@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -17,6 +18,25 @@ class ZipDeepPartialRecovery:
         stage="deep",
         safe=True,
         partial=True,
+        routes=(
+            RepairRoute(
+                formats=("zip",),
+                require_any_categories=("content_recovery", "directory_rebuild", "boundary_repair"),
+                require_any_flags=(
+                    "damaged",
+                    "crc_error",
+                    "checksum_error",
+                    "local_header_recovery",
+                    "central_directory_bad",
+                    "directory_integrity_bad_or_unknown",
+                    "data_descriptor",
+                    "corrupted_data",
+                ),
+                require_any_failure_stages=("item_extract", "archive_open"),
+                require_any_failure_kinds=("checksum_error", "corrupted_data", "data_error", "structure_recognition"),
+                base_score=0.88,
+            ),
+        ),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
@@ -40,8 +60,26 @@ class ZipDeepPartialRecovery:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
+        result = self._run_native(job, workspace, config)
+        return self._result_from_native(result, job, diagnosis)
+
+    def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
+        result = self._run_native(job, workspace, config)
+        return candidates_from_native_result(
+            self.spec.name,
+            result,
+            job,
+            diagnosis,
+            native_key="native_zip_deep_recovery",
+            format_hint="zip",
+            partial_default=True,
+            default_confidence=0.7,
+            default_message="ZIP deep partial recovery produced a candidate",
+        )
+
+    def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
-        result = _native_zip_deep_partial_recovery(
+        return _native_zip_deep_partial_recovery(
             job.source_input,
             workspace,
             int(deep.get("max_candidates_per_module", 3) or 3),
@@ -52,6 +90,8 @@ class ZipDeepPartialRecovery:
             float(deep.get("max_seconds_per_module", 30.0) or 0),
             bool(deep.get("verify_candidates", True)),
         )
+
+    def _result_from_native(self, result: dict, job: RepairJob, diagnosis: RepairDiagnosis) -> RepairResult:
         status = str(result.get("status") or "unrepairable")
         selected_path = str(result.get("selected_path") or "")
         if status not in {"repaired", "partial"} or not selected_path:

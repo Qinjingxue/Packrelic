@@ -167,7 +167,8 @@ ExtractArchiveResult extract_archive_with_parts(
     const std::wstring& format_hint,
     const std::wstring& password,
     const std::wstring& output_dir,
-    ExtractProgressCallback progress = nullptr
+    ExtractProgressCallback progress = nullptr,
+    bool dry_run = false
 );
 
 ExtractArchiveResult extract_archive_with_ranges(
@@ -177,7 +178,8 @@ ExtractArchiveResult extract_archive_with_ranges(
     const std::wstring& format_hint,
     const std::wstring& password,
     const std::wstring& output_dir,
-    ExtractProgressCallback progress = {}
+    ExtractProgressCallback progress = {},
+    bool dry_run = false
 );
 
 const char* status_name(PasswordTestStatus status);

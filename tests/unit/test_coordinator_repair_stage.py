@@ -58,10 +58,30 @@ def test_repair_stage_repairs_after_extraction_failure(tmp_path):
         out_dir=str(tmp_path / "out"),
         all_parts=[str(source)],
         error="压缩包损坏",
+        diagnostics={
+            "failure_stage": "archive_open",
+            "failure_kind": "structure_recognition",
+            "result": {
+                "type": "result",
+                "status": "failed",
+                "native_status": "damaged",
+                "failure_stage": "archive_open",
+                "failure_kind": "structure_recognition",
+                "damaged": True,
+                "diagnostics": {
+                    "input_trace": {"mode": "file", "total_bytes_returned": 128},
+                    "handler_attempts": [{"format": "zip", "opened": False}],
+                },
+            },
+        },
     )
 
     assert stage.repair_after_extraction_failure(task, result) is True
     assert scheduler.jobs[0].extraction_failure["damaged"] is True
+    assert scheduler.jobs[0].extraction_failure["failure_stage"] == "archive_open"
+    assert scheduler.jobs[0].extraction_failure["failure_kind"] == "structure_recognition"
+    assert scheduler.jobs[0].extraction_failure["native_diagnostics"]["input_trace"]["mode"] == "file"
+    assert scheduler.jobs[0].extraction_diagnostics["result"]["native_status"] == "damaged"
     assert task.fact_bag.get("archive.input")["entry_path"] == str(repaired)
 
 

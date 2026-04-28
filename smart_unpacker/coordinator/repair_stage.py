@@ -82,6 +82,8 @@ class ArchiveRepairStage:
             format=self._normalize_format(evidence.format),
             confidence=float(evidence.confidence),
             analysis_evidence=evidence,
+            analysis_prepass=self._analysis_prepass(task),
+            fuzzy_profile=self._analysis_fuzzy_profile(task),
             damage_flags=flags,
             archive_key=task.key,
             workspace=str(self._workspace_root()),
@@ -98,7 +100,10 @@ class ArchiveRepairStage:
             format=self._format_from_task(task),
             confidence=float(self._analysis_confidence(task) or 0.0),
             analysis_evidence=self._analysis_evidence_from_facts(task),
+            analysis_prepass=self._analysis_prepass(task),
+            fuzzy_profile=self._analysis_fuzzy_profile(task),
             extraction_failure=failure,
+            extraction_diagnostics=dict(result.diagnostics or {}),
             damage_flags=self._flags_from_failure_text(result.error),
             password=result.password_used,
             archive_key=task.key,
@@ -203,7 +208,10 @@ class ArchiveRepairStage:
 
     def _failure_payload(self, task: ArchiveTask, result: ExtractionResult) -> dict[str, Any]:
         flags = self._flags_from_failure_text(result.error)
-        return {
+        diagnostics = dict(result.diagnostics or {})
+        worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
+        native_diagnostics = worker_result.get("diagnostics") if isinstance(worker_result.get("diagnostics"), dict) else {}
+        payload = {
             "status": "failed",
             "format": self._format_from_task(task),
             "error": result.error,
@@ -213,6 +221,38 @@ class ArchiveRepairStage:
             "wrong_password": "wrong_password" in flags,
             "archive_type": self._format_from_task(task),
         }
+        if worker_result:
+            for key in (
+                "status",
+                "native_status",
+                "operation_result",
+                "operation_result_name",
+                "encrypted",
+                "damaged",
+                "checksum_error",
+                "missing_volume",
+                "wrong_password",
+                "unsupported_method",
+                "archive_type",
+                "failed_item",
+                "failure_stage",
+                "failure_kind",
+                "hresult",
+                "hresult_hex",
+                "message",
+            ):
+                if key in worker_result:
+                    payload[key] = worker_result[key]
+        for key in ("failure_stage", "failure_kind"):
+            if diagnostics.get(key) and not payload.get(key):
+                payload[key] = diagnostics[key]
+            if native_diagnostics.get(key) and not payload.get(key):
+                payload[key] = native_diagnostics[key]
+        if diagnostics:
+            payload["diagnostics"] = diagnostics
+        if native_diagnostics:
+            payload["native_diagnostics"] = native_diagnostics
+        return payload
 
     def _flags_from_failure_text(self, error: str) -> list[str]:
         text = str(error or "").lower()
@@ -277,6 +317,16 @@ class ArchiveRepairStage:
     def _analysis_confidence(self, task: ArchiveTask) -> float:
         evidence = self._analysis_evidence_from_facts(task)
         return float(evidence.confidence) if evidence is not None else 0.0
+
+    def _analysis_prepass(self, task: ArchiveTask) -> dict[str, Any]:
+        prepass = task.fact_bag.get("analysis.prepass")
+        return dict(prepass) if isinstance(prepass, dict) else {}
+
+    def _analysis_fuzzy_profile(self, task: ArchiveTask) -> dict[str, Any]:
+        fuzzy = task.fact_bag.get("analysis.fuzzy")
+        if isinstance(fuzzy, dict) and isinstance(fuzzy.get("binary_profile"), dict):
+            return dict(fuzzy["binary_profile"])
+        return {}
 
     def _format_from_task(self, task: ArchiveTask) -> str:
         selected = task.fact_bag.get("analysis.selected_format")

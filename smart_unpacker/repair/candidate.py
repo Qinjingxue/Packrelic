@@ -1,0 +1,293 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any
+
+from smart_unpacker.repair.result import RepairResult, RepairStatus
+from smart_unpacker.support.sevenzip_native import get_native_password_tester
+from smart_unpacker.support.sevenzip_worker import dry_run_archive
+
+
+@dataclass(frozen=True)
+class CandidateValidation:
+    name: str
+    accepted: bool
+    score: float = 0.0
+    warnings: list[str] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RepairCandidate:
+    module_name: str
+    format: str
+    repaired_input: dict[str, Any]
+    status: RepairStatus = "repaired"
+    stage: str = ""
+    confidence: float = 0.0
+    partial: bool = False
+    requires_native_validation: bool = False
+    actions: list[str] = field(default_factory=list)
+    damage_flags: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    workspace_paths: list[str] = field(default_factory=list)
+    diagnosis: dict[str, Any] = field(default_factory=dict)
+    message: str = ""
+    validations: list[CandidateValidation] = field(default_factory=list)
+    score_hint: float = 0.0
+
+    @classmethod
+    def from_result(
+        cls,
+        result: RepairResult,
+        *,
+        score_hint: float = 0.0,
+        stage: str = "",
+        requires_native_validation: bool = False,
+    ) -> "RepairCandidate | None":
+        if not result.ok or not isinstance(result.repaired_input, dict):
+            return None
+        return cls(
+            module_name=result.module_name,
+            format=result.format,
+            repaired_input=dict(result.repaired_input),
+            status=result.status,
+            stage=stage,
+            confidence=float(result.confidence or 0.0),
+            partial=bool(result.partial),
+            requires_native_validation=bool(requires_native_validation),
+            actions=list(result.actions),
+            damage_flags=list(result.damage_flags),
+            warnings=list(result.warnings),
+            workspace_paths=list(result.workspace_paths),
+            diagnosis=dict(result.diagnosis),
+            message=str(result.message or ""),
+            validations=[
+                CandidateValidation(
+                    name="module_result",
+                    accepted=True,
+                    score=float(result.confidence or 0.0),
+                    details={"status": result.status, "module": result.module_name},
+                )
+            ],
+            score_hint=float(score_hint or 0.0),
+        )
+
+    def to_result(self, *, selection: dict[str, Any] | None = None) -> RepairResult:
+        diagnosis = dict(self.diagnosis)
+        if selection:
+            diagnosis["candidate_selection"] = dict(selection)
+        return RepairResult(
+            status=self.status,
+            confidence=self.confidence,
+            format=self.format,
+            repaired_input=dict(self.repaired_input),
+            actions=list(self.actions),
+            damage_flags=list(self.damage_flags),
+            warnings=list(self.warnings),
+            workspace_paths=list(self.workspace_paths),
+            partial=self.partial,
+            module_name=self.module_name,
+            diagnosis=diagnosis,
+            message=self.message,
+        )
+
+
+class CandidateSelector:
+    def __init__(self, config: dict[str, Any] | None = None):
+        self.config = config or {}
+
+    def select(self, candidates: list[RepairCandidate]) -> tuple[RepairCandidate | None, dict[str, Any]]:
+        validated = [self._with_native_validation(candidate) for candidate in candidates]
+        accepted = [candidate for candidate in validated if self._accepted(candidate)]
+        if not accepted:
+            return None, {
+                "candidate_count": len(validated),
+                "accepted_count": 0,
+                "message": "no accepted repair candidates",
+                "warnings": _selection_warnings(validated),
+            }
+        scored = [(self._score(candidate), candidate) for candidate in accepted]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        score, selected = scored[0]
+        return selected, {
+            "candidate_count": len(validated),
+            "accepted_count": len(accepted),
+            "selected_module": selected.module_name,
+            "selected_format": selected.format,
+            "score": score,
+            "validations": [
+                {
+                    "name": validation.name,
+                    "accepted": validation.accepted,
+                    "score": validation.score,
+                    "warnings": list(validation.warnings),
+                    "details": dict(validation.details),
+                }
+                for validation in selected.validations
+            ],
+        }
+
+    def _with_native_validation(self, candidate: RepairCandidate) -> RepairCandidate:
+        if not candidate.requires_native_validation:
+            return candidate
+        deep = self.config.get("deep") if isinstance(self.config.get("deep"), dict) else {}
+        if not bool(deep.get("verify_candidates", True)):
+            validation = CandidateValidation(
+                name="native_candidate_validation",
+                accepted=True,
+                score=0.0,
+                details={"skipped": True, "reason": "repair.deep.verify_candidates is false"},
+            )
+            return replace(candidate, validations=[*candidate.validations, validation])
+
+        repaired_input = candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}
+        path = str(repaired_input.get("path") or "")
+        kind = str(repaired_input.get("kind") or "file")
+        if kind != "file" or not path:
+            validation = CandidateValidation(
+                name="native_candidate_validation",
+                accepted=False,
+                warnings=["native validation requires a repaired file candidate"],
+                details={"kind": kind, "path": path},
+            )
+            return replace(candidate, validations=[*candidate.validations, validation])
+        if not Path(path).is_file():
+            validation = CandidateValidation(
+                name="native_candidate_validation",
+                accepted=False,
+                warnings=["candidate file does not exist for native validation"],
+                details={"path": path},
+            )
+            return replace(candidate, validations=[*candidate.validations, validation])
+
+        password = str(repaired_input.get("password") or "")
+        format_hint = str(repaired_input.get("format_hint") or candidate.format or "")
+        timeout = float(deep.get("max_seconds_per_module", 30.0) or 30.0)
+        try:
+            tester = get_native_password_tester()
+            probe = tester.probe_archive(path)
+            test = tester.test_archive(path, password=password)
+            dry_run = dry_run_archive(path, format_hint=format_hint, password=password, timeout=max(1.0, timeout))
+        except Exception as exc:
+            validation = CandidateValidation(
+                name="native_candidate_validation",
+                accepted=False,
+                warnings=[f"native candidate validation failed to run: {exc}"],
+                details={"path": path, "format_hint": format_hint},
+            )
+            return replace(candidate, validations=[*candidate.validations, validation])
+
+        dry_result = dry_run.result
+        diagnostics = dry_run.diagnostics
+        output_trace = diagnostics.get("output_trace") if isinstance(diagnostics, dict) else {}
+        if not isinstance(output_trace, dict):
+            output_trace = {}
+        output_items = output_trace.get("items") if isinstance(output_trace.get("items"), list) else []
+        dry_files = int(dry_result.get("files_written", 0) or 0) if isinstance(dry_result, dict) else 0
+        dry_bytes = int(dry_result.get("bytes_written", 0) or output_trace.get("total_bytes_written", 0) or 0)
+        partial_progress = bool(candidate.partial and (dry_files > 0 or dry_bytes > 0 or output_items))
+
+        probe_ok = bool(probe.is_archive and not (probe.is_broken and not candidate.partial))
+        test_ok = bool(test.ok)
+        dry_ok = bool(dry_run.ok)
+        accepted = bool(probe_ok and (test_ok or dry_ok or partial_progress))
+        score = 0.0
+        if probe.is_archive:
+            score += 0.2
+        if probe_ok:
+            score += 0.1
+        if test_ok:
+            score += 0.28
+        if dry_ok:
+            score += 0.35
+        elif partial_progress:
+            score += 0.12
+
+        warnings = []
+        if not probe_ok:
+            warnings.append(probe.message or "native probe rejected candidate")
+        if not test_ok and not candidate.partial:
+            warnings.append(test.message or "native archive test failed")
+        if not dry_ok and not partial_progress:
+            warnings.append(dry_run.message or "worker dry-run failed")
+
+        validation = CandidateValidation(
+            name="native_candidate_validation",
+            accepted=accepted,
+            score=min(1.0, score),
+            warnings=warnings,
+            details={
+                "path": path,
+                "format_hint": format_hint,
+                "probe": {
+                    "status": probe.status,
+                    "is_archive": probe.is_archive,
+                    "is_broken": probe.is_broken,
+                    "is_encrypted": probe.is_encrypted,
+                    "checksum_error": probe.checksum_error,
+                    "item_count": probe.item_count,
+                    "archive_type": probe.archive_type,
+                    "message": probe.message,
+                },
+                "test": {
+                    "status": test.status,
+                    "ok": test.ok,
+                    "command_ok": test.command_ok,
+                    "encrypted": test.encrypted,
+                    "checksum_error": test.checksum_error,
+                    "archive_type": test.archive_type,
+                    "message": test.message,
+                },
+                "dry_run": {
+                    "ok": dry_run.ok,
+                    "returncode": dry_run.returncode,
+                    "status": dry_result.get("status") if isinstance(dry_result, dict) else "",
+                    "native_status": dry_result.get("native_status") if isinstance(dry_result, dict) else "",
+                    "failure_stage": dry_result.get("failure_stage") if isinstance(dry_result, dict) else "",
+                    "failure_kind": dry_result.get("failure_kind") if isinstance(dry_result, dict) else "",
+                    "files_written": dry_files,
+                    "bytes_written": dry_bytes,
+                    "diagnostics": diagnostics,
+                    "message": dry_run.message,
+                },
+            },
+        )
+        return replace(candidate, validations=[*candidate.validations, validation])
+
+    @staticmethod
+    def _accepted(candidate: RepairCandidate) -> bool:
+        return bool(candidate.repaired_input) and all(item.accepted for item in candidate.validations)
+
+    @staticmethod
+    def _score(candidate: RepairCandidate) -> float:
+        validation_score = max([item.score for item in candidate.validations] or [0.0])
+        score = float(candidate.confidence or 0.0)
+        score += min(1.0, max(0.0, validation_score)) * 0.1
+        score += min(1.0, max(0.0, candidate.score_hint)) * 0.05
+        if candidate.partial:
+            score -= 0.02
+        return score
+
+
+def _selection_warnings(candidates: list[RepairCandidate]) -> list[str]:
+    warnings: list[str] = []
+    for candidate in candidates:
+        for validation in candidate.validations:
+            if validation.accepted:
+                continue
+            warnings.extend(validation.warnings)
+    return _dedupe(warnings)
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return output

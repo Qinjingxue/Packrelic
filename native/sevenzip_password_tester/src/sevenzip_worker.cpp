@@ -204,6 +204,30 @@ bool json_uint_field_in_object(const std::string& object_json, const std::string
     return ok;
 }
 
+bool json_bool_field(const std::string& json, const std::string& key, bool fallback = false) {
+    const std::string needle = "\"" + key + "\"";
+    const std::size_t key_pos = json.find(needle);
+    if (key_pos == std::string::npos) {
+        return fallback;
+    }
+    const std::size_t colon = json.find(':', key_pos + needle.size());
+    if (colon == std::string::npos) {
+        return fallback;
+    }
+    const std::size_t pos = skip_ws(json, colon + 1);
+    if (json.compare(pos, 4, "true") == 0) {
+        return true;
+    }
+    if (json.compare(pos, 5, "false") == 0) {
+        return false;
+    }
+    if (pos < json.size() && json[pos] == '"') {
+        const std::string text = parse_json_string_at(json, pos);
+        return text == "true" || text == "1" || text == "yes";
+    }
+    return fallback;
+}
+
 std::vector<std::string> json_object_array_field(const std::string& json, const std::string& key) {
     std::vector<std::string> objects;
     const std::string needle = "\"" + key + "\"";
@@ -570,16 +594,17 @@ int run_request(const std::string& request) {
     const std::wstring output_dir = utf8_to_wide(json_string_field(request, "output_dir", ""));
     const std::wstring password = utf8_to_wide(json_string_field(request, "password", ""));
     const std::wstring format_hint = utf8_to_wide(json_string_field(request, "format_hint", ""));
+    const bool dry_run = json_bool_field(request, "dry_run", false);
 
     std::vector<std::wstring> part_paths;
     for (const auto& part : json_string_array_field(request, "part_paths")) {
         part_paths.push_back(utf8_to_wide(part));
     }
 
-    if (archive_path.empty() || output_dir.empty()) {
+    if (archive_path.empty() || (!dry_run && output_dir.empty())) {
         print_json_line(
             "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
-            "\",\"status\":\"error\",\"category\":\"invalid_request\",\"message\":\"archive_path and output_dir are required\"}");
+            "\",\"status\":\"error\",\"category\":\"invalid_request\",\"message\":\"archive_path is required; output_dir is required unless dry_run is true\"}");
         return 2;
     }
 
@@ -595,16 +620,17 @@ int run_request(const std::string& request) {
 
     const auto archive_input = parse_archive_input_descriptor(request, archive_path, format_hint, part_paths);
     ExtractArchiveResult result = archive_input.ranges.empty()
-        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, password, output_dir, progress)
-        : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, progress);
+        ? extract_archive_with_parts(dll_path, archive_input.archive_path, archive_input.part_paths, archive_input.format_hint, password, output_dir, progress, dry_run)
+        : extract_archive_with_ranges(dll_path, archive_input.archive_path, archive_input.ranges, archive_input.format_hint, password, output_dir, progress, dry_run);
 
     const bool ok = result.status == PasswordTestStatus::Ok && result.command_ok;
     const std::string failure_fields = ok ? "" :
         ",\"failure_stage\":\"" + json_escape(result.failure_stage) +
         "\",\"failure_kind\":\"" + json_escape(result.failure_kind) +
         "\",\"hresult\":" + std::to_string(result.hresult) +
-        ",\"hresult_hex\":\"" + hresult_hex(result.hresult) +
-        "\",\"diagnostics\":" + diagnostics_json(result);
+        ",\"hresult_hex\":\"" + hresult_hex(result.hresult) + "\"";
+    const std::string diagnostic_fields = (!ok || dry_run) ?
+        ",\"diagnostics\":" + diagnostics_json(result) : "";
     print_json_line(
         "{\"type\":\"result\",\"job_id\":\"" + json_escape(job_id) +
         "\",\"status\":\"" + std::string(ok ? "ok" : "failed") +
@@ -622,11 +648,12 @@ int run_request(const std::string& request) {
         ",\"files_written\":" + std::to_string(result.files_written) +
         ",\"dirs_written\":" + std::to_string(result.dirs_written) +
         ",\"bytes_written\":" + std::to_string(result.bytes_written) +
+        ",\"dry_run\":" + std::string(dry_run ? "true" : "false") +
         ",\"open_mode\":\"" + json_escape(wide_to_utf8(archive_input.open_mode)) +
         "\",\"archive_type\":\"" + json_escape(wide_to_utf8(result.archive_type)) +
         "\",\"failed_item\":\"" + json_escape(wide_to_utf8(result.failed_item)) +
         "\",\"message\":\"" + json_escape(result.message) + "\"" +
-        failure_fields + "}");
+        failure_fields + diagnostic_fields + "}");
     return ok ? 0 : 1;
 }
 

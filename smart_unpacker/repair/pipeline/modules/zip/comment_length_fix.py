@@ -5,7 +5,7 @@ import struct
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, patch_file, write_candidate
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
@@ -20,6 +20,15 @@ class ZipCommentLengthFix:
         formats=("zip",),
         categories=("directory_rebuild", "boundary_repair"),
         stage="targeted",
+        routes=(
+            RepairRoute(
+                formats=("zip",),
+                require_any_categories=("directory_rebuild", "boundary_repair"),
+                require_any_flags=("zip_comment_length_bad", "comment_length_bad", "eocd_bad", "trailing_junk"),
+                require_any_fuzzy_hints=("trailing_text_junk_likely", "tail_printable_region"),
+                base_score=0.78,
+            ),
+        ),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

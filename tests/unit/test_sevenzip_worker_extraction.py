@@ -132,6 +132,41 @@ def test_worker_output_trace_includes_per_item_failure(tmp_path):
     assert "conflict" in failed_items[-1]["path"].replace("\\", "/")
 
 
+def test_worker_dry_run_reports_success_diagnostics_without_writing(tmp_path):
+    worker = _require_worker_or_skip()
+    seven_zip_dll = _require_7z_dll_or_skip()
+    archive, filename = _create_7z(tmp_path, "dryrun", "dry-run payload")
+    dry_output = tmp_path / "dry_output"
+    payload = {
+        "job_id": "dry-run",
+        "seven_zip_dll_path": seven_zip_dll,
+        "archive_path": str(archive),
+        "output_dir": str(dry_output),
+        "format_hint": "7z",
+        "dry_run": True,
+    }
+
+    result = subprocess.run(
+        [worker],
+        input=json.dumps(payload, ensure_ascii=False),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    lines = [json.loads(line) for line in result.stdout.splitlines() if line.strip().startswith("{")]
+    worker_result = next(item for item in lines if item.get("type") == "result")
+    output_trace = worker_result["diagnostics"]["output_trace"]
+
+    assert result.returncode == 0
+    assert worker_result["status"] == "ok"
+    assert worker_result["dry_run"] is True
+    assert worker_result["files_written"] == 1
+    assert worker_result["bytes_written"] == len("dry-run payload")
+    assert output_trace["items"]
+    assert output_trace["items"][0]["path"].endswith(filename)
+    assert not dry_output.exists()
+
+
 def test_extraction_scheduler_saves_process_failure_diagnostics(tmp_path):
     archive = tmp_path / "sample.bin"
     archive.write_bytes(b"not an archive")

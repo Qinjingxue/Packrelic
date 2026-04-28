@@ -567,6 +567,114 @@ private:
 
 
 
+class TraceOutStream final : public ISequentialOutStream {
+
+public:
+
+    explicit TraceOutStream(ExtractOutputTrace* trace = nullptr, std::size_t item_trace_index = 0)
+
+        : trace_(trace), item_trace_index_(item_trace_index) {}
+
+    UInt64 bytes_written() const { return bytes_written_; }
+
+
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+
+        if (!object) {
+
+            return E_POINTER;
+
+        }
+
+        *object = nullptr;
+
+        if (IsEqualGUID(iid, IID_IUnknown) || IsEqualGUID(iid, IID_ISequentialOutStream)) {
+
+            *object = static_cast<IUnknown*>(this);
+
+        } else {
+
+            return E_NOINTERFACE;
+
+        }
+
+        AddRef();
+
+        return S_OK;
+
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override { return InterlockedIncrement(&refs_); }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+
+        const ULONG refs = InterlockedDecrement(&refs_);
+
+        if (refs == 0) {
+
+            delete this;
+
+        }
+
+        return refs;
+
+    }
+
+    HRESULT STDMETHODCALLTYPE Write(const void*, UInt32 size, UInt32* processedSize) override {
+
+        bytes_written_ += size;
+
+        if (trace_) {
+
+            trace_->total_bytes_written += size;
+
+            trace_->current_item_bytes_written += size;
+
+            trace_->last_write_size = size;
+
+            trace_->last_hresult = S_OK;
+
+            trace_->last_win32_error = 0;
+
+            if (item_trace_index_ < trace_->items.size()) {
+
+                trace_->items[item_trace_index_].bytes_written += size;
+
+                trace_->items[item_trace_index_].hresult = S_OK;
+
+                trace_->items[item_trace_index_].win32_error = 0;
+
+            }
+
+        }
+
+        if (processedSize) {
+
+            *processedSize = size;
+
+        }
+
+        return S_OK;
+
+    }
+
+
+
+private:
+
+    LONG refs_ = 1;
+
+    ExtractOutputTrace* trace_ = nullptr;
+
+    std::size_t item_trace_index_ = 0;
+
+    UInt64 bytes_written_ = 0;
+
+};
+
+
+
 inline std::optional<std::filesystem::path> safe_relative_item_path(const std::wstring& raw_name) {
 
     if (raw_name.empty()) {
@@ -631,6 +739,8 @@ public:
 
         ExtractProgressCallback progress,
 
+        bool dry_run = false,
+
         ExtractOutputTrace* output_trace = nullptr
 
     ) : archive_(archive),
@@ -640,6 +750,8 @@ public:
         output_dir_(std::move(output_dir)),
 
         progress_(std::move(progress)),
+
+        dry_run_(dry_run),
 
         output_trace_(output_trace) {}
 
@@ -837,15 +949,19 @@ public:
 
         }
 
-        const auto target = std::filesystem::path(win32_extended_path(output_dir_)) / safe_path.value();
-
         emit("item_start", index, name);
 
         try {
 
             if (is_dir) {
 
-                std::filesystem::create_directories(target);
+                if (!dry_run_) {
+
+                    const auto target = std::filesystem::path(win32_extended_path(output_dir_)) / safe_path.value();
+
+                    std::filesystem::create_directories(target);
+
+                }
 
                 dirs_written_ += 1;
 
@@ -853,7 +969,13 @@ public:
 
             }
 
-            std::filesystem::create_directories(target.parent_path());
+            if (!dry_run_) {
+
+                const auto target = std::filesystem::path(win32_extended_path(output_dir_)) / safe_path.value();
+
+                std::filesystem::create_directories(target.parent_path());
+
+            }
 
         } catch (...) {
 
@@ -870,6 +992,16 @@ public:
             return E_FAIL;
 
         }
+
+        if (dry_run_) {
+
+            *outStream = new TraceOutStream(output_trace_, current_trace_index_);
+
+            return S_OK;
+
+        }
+
+        const auto target = std::filesystem::path(win32_extended_path(output_dir_)) / safe_path.value();
 
 
 
@@ -1065,6 +1197,8 @@ private:
     std::wstring output_dir_;
 
     ExtractProgressCallback progress_;
+
+    bool dry_run_ = false;
 
     ExtractOutputTrace* output_trace_ = nullptr;
 

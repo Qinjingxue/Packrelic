@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.pipeline.modules._native_validation import validate_with_native_probe
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
@@ -17,6 +18,16 @@ class ArchiveCarrierCropDeepRecovery:
         categories=("boundary_repair", "content_recovery", "directory_rebuild"),
         stage="deep",
         safe=True,
+        routes=(
+            RepairRoute(
+                formats=("7z", "seven_zip", "rar", "archive"),
+                require_any_categories=("boundary_repair", "content_recovery", "directory_rebuild"),
+                require_any_flags=("carrier_archive", "sfx", "embedded_archive", "carrier_prefix", "boundary_unreliable", "start_trusted_only"),
+                require_any_fuzzy_hints=("carrier_prefix_likely", "entropy_boundary_shift"),
+                require_any_failure_kinds=("structure_recognition",),
+                base_score=0.84,
+            ),
+        ),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
@@ -28,15 +39,30 @@ class ArchiveCarrierCropDeepRecovery:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
+        result = self._run_native(job, diagnosis, workspace, config)
+        return _result_from_native(self.spec.name, result, job, diagnosis, config)
+
+    def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
+        result = self._run_native(job, diagnosis, workspace, config)
+        return candidates_from_native_result(
+            self.spec.name,
+            result,
+            job,
+            diagnosis,
+            native_key="native_archive_deep_repair",
+            default_confidence=0.78,
+            default_message="archive carrier crop produced a candidate",
+        )
+
+    def _run_native(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
-        result = _native_archive_carrier_crop_recovery(
+        return _native_archive_carrier_crop_recovery(
             job.source_input,
             diagnosis.format or job.format or "archive",
             workspace,
             float(deep.get("max_input_size_mb", 512) or 0),
             int(deep.get("max_candidates_per_module", 8) or 1),
         )
-        return _result_from_native(self.spec.name, result, job, diagnosis, config)
 
 
 def _result_from_native(module_name: str, result: dict, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> RepairResult:

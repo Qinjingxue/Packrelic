@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
+from smart_unpacker.repair.pipeline.modules._native_candidates import candidates_from_native_result
 from smart_unpacker.repair.result import RepairResult
 
 from smart_unpacker_native import tar_compressed_partial_recovery as _native_tar_compressed_partial_recovery
@@ -22,6 +23,28 @@ class TarCompressedPartialRecovery:
             stage="deep",
             safe=True,
             partial=True,
+            routes=(
+                RepairRoute(
+                    formats=self.aliases,
+                    require_any_categories=("content_recovery", "boundary_repair", "directory_rebuild"),
+                    require_any_flags=(
+                        "probably_truncated",
+                        "stream_truncated",
+                        "input_truncated",
+                        "truncated",
+                        "unexpected_end",
+                        "unexpected_eof",
+                        "data_error",
+                        "damaged",
+                        "missing_end_block",
+                        "tar_checksum_bad",
+                        "header_checksum_bad",
+                        "boundary_unreliable",
+                    ),
+                    require_any_failure_kinds=("unexpected_end", "corrupted_data", "data_error"),
+                    base_score=0.86,
+                ),
+            ),
         )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
@@ -38,8 +61,26 @@ class TarCompressedPartialRecovery:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
+        result = self._run_native(job, workspace, config)
+        return self._result_from_native(result, job, diagnosis)
+
+    def generate_candidates(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):
+        result = self._run_native(job, workspace, config)
+        return candidates_from_native_result(
+            self.spec.name,
+            result,
+            job,
+            diagnosis,
+            native_key="native_tar_compressed_partial_recovery",
+            format_hint=self.format_name,
+            partial_default=True,
+            default_confidence=0.68,
+            default_message="compressed TAR partial recovery produced a candidate",
+        )
+
+    def _run_native(self, job: RepairJob, workspace: str, config: dict) -> dict:
         deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
-        result = _native_tar_compressed_partial_recovery(
+        return _native_tar_compressed_partial_recovery(
             job.source_input,
             self.format_name,
             workspace,
@@ -48,6 +89,8 @@ class TarCompressedPartialRecovery:
             float(deep.get("max_seconds_per_module", 30.0) or 0),
             int(deep.get("max_entries", 20000) or 0),
         )
+
+    def _result_from_native(self, result: dict, job: RepairJob, diagnosis: RepairDiagnosis) -> RepairResult:
         status = str(result.get("status") or "unrepairable")
         selected_path = str(result.get("selected_path") or "")
         if status not in {"partial", "repaired"} or not selected_path:

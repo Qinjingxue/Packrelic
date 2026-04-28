@@ -47,7 +47,7 @@ pub(crate) fn archive_carrier_crop_recovery(
     };
 
     let candidates = scan_archive_signatures(&data, target, true, max_candidates.max(1));
-    let Some(candidate) = candidates.first() else {
+    if candidates.is_empty() {
         return status_dict(
             py,
             "unrepairable",
@@ -62,45 +62,67 @@ pub(crate) fn archive_carrier_crop_recovery(
             &[],
         );
     };
-    let output_path = Path::new(workspace).join(format!(
-        "archive_carrier_crop_{:08x}{}",
-        candidate.offset,
-        candidate.format.ext()
-    ));
-    let output_bytes = match write_slice_candidate(&data[candidate.offset..], &output_path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            return status_dict(
-                py,
-                "unrepairable",
-                "",
-                candidate.format.name(),
-                &err.to_string(),
-                &[],
-                candidate.offset as u64,
-                data.len() as u64,
-                0,
-                0.0,
-                &[],
-            )
+
+    let mut written = Vec::new();
+    let mut write_warnings = Vec::new();
+    for candidate in candidates {
+        let output_path = Path::new(workspace).join(format!(
+            "archive_carrier_crop_{:08x}{}",
+            candidate.offset,
+            candidate.format.ext()
+        ));
+        let output_bytes = match write_slice_candidate(&data[candidate.offset..], &output_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                write_warnings.push(format!("candidate at offset {} could not be written: {err}", candidate.offset));
+                continue;
+            }
+        };
+        let mut warnings = candidate.warnings.clone();
+        if candidate.offset == 0 {
+            warnings.push("archive starts at offset 0; carrier crop was not needed".to_string());
         }
-    };
-    let mut warnings = candidate.warnings.clone();
-    if candidate.offset == 0 {
-        warnings.push("archive starts at offset 0; carrier crop was not needed".to_string());
+        written.push(WrittenArchiveCandidate {
+            name: format!("carrier_crop_{:08x}", candidate.offset),
+            path: output_path.to_string_lossy().to_string(),
+            format: candidate.format.name().to_string(),
+            status: "repaired".to_string(),
+            offset: candidate.offset as u64,
+            end_offset: data.len() as u64,
+            output_bytes,
+            confidence: confidence_for_candidate(&candidate),
+            actions: vec!["crop_embedded_archive_from_carrier".to_string()],
+            warnings,
+        });
     }
-    status_dict(
+    let Some(selected) = written.first() else {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            target.name(),
+            "embedded archive candidates were found but none could be written",
+            &write_warnings,
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
+    };
+    status_dict_with_candidates(
         py,
         "repaired",
-        &output_path.to_string_lossy(),
-        candidate.format.name(),
+        &selected.path,
+        &selected.format,
         "embedded archive candidate was cropped from carrier bytes",
-        &warnings,
-        candidate.offset as u64,
+        &selected.warnings,
+        selected.offset,
         data.len() as u64,
-        output_bytes,
-        confidence_for_candidate(candidate),
+        selected.output_bytes,
+        selected.confidence,
         &["crop_embedded_archive_from_carrier"],
+        &written,
     )
 }
 
@@ -124,22 +146,48 @@ pub(crate) fn seven_zip_precise_boundary_repair(
             return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
         }
     };
-    let candidates =
-        scan_archive_signatures(&data, TargetFormat::SevenZip, false, max_candidates.max(1));
-    let selected = candidates.into_iter().find(|candidate| {
+    let candidates = scan_archive_signatures(&data, TargetFormat::SevenZip, false, max_candidates.max(1));
+    let mut written = Vec::new();
+    let mut write_warnings = Vec::new();
+    for candidate in candidates.into_iter().filter(|candidate| {
         candidate.format == TargetFormat::SevenZip
             && candidate.archive_end > candidate.offset
             && (candidate.offset > 0 || candidate.archive_end < data.len())
             && candidate.next_header_crc_ok
-    });
-    let Some(candidate) = selected else {
+    }) {
+        let output_path = Path::new(workspace).join(format!(
+            "seven_zip_precise_boundary_repair_{:08x}.7z",
+            candidate.offset
+        ));
+        let output_bytes = match write_slice_candidate(&data[candidate.offset..candidate.archive_end], &output_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                write_warnings.push(format!("candidate at offset {} could not be written: {err}", candidate.offset));
+                continue;
+            }
+        };
+        written.push(WrittenArchiveCandidate {
+            name: format!("precise_boundary_{:08x}", candidate.offset),
+            path: output_path.to_string_lossy().to_string(),
+            format: "7z".to_string(),
+            status: "repaired".to_string(),
+            offset: candidate.offset as u64,
+            end_offset: candidate.archive_end as u64,
+            output_bytes,
+            confidence: 0.94,
+            actions: vec!["crop_7z_to_precise_next_header_boundary".to_string()],
+            warnings: candidate.warnings.clone(),
+        });
+    }
+    let Some(selected) = written.first() else {
+        let warnings = write_warnings;
         return status_dict(
             py,
             "unrepairable",
             "",
             "7z",
             "no 7z candidate had a trusted precise boundary to trim",
-            &[],
+            &warnings,
             0,
             data.len() as u64,
             0,
@@ -147,41 +195,19 @@ pub(crate) fn seven_zip_precise_boundary_repair(
             &[],
         );
     };
-    let output_path = Path::new(workspace).join(format!(
-        "seven_zip_precise_boundary_repair_{:08x}.7z",
-        candidate.offset
-    ));
-    let output_bytes =
-        match write_slice_candidate(&data[candidate.offset..candidate.archive_end], &output_path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                return status_dict(
-                    py,
-                    "unrepairable",
-                    "",
-                    "7z",
-                    &err.to_string(),
-                    &[],
-                    candidate.offset as u64,
-                    candidate.archive_end as u64,
-                    0,
-                    0.0,
-                    &[],
-                )
-            }
-        };
-    status_dict(
+    status_dict_with_candidates(
         py,
         "repaired",
-        &output_path.to_string_lossy(),
+        &selected.path,
         "7z",
         "7z archive was cropped to the exact NextHeader boundary",
-        &candidate.warnings,
-        candidate.offset as u64,
-        candidate.archive_end as u64,
-        output_bytes,
-        0.94,
+        &selected.warnings,
+        selected.offset,
+        selected.end_offset,
+        selected.output_bytes,
+        selected.confidence,
         &["crop_7z_to_precise_next_header_boundary"],
+        &written,
     )
 }
 
@@ -207,6 +233,8 @@ pub(crate) fn seven_zip_crc_field_repair(
     };
 
     let mut checked = 0usize;
+    let mut written = Vec::new();
+    let mut write_warnings = Vec::new();
     for offset in find_all(&data, SEVEN_Z_MAGIC) {
         checked += 1;
         if checked > max_candidates.max(1) {
@@ -220,37 +248,43 @@ pub(crate) fn seven_zip_crc_field_repair(
         let output_bytes = match write_slice_candidate(&repair.bytes, &output_path) {
             Ok(bytes) => bytes,
             Err(err) => {
-                return status_dict(
-                    py,
-                    "unrepairable",
-                    "",
-                    "7z",
-                    &err.to_string(),
-                    &[],
-                    offset as u64,
-                    repair.archive_end as u64,
-                    0,
-                    0.0,
-                    &[],
-                )
+                write_warnings.push(format!("candidate at offset {offset} could not be written: {err}"));
+                continue;
             }
         };
-        return status_dict(
+        written.push(WrittenArchiveCandidate {
+            name: format!("crc_field_repair_{offset:08x}"),
+            path: output_path.to_string_lossy().to_string(),
+            format: "7z".to_string(),
+            status: "repaired".to_string(),
+            offset: offset as u64,
+            end_offset: repair.archive_end as u64,
+            output_bytes,
+            confidence: 0.9,
+            actions: repair.actions,
+            warnings: repair.warnings,
+        });
+    }
+
+    if let Some(selected) = written.first() {
+        let action_refs = selected
+            .actions
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        return status_dict_with_candidates(
             py,
             "repaired",
-            &output_path.to_string_lossy(),
+            &selected.path,
             "7z",
             "7z StartHeader/NextHeader CRC fields were recomputed from intact bytes",
-            &repair.warnings,
-            offset as u64,
-            repair.archive_end as u64,
-            output_bytes,
-            0.9,
-            &repair
-                .actions
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
+            &selected.warnings,
+            selected.offset,
+            selected.end_offset,
+            selected.output_bytes,
+            selected.confidence,
+            &action_refs,
+            &written,
         );
     }
 
@@ -260,7 +294,7 @@ pub(crate) fn seven_zip_crc_field_repair(
         "",
         "7z",
         "no 7z CRC field mismatch was safely repairable",
-        &[],
+        &write_warnings,
         0,
         data.len() as u64,
         0,
@@ -289,7 +323,8 @@ pub(crate) fn rar_block_chain_trim_recovery(
             return status_dict(py, "skipped", "", "rar", &message, &[], 0, 0, 0, 0.0, &[])
         }
     };
-    let Some(walk) = first_rar_walk(&data, max_candidates.max(1)) else {
+    let walks = rar_walks(&data, max_candidates.max(1));
+    if walks.is_empty() {
         return status_dict(
             py,
             "unrepairable",
@@ -304,66 +339,83 @@ pub(crate) fn rar_block_chain_trim_recovery(
             &[],
         );
     };
-    if walk.last_complete_end <= walk.offset
-        || (walk.offset == 0 && walk.last_complete_end == data.len())
-    {
+
+    let mut written = Vec::new();
+    let mut write_warnings = Vec::new();
+    for walk in walks {
+        if walk.last_complete_end <= walk.offset
+            || (walk.offset == 0 && walk.last_complete_end == data.len())
+        {
+            continue;
+        }
+
+        let output_path =
+            Path::new(workspace).join(format!("rar_block_chain_trim_{:08x}.rar", walk.offset));
+        let output_bytes =
+            match write_slice_candidate(&data[walk.offset..walk.last_complete_end], &output_path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    write_warnings.push(format!("candidate at offset {} could not be written: {err}", walk.offset));
+                    continue;
+                }
+            };
+        let status = if walk.end_block_found {
+            "repaired"
+        } else {
+            "partial"
+        };
+        let action = match walk.version {
+            RarVersion::Rar4 => "walk_rar4_block_chain_trim_boundary",
+            RarVersion::Rar5 => "walk_rar5_block_chain_trim_boundary",
+        };
+        written.push(WrittenArchiveCandidate {
+            name: format!("block_chain_trim_{:08x}", walk.offset),
+            path: output_path.to_string_lossy().to_string(),
+            format: "rar".to_string(),
+            status: status.to_string(),
+            offset: walk.offset as u64,
+            end_offset: walk.last_complete_end as u64,
+            output_bytes,
+            confidence: if walk.end_block_found { 0.9 } else { 0.72 },
+            actions: vec![action.to_string()],
+            warnings: walk.warnings,
+        });
+    }
+
+    let Some(selected) = written.first() else {
+        let warnings = write_warnings;
         return status_dict(
             py,
             "unrepairable",
             "",
             "rar",
-            "RAR block chain already ends at the input boundary",
-            &walk.warnings,
-            walk.offset as u64,
-            walk.last_complete_end as u64,
+            "RAR block chains already end at the input boundary",
+            &warnings,
+            0,
+            data.len() as u64,
             0,
             0.0,
             &[],
         );
-    }
-
-    let output_path =
-        Path::new(workspace).join(format!("rar_block_chain_trim_{:08x}.rar", walk.offset));
-    let output_bytes =
-        match write_slice_candidate(&data[walk.offset..walk.last_complete_end], &output_path) {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                return status_dict(
-                    py,
-                    "unrepairable",
-                    "",
-                    "rar",
-                    &err.to_string(),
-                    &walk.warnings,
-                    walk.offset as u64,
-                    walk.last_complete_end as u64,
-                    0,
-                    0.0,
-                    &[],
-                )
-            }
-        };
-    let status = if walk.end_block_found {
-        "repaired"
-    } else {
-        "partial"
     };
-    let action = match walk.version {
-        RarVersion::Rar4 => "walk_rar4_block_chain_trim_boundary",
-        RarVersion::Rar5 => "walk_rar5_block_chain_trim_boundary",
-    };
-    status_dict(
+    let action_refs = selected
+        .actions
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    status_dict_with_candidates(
         py,
-        status,
-        &output_path.to_string_lossy(),
+        &selected.status,
+        &selected.path,
         "rar",
         "RAR block chain was cropped to the last complete CRC-verified block",
-        &walk.warnings,
-        walk.offset as u64,
-        walk.last_complete_end as u64,
-        output_bytes,
-        if walk.end_block_found { 0.9 } else { 0.72 },
-        &[action],
+        &selected.warnings,
+        selected.offset,
+        selected.end_offset,
+        selected.output_bytes,
+        selected.confidence,
+        &action_refs,
+        &written,
     )
 }
 
@@ -387,7 +439,8 @@ pub(crate) fn rar_end_block_repair(
             return status_dict(py, "skipped", "", "rar", &message, &[], 0, 0, 0, 0.0, &[])
         }
     };
-    let Some(walk) = first_rar_walk(&data, max_candidates.max(1)) else {
+    let walks = rar_walks(&data, max_candidates.max(1));
+    if walks.is_empty() {
         return status_dict(
             py,
             "unrepairable",
@@ -402,109 +455,81 @@ pub(crate) fn rar_end_block_repair(
             &[],
         );
     };
-    if walk.end_block_found {
-        return status_dict(
-            py,
-            "unrepairable",
-            "",
-            "rar",
-            "RAR end block is already present",
-            &walk.warnings,
-            walk.offset as u64,
-            walk.last_complete_end as u64,
-            0,
-            0.0,
-            &[],
-        );
-    }
-    if walk.last_complete_end != data.len() {
-        return status_dict(
-            py,
-            "unrepairable",
-            "",
-            "rar",
-            "RAR block chain has trailing bytes or a truncated block; trim before synthesizing an end block",
-            &walk.warnings,
-            walk.offset as u64,
-            walk.last_complete_end as u64,
-            0,
-            0.0,
-            &[],
-        );
-    }
-    if walk.missing_volume {
-        return status_dict(
-            py,
-            "unrepairable",
-            "",
-            "rar",
-            "RAR volume flag is set; end block synthesis is not safe",
-            &walk.warnings,
-            walk.offset as u64,
-            walk.last_complete_end as u64,
-            0,
-            0.0,
-            &[],
-        );
-    }
-    if !walk.last_block_can_precede_end {
-        return status_dict(
-            py,
-            "unrepairable",
-            "",
-            "rar",
-            "RAR chain does not end after a complete file or service block",
-            &walk.warnings,
-            walk.offset as u64,
-            walk.last_complete_end as u64,
-            0,
-            0.0,
-            &[],
-        );
+
+    let mut written = Vec::new();
+    let mut skipped_warnings = Vec::new();
+    for walk in walks {
+        if walk.end_block_found || walk.last_complete_end != data.len() || walk.missing_volume || !walk.last_block_can_precede_end {
+            skipped_warnings.extend(walk.warnings);
+            continue;
+        }
+
+        let mut candidate = data[walk.offset..walk.last_complete_end].to_vec();
+        let end_block = match walk.version {
+            RarVersion::Rar4 => rar4_end_block(),
+            RarVersion::Rar5 => rar5_end_block(),
+        };
+        candidate.extend_from_slice(&end_block);
+        let output_path =
+            Path::new(workspace).join(format!("rar_end_block_repair_{:08x}.rar", walk.offset));
+        let output_bytes = match write_slice_candidate(&candidate, &output_path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                skipped_warnings.push(format!("candidate at offset {} could not be written: {err}", walk.offset));
+                continue;
+            }
+        };
+        let action = match walk.version {
+            RarVersion::Rar4 => "append_rar4_end_block",
+            RarVersion::Rar5 => "append_rar5_end_block",
+        };
+        written.push(WrittenArchiveCandidate {
+            name: format!("end_block_repair_{:08x}", walk.offset),
+            path: output_path.to_string_lossy().to_string(),
+            format: "rar".to_string(),
+            status: "repaired".to_string(),
+            offset: walk.offset as u64,
+            end_offset: (walk.last_complete_end + end_block.len()) as u64,
+            output_bytes,
+            confidence: 0.82,
+            actions: vec![action.to_string()],
+            warnings: walk.warnings,
+        });
     }
 
-    let mut candidate = data[walk.offset..walk.last_complete_end].to_vec();
-    let end_block = match walk.version {
-        RarVersion::Rar4 => rar4_end_block(),
-        RarVersion::Rar5 => rar5_end_block(),
+    let Some(selected) = written.first() else {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "rar",
+            "RAR block chain is not safe for canonical end block synthesis",
+            &skipped_warnings,
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
     };
-    candidate.extend_from_slice(&end_block);
-    let output_path =
-        Path::new(workspace).join(format!("rar_end_block_repair_{:08x}.rar", walk.offset));
-    let output_bytes = match write_slice_candidate(&candidate, &output_path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            return status_dict(
-                py,
-                "unrepairable",
-                "",
-                "rar",
-                &err.to_string(),
-                &walk.warnings,
-                walk.offset as u64,
-                walk.last_complete_end as u64,
-                0,
-                0.0,
-                &[],
-            )
-        }
-    };
-    let action = match walk.version {
-        RarVersion::Rar4 => "append_rar4_end_block",
-        RarVersion::Rar5 => "append_rar5_end_block",
-    };
-    status_dict(
+    let action_refs = selected
+        .actions
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    status_dict_with_candidates(
         py,
         "repaired",
-        &output_path.to_string_lossy(),
+        &selected.path,
         "rar",
         "canonical RAR end block was appended after a complete CRC-verified block chain",
-        &walk.warnings,
-        walk.offset as u64,
-        (walk.last_complete_end + end_block.len()) as u64,
-        output_bytes,
-        0.82,
-        &[action],
+        &selected.warnings,
+        selected.offset,
+        selected.end_offset,
+        selected.output_bytes,
+        selected.confidence,
+        &action_refs,
+        &written,
     )
 }
 
@@ -585,6 +610,19 @@ struct RarWalk {
     end_block_found: bool,
     missing_volume: bool,
     last_block_can_precede_end: bool,
+    warnings: Vec<String>,
+}
+
+struct WrittenArchiveCandidate {
+    name: String,
+    path: String,
+    format: String,
+    status: String,
+    offset: u64,
+    end_offset: u64,
+    output_bytes: u64,
+    confidence: f64,
+    actions: Vec<String>,
     warnings: Vec<String>,
 }
 
@@ -825,7 +863,8 @@ fn repair_seven_zip_crc_candidate(data: &[u8], offset: usize) -> Option<SevenZip
     })
 }
 
-fn first_rar_walk(data: &[u8], max_candidates: usize) -> Option<RarWalk> {
+fn rar_walks(data: &[u8], max_candidates: usize) -> Vec<RarWalk> {
+    let mut output = Vec::new();
     let mut candidates = find_all(data, RAR4_MAGIC)
         .into_iter()
         .map(|offset| (offset, RarVersion::Rar4))
@@ -845,10 +884,10 @@ fn first_rar_walk(data: &[u8], max_candidates: usize) -> Option<RarWalk> {
             RarVersion::Rar5 => walk_rar5_blocks(data, offset),
         };
         if let Some(walk) = walk {
-            return Some(walk);
+            output.push(walk);
         }
     }
-    None
+    output
 }
 
 fn walk_rar4_blocks(data: &[u8], offset: usize) -> Option<RarWalk> {
@@ -1221,6 +1260,36 @@ fn status_dict(
     confidence: f64,
     actions: &[&str],
 ) -> PyResult<Py<PyDict>> {
+    status_dict_with_candidates(
+        py,
+        status,
+        selected_path,
+        format,
+        message,
+        warnings,
+        offset,
+        end_offset,
+        output_bytes,
+        confidence,
+        actions,
+        &[],
+    )
+}
+
+fn status_dict_with_candidates(
+    py: Python<'_>,
+    status: &str,
+    selected_path: &str,
+    format: &str,
+    message: &str,
+    warnings: &[String],
+    offset: u64,
+    end_offset: u64,
+    output_bytes: u64,
+    confidence: f64,
+    actions: &[&str],
+    candidates: &[WrittenArchiveCandidate],
+) -> PyResult<Py<PyDict>> {
     let result = PyDict::new(py);
     result.set_item("status", status)?;
     result.set_item("selected_path", selected_path)?;
@@ -1234,12 +1303,36 @@ fn status_dict(
     result.set_item("actions", PyList::new(py, actions)?)?;
     result.set_item(
         "workspace_paths",
-        if selected_path.is_empty() {
+        if !candidates.is_empty() {
+            PyList::new(
+                py,
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.path.as_str())
+                    .collect::<Vec<_>>(),
+            )?
+        } else if selected_path.is_empty() {
             PyList::empty(py)
         } else {
             PyList::new(py, [selected_path])?
         },
     )?;
+    let candidate_list = PyList::empty(py);
+    for candidate in candidates {
+        let item = PyDict::new(py);
+        item.set_item("name", &candidate.name)?;
+        item.set_item("path", &candidate.path)?;
+        item.set_item("format", &candidate.format)?;
+        item.set_item("status", &candidate.status)?;
+        item.set_item("offset", candidate.offset)?;
+        item.set_item("end_offset", candidate.end_offset)?;
+        item.set_item("output_bytes", candidate.output_bytes)?;
+        item.set_item("confidence", candidate.confidence)?;
+        item.set_item("actions", PyList::new(py, &candidate.actions)?)?;
+        item.set_item("warnings", PyList::new(py, &candidate.warnings)?)?;
+        candidate_list.append(item)?;
+    }
+    result.set_item("candidates", candidate_list)?;
     Ok(result.unbind())
 }
 

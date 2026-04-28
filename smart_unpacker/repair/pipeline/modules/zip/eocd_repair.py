@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
@@ -16,6 +16,15 @@ class ZipEocdRepair:
         formats=("zip",),
         categories=("directory_rebuild", "boundary_repair"),
         stage="targeted",
+        routes=(
+            RepairRoute(
+                formats=("zip",),
+                require_any_categories=("directory_rebuild", "boundary_repair"),
+                require_any_flags=("eocd_bad", "central_directory_bad", "directory_integrity_bad_or_unknown", "trailing_junk"),
+                require_any_failure_kinds=("structure_recognition", "corrupted_data"),
+                base_score=0.82,
+            ),
+        ),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

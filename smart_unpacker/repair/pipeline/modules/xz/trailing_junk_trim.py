@@ -4,7 +4,7 @@ import lzma
 
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
-from smart_unpacker.repair.pipeline.module import RepairModuleSpec
+from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
 from smart_unpacker.repair.pipeline.modules._common import load_source_bytes, write_candidate
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
@@ -16,6 +16,15 @@ class XzTrailingJunkTrim:
         formats=("xz",),
         categories=("boundary_repair",),
         stage="safe_repair",
+        routes=(
+            RepairRoute(
+                formats=("xz",),
+                require_any_categories=("boundary_repair",),
+                require_any_flags=("trailing_junk", "boundary_unreliable", "trailing_padding"),
+                require_any_fuzzy_hints=("trailing_text_junk_likely", "trailing_padding_likely"),
+                base_score=0.74,
+            ),
+        ),
     )
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:

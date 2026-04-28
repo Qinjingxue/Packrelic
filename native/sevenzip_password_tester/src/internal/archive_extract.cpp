@@ -156,7 +156,9 @@ ExtractArchiveResult extract_archive_internal(
 
     const std::wstring& output_dir,
 
-    ExtractProgressCallback progress
+    ExtractProgressCallback progress,
+
+    bool dry_run = false
 
 ) {
 
@@ -174,19 +176,23 @@ ExtractArchiveResult extract_archive_internal(
 
 
 
-    try {
+    if (!dry_run) {
 
-        std::filesystem::create_directories(std::filesystem::path(win32_extended_path(output_dir)));
+        try {
 
-    } catch (...) {
+            std::filesystem::create_directories(std::filesystem::path(win32_extended_path(output_dir)));
 
-        result.status = PasswordTestStatus::Error;
+        } catch (...) {
 
-        set_failure(result, "output_prepare", "output_filesystem");
+            result.status = PasswordTestStatus::Error;
 
-        result.message = "output directory could not be created";
+            set_failure(result, "output_prepare", "output_filesystem");
 
-        return result;
+            result.message = "output directory could not be created";
+
+            return result;
+
+        }
 
     }
 
@@ -292,7 +298,7 @@ ExtractArchiveResult extract_archive_internal(
 
         result.archive_type = !format_hint.empty() ? format_hint : archive_type_for_path(archive_path);
 
-        auto* raw_extract_callback = new ExtractToDiskCallback(archive.get(), password, output_dir, std::move(progress), &result.output_trace);
+        auto* raw_extract_callback = new ExtractToDiskCallback(archive.get(), password, output_dir, std::move(progress), dry_run, &result.output_trace);
 
         ComPtr<IArchiveExtractCallback> extract_callback(raw_extract_callback);
 
@@ -364,7 +370,7 @@ ExtractArchiveResult extract_archive_internal(
 
             result.command_ok = true;
 
-            result.message = "archive extracted";
+            result.message = dry_run ? "archive dry-run completed" : "archive extracted";
 
             return result;
 
@@ -554,7 +560,9 @@ ExtractArchiveResult extract_archive_with_parts(
 
     const std::wstring& output_dir,
 
-    ExtractProgressCallback progress
+    ExtractProgressCallback progress,
+
+    bool dry_run
 
 ) {
 
@@ -598,7 +606,9 @@ ExtractArchiveResult extract_archive_with_parts(
 
         output_dir,
 
-        std::move(progress));
+        std::move(progress),
+
+        dry_run);
 
 #else
 
@@ -615,6 +625,8 @@ ExtractArchiveResult extract_archive_with_parts(
     (void)output_dir;
 
     (void)progress;
+
+    (void)dry_run;
 
     ExtractArchiveResult result;
 
@@ -648,7 +660,9 @@ ExtractArchiveResult extract_archive_with_ranges(
 
     const std::wstring& output_dir,
 
-    ExtractProgressCallback progress
+    ExtractProgressCallback progress,
+
+    bool dry_run
 
 ) {
 
@@ -688,7 +702,9 @@ ExtractArchiveResult extract_archive_with_ranges(
 
         output_dir,
 
-        std::move(progress));
+        std::move(progress),
+
+        dry_run);
 
 #else
 
@@ -705,6 +721,8 @@ ExtractArchiveResult extract_archive_with_ranges(
     (void)output_dir;
 
     (void)progress;
+
+    (void)dry_run;
 
     ExtractArchiveResult result;
 
