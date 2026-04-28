@@ -67,6 +67,57 @@ def write_extraction_progress_manifest(
     return str(target)
 
 
+def filter_extraction_outputs(manifest_path: str, *, partial_keep_ratio: float = 0.2) -> dict[str, Any]:
+    path = Path(manifest_path)
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    files = [dict(item) for item in manifest.get("files") or [] if isinstance(item, dict)]
+    complete = [item for item in files if item.get("status") == "complete"]
+    kept: list[dict[str, Any]] = []
+    discarded: list[dict[str, Any]] = []
+
+    if complete:
+        keep_paths = {str(item.get("path") or "") for item in complete}
+        for item in files:
+            if str(item.get("path") or "") in keep_paths:
+                kept.append({**item, "retention": "kept_complete"})
+            else:
+                _discard_file(item)
+                discarded.append({**item, "retention": "discarded_incomplete_after_complete_output"})
+    else:
+        partials = [item for item in files if item.get("status") in {"partial", "unverified"} and int(item.get("bytes_written", 0) or 0) > 0]
+        best_by_name: dict[str, dict[str, Any]] = {}
+        for item in partials:
+            key = str(item.get("archive_path") or item.get("path") or "")
+            if key not in best_by_name or int(item.get("bytes_written", 0) or 0) > int(best_by_name[key].get("bytes_written", 0) or 0):
+                best_by_name[key] = item
+        best_bytes = max([int(item.get("bytes_written", 0) or 0) for item in partials] or [0])
+        min_bytes = max(1, int(best_bytes * max(0.0, float(partial_keep_ratio))))
+        keep_paths = {
+            str(item.get("path") or "")
+            for item in best_by_name.values()
+            if int(item.get("bytes_written", 0) or 0) >= min_bytes
+        }
+        for item in files:
+            item_path = str(item.get("path") or "")
+            if item_path in keep_paths:
+                kept.append({**item, "retention": "kept_best_partial"})
+            else:
+                _discard_file(item)
+                discarded.append({**item, "retention": "discarded_low_progress_partial"})
+
+    manifest["files"] = kept
+    manifest["discarded_files"] = discarded
+    manifest["summary"] = _summary(kept)
+    manifest["filter"] = {
+        "complete_outputs_present": bool(complete),
+        "partial_keep_ratio": partial_keep_ratio,
+        "kept": len(kept),
+        "discarded": len(discarded),
+    }
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return manifest
+
+
 def has_recoverable_partial_outputs(diagnostics: dict[str, Any], out_dir: str) -> bool:
     result = _worker_result(diagnostics)
     failure_stage = str(result.get("failure_stage") or diagnostics.get("failure_stage") or "")
@@ -146,6 +197,17 @@ def _merge_untraced_files(items: list[dict[str, Any]], out_dir: str, *, round_in
     return items
 
 
+def _discard_file(item: dict[str, Any]) -> None:
+    path = Path(str(item.get("path") or ""))
+    if not path:
+        return
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        return
+
+
 def _iter_files(root: Path):
     if not root.exists():
         return
@@ -181,4 +243,3 @@ def _relative_path(path: Path, root: Path) -> str:
         return str(path.relative_to(root))
     except ValueError:
         return path.name
-

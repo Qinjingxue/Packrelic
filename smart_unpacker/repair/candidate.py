@@ -94,6 +94,19 @@ class RepairCandidate:
         )
 
 
+@dataclass(frozen=True)
+class RepairCandidateBatch:
+    candidates: list[RepairCandidate] = field(default_factory=list)
+    diagnosis: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    message: str = ""
+    terminal_result: RepairResult | None = None
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.candidates)
+
+
 class CandidateSelector:
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = config or {}

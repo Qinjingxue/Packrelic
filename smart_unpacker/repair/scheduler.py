@@ -2,7 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from smart_unpacker.repair.candidate import CandidateSelector, RepairCandidate
+from smart_unpacker.repair.candidate import CandidateSelector, RepairCandidate, RepairCandidateBatch
 from smart_unpacker.repair.capability import ModuleCapabilityDecision, RepairCapabilityDecision
 from smart_unpacker.repair.config import enabled_module_configs, repair_config
 from smart_unpacker.repair.context import RepairContext, build_repair_context
@@ -22,22 +22,57 @@ class RepairScheduler:
         return diagnose_repair_job(job)
 
     def repair(self, job: RepairJob) -> RepairResult:
+        batch = self.generate_repair_candidates(job)
+        if batch.terminal_result is not None:
+            return batch.terminal_result
+        selector = CandidateSelector(self.config)
+        warnings = list(batch.warnings)
+        if batch.candidates:
+            selected, selection = selector.select(batch.candidates)
+            if selected is not None:
+                return selected.to_result(selection=selection)
+            warnings.extend(selection.get("warnings") or [])
+            warnings.append("repair candidates were produced but none passed selection")
+        diagnosis = batch.diagnosis
+        return RepairResult(
+            status="unrepairable",
+            confidence=float(diagnosis.get("confidence", 0.0) or 0.0),
+            format=str(diagnosis.get("format") or job.format),
+            warnings=_dedupe(warnings),
+            diagnosis=diagnosis,
+            message=batch.message or "registered repair modules did not produce a candidate",
+        )
+
+    def generate_repair_candidates(self, job: RepairJob) -> RepairCandidateBatch:
         diagnosis = self.diagnose(job)
         context = build_repair_context(job, diagnosis)
         if not self.config.get("enabled", True):
-            return self._result("skipped", job, diagnosis, "repair layer is disabled")
+            return RepairCandidateBatch(
+                terminal_result=self._result("skipped", job, diagnosis, "repair layer is disabled"),
+                diagnosis=diagnosis.as_dict(),
+                message="repair layer is disabled",
+            )
         if not diagnosis.repairable:
-            return self._result("unrepairable", job, diagnosis, "; ".join(diagnosis.notes) or "repair is blocked")
+            message = "; ".join(diagnosis.notes) or "repair is blocked"
+            return RepairCandidateBatch(
+                terminal_result=self._result("unrepairable", job, diagnosis, message),
+                diagnosis=diagnosis.as_dict(),
+                message=message,
+            )
 
         modules, capability = self._select_modules(job, diagnosis, context)
         if not modules:
             status = "unrepairable" if capability.automatic_unrepairable else "unsupported"
-            return self._result(status, job, diagnosis, capability.message(), capability)
+            result = self._result(status, job, diagnosis, capability.message(), capability)
+            return RepairCandidateBatch(
+                terminal_result=result,
+                diagnosis=result.diagnosis,
+                message=result.message,
+            )
 
         workspace = self._workspace_for(job)
         workspace.mkdir(parents=True, exist_ok=True)
         module_configs = enabled_module_configs(self.config)
-        selector = CandidateSelector(self.config)
         warnings = []
         repair_candidates: list[RepairCandidate] = []
         for score, module, route_score in modules:
@@ -97,20 +132,12 @@ class RepairScheduler:
                 execution_warnings=result.warnings,
             )
             warnings.extend(result.warnings)
-        if repair_candidates:
-            repair_candidates = [
-                replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability))
-                for candidate in repair_candidates
-            ]
-            selected, selection = selector.select(repair_candidates)
-            if selected is not None:
-                return selected.to_result(selection=selection)
-            warnings.extend(selection.get("warnings") or [])
-            warnings.append("repair candidates were produced but none passed selection")
-        return RepairResult(
-            status="unrepairable",
-            confidence=diagnosis.confidence,
-            format=diagnosis.format,
+        repair_candidates = [
+            replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability))
+            for candidate in repair_candidates
+        ]
+        return RepairCandidateBatch(
+            candidates=repair_candidates,
             warnings=_dedupe(warnings),
             diagnosis=_with_capability_diagnosis(diagnosis.as_dict(), capability),
             message="registered repair modules did not produce a candidate",

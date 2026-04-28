@@ -181,6 +181,37 @@ def test_repair_scheduler_selects_best_generated_candidate(tmp_path):
     assert result.diagnosis["candidate_selection"]["selected_module"] == module.spec.name
 
 
+def test_repair_scheduler_exposes_generated_candidate_batch(tmp_path):
+    module = _DummyGeneratedCandidatesModule()
+    registry = get_repair_module_registry()
+    previous = registry.get(module.spec.name)
+    registry.register(module)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path / "repair"),
+                "stages": {"deep": True},
+                "deep": {"verify_candidates": False},
+                "modules": [{"name": module.spec.name, "enabled": True}],
+            }
+        })
+        batch = scheduler.generate_repair_candidates(RepairJob(
+            source_input={"kind": "file", "path": str(tmp_path / "source.zip")},
+            format="zip",
+            confidence=0.7,
+            damage_flags=["boundary_unreliable"],
+            archive_key="multi",
+        ))
+    finally:
+        if previous is not None:
+            registry.register(previous)
+
+    assert batch.terminal_result is None
+    assert len(batch.candidates) == 2
+    assert [candidate.actions for candidate in batch.candidates] == [["generated_low"], ["generated_best"]]
+    assert batch.diagnosis["capability_decision"]["selected_modules"] == [module.spec.name]
+
+
 def test_repair_scheduler_routes_module_from_fuzzy_profile(tmp_path):
     module = _DummyFuzzyRouteModule()
     registry = get_repair_module_registry()
