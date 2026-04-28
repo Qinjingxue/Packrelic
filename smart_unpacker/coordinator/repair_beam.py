@@ -216,7 +216,9 @@ class RepairBeamLoop:
             for item in ranked[: self.max_analyze_candidates]
         ]
         analyzed = sorted(analyzed, key=lambda item: item.score, reverse=True)
+        analyzed = _dedupe_equivalent_candidates(analyzed)
         assessment_window = _materialize_beam_items(analyzed[: self.max_assess_candidates])
+        assessment_window = _dedupe_equivalent_candidates(assessment_window)
         assessment_window = sorted(assessment_window, key=lambda item: item.score, reverse=True)
         assessed = [
             _with_assessment(item, self.assess(item))
@@ -274,9 +276,10 @@ class RepairBeamLoop:
                     },
                 ],
             )
-            if state.digest in seen:
+            state_key = _state_equivalence_key(state)
+            if state_key in seen:
                 continue
-            seen.add(state.digest)
+            seen.add(state_key)
             output.append(state)
             if len(output) >= self.beam_width:
                 break
@@ -296,6 +299,103 @@ def _candidate_archive_state(candidate: RepairCandidate) -> dict[str, Any]:
         return {}
     raw = candidate.plan.get("archive_state")
     return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _dedupe_equivalent_candidates(items: list[RepairBeamCandidate]) -> list[RepairBeamCandidate]:
+    output: list[RepairBeamCandidate] = []
+    seen: set[str] = set()
+    for item in items:
+        key = _candidate_equivalence_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
+
+
+def _candidate_equivalence_key(item: RepairBeamCandidate) -> str:
+    candidate_state = _candidate_archive_state(item.candidate)
+    if candidate_state:
+        return "state:" + _stable_digest(_archive_state_equivalence_payload(candidate_state))
+    repaired_input = item.candidate.repaired_input if isinstance(item.candidate.repaired_input, dict) else {}
+    if repaired_input:
+        return "input:" + _stable_digest(_source_input_equivalence_payload(repaired_input))
+    if isinstance(item.candidate.plan, dict):
+        return "plan:" + _stable_digest(item.candidate.plan)
+    return f"module:{item.candidate.module_name}:{item.candidate.format}:{item.candidate.confidence}"
+
+
+def _state_equivalence_key(state: RepairBeamState) -> str:
+    if state.archive_state:
+        return "state:" + _stable_digest(_archive_state_equivalence_payload(state.archive_state))
+    return "input:" + _stable_digest(_source_input_equivalence_payload(state.source_input))
+
+
+def _archive_state_equivalence_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
+    patches = []
+    for patch in raw.get("patches") or raw.get("patch_stack") or []:
+        if not isinstance(patch, dict):
+            continue
+        patches.append({
+            "operations": [
+                _patch_operation_equivalence_payload(operation)
+                for operation in patch.get("operations") or []
+                if isinstance(operation, dict)
+            ],
+        })
+    return {
+        "source": _source_input_equivalence_payload(source),
+        "format_hint": raw.get("format_hint") or source.get("format_hint") or "",
+        "logical_name": raw.get("logical_name") or source.get("logical_name") or "",
+        "patches": patches,
+    }
+
+
+def _patch_operation_equivalence_payload(operation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "op": operation.get("op") or "replace_range",
+        "target": operation.get("target") or "logical",
+        "offset": int(operation.get("offset", 0) or 0),
+        "size": operation.get("size"),
+        "part_index": operation.get("part_index"),
+        "data_b64": operation.get("data_b64") or "",
+        "data_ref": operation.get("data_ref") or "",
+    }
+
+
+def _source_input_equivalence_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": raw.get("kind") or raw.get("open_mode") or "",
+        "entry_path": raw.get("entry_path") or raw.get("path") or raw.get("archive_path") or "",
+        "open_mode": raw.get("open_mode") or "",
+        "format_hint": raw.get("format_hint") or raw.get("format") or "",
+        "parts": [
+            _range_equivalence_payload(item)
+            for item in raw.get("parts") or []
+            if isinstance(item, dict)
+        ],
+        "ranges": [
+            _range_equivalence_payload(item)
+            for item in raw.get("ranges") or []
+            if isinstance(item, dict)
+        ],
+        "segment": raw.get("segment") if isinstance(raw.get("segment"), dict) else None,
+    }
+
+
+def _range_equivalence_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "path": item.get("path") or "",
+        "role": item.get("role") or "",
+        "volume_number": item.get("volume_number"),
+        "start": item.get("start", item.get("start_offset")),
+        "end": item.get("end", item.get("end_offset")),
+    }
+
+
+def _stable_digest(payload: Any) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def _candidate_or_state_password(item: RepairBeamCandidate) -> str | None:

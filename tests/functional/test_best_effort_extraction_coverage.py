@@ -17,9 +17,13 @@ from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.config.schema import normalize_config
 from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
+from smart_unpacker.coordinator.repair_beam import RepairBeamLoop, RepairBeamState
 from smart_unpacker.coordinator.runner import PipelineRunner
+from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
+from smart_unpacker.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputRange
 from smart_unpacker.extraction.progress import write_extraction_progress_manifest
 from smart_unpacker.extraction.result import ExtractionResult
+from smart_unpacker.repair.candidate import RepairCandidate, RepairCandidateBatch
 from smart_unpacker.repair.result import RepairResult
 from smart_unpacker.support.resources import get_7z_dll_path, get_sevenzip_worker_path
 from smart_unpacker.verification import VerificationScheduler
@@ -414,6 +418,207 @@ def test_sfx_crop_patch_payload_damage_coverage_uses_virtual_zip_not_carrier(tmp
     assert all(source.get("patch_digest") == patched_state.effective_patch_digest()
                for source in verification.archive_coverage.sources
                if source.get("method") == "archive_test_crc")
+
+
+def test_patch_stack_crop_then_cd_rebuild_then_payload_partial_uses_same_state(tmp_path):
+    sfx, patch_stack, expected_digest = _sfx_zip_with_payload_damage_and_bad_cd_patch_stack(tmp_path)
+    task = _task(sfx, detected_ext="zip")
+    patched_state = ArchiveState.from_archive_input(task.archive_input(), patches=patch_stack)
+    task.set_archive_state(patched_state)
+    out_dir = tmp_path / "out"
+
+    analysis = ArchiveAnalysisStage({"analysis": {"enabled": True}}).analyze_task(task)
+    _completed, worker_result = _run_worker_state(task, out_dir, format_hint="zip")
+    verification = _verify_worker_output(
+        sfx,
+        out_dir,
+        worker_result,
+        detected_ext="zip",
+        fact_bag=task.fact_bag,
+    )
+
+    assert analysis is not None
+    assert task.fact_bag.get("analysis.selected_format") == "zip"
+    assert task.archive_state().effective_patch_digest() == expected_digest
+    assert [patch.id for patch in task.archive_state().patches] == ["crop-sfx-prefix", "rebuild-central-directory"]
+    assert worker_result["status"] == "failed"
+    assert worker_result["failure_kind"] in {"checksum_error", "data_error", "corrupted_data"}
+    assert verification.source_integrity == "payload_damaged"
+    assert verification.archive_coverage.expected_files == 4
+    assert verification.archive_coverage.complete_files == 3
+    assert verification.archive_coverage.failed_files == 1
+    assert verification.archive_coverage.completeness == pytest.approx(0.75, abs=0.02)
+    assert all(source.get("patch_digest") == expected_digest
+               for source in verification.archive_coverage.sources
+               if source.get("method") == "archive_test_crc")
+
+
+def test_beam_dedupes_equivalent_patch_plans_and_assesses_best_coverage(tmp_path):
+    source = tmp_path / "beam-source.zip"
+    source.write_bytes(b"raw")
+    state = ArchiveState.from_archive_input(ArchiveInputDescriptor(
+        entry_path=str(source),
+        open_mode="file",
+        format_hint="zip",
+    ))
+    scheduler = _LazyBeamCandidateScheduler(state)
+    assessed_modules = []
+
+    def assess(item):
+        assessed_modules.append(item.candidate.module_name)
+        completeness = 1.0 if item.candidate.module_name == "verified_patch" else 0.25
+        return {
+            "confidence": completeness,
+            "completeness": completeness,
+            "recoverable_upper_bound": 1.0,
+            "assessment_status": "complete" if completeness == 1.0 else "partial",
+            "source_integrity": "complete",
+            "decision_hint": "accept" if completeness == 1.0 else "repair",
+        }
+
+    loop = RepairBeamLoop(
+        scheduler,
+        beam_width=3,
+        max_candidates_per_state=4,
+        max_analyze_candidates=4,
+        max_assess_candidates=2,
+        analyze=lambda candidate: {"confidence": candidate.confidence},
+        assess=assess,
+    )
+    run = loop.run([
+        RepairBeamState(
+            source_input={"kind": "file", "path": str(source), "format_hint": "zip"},
+            archive_state=state.to_dict(),
+            format="zip",
+            archive_key="beam-source",
+        )
+    ], max_rounds=1)
+
+    assert scheduler.materialized == ["verified_patch", "worse_patch"]
+    assert assessed_modules == ["verified_patch", "worse_patch"]
+    assert run.best_state is not None
+    assert run.best_state.decision_hint == "accept"
+    assert run.best_state.completeness == pytest.approx(1.0)
+    assert [entry["module"] for entry in run.best_state.history] == ["verified_patch"]
+
+
+def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path):
+    archive = tmp_path / "missing-tail.7z.001"
+    archive.write_bytes(b"7z\xbc\xaf\x27\x1cmissing tail placeholder")
+    out_dir = tmp_path / "out"
+    extractor = _AlwaysFailingExtractor(archive, out_dir, failure_kind="structure_recognition")
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        extractor,
+        _NoNestedOutputScanPolicy(),
+        config={
+            "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 3},
+            "verification": {"enabled": True, "methods": []},
+        },
+    )
+    repair_stage = _TerminalMissingVolumeRepairStage()
+    runner.repair_stage = repair_stage
+    task = _task(archive, detected_ext="7z")
+
+    outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
+
+    assert outcome.success is False
+    assert repair_stage.calls == 1
+    assert task.fact_bag.get("repair.loop.terminal_reason") == "repair_unrepairable"
+    terminal = task.fact_bag.get("repair.loop.terminal")
+    assert terminal["module"] == "missing_volume_classifier"
+    assert task.fact_bag.get("repair.last_result")["diagnosis"]["failure_kind"] == "missing_volume"
+
+
+def test_split_concat_ranges_patch_state_reaches_worker_without_full_copy(tmp_path):
+    sfx, prefix_size = _sfx_with_zip_payload_damage(tmp_path)
+    data = sfx.read_bytes()
+    first = tmp_path / "split-sfx.zip.001"
+    second = tmp_path / "split-sfx.zip.002"
+    split_at = prefix_size + 180
+    first.write_bytes(data[:split_at])
+    second.write_bytes(data[split_at:])
+    task = _task(first, detected_ext="zip")
+    descriptor = ArchiveInputDescriptor(
+        entry_path=str(first),
+        open_mode="concat_ranges",
+        format_hint="zip",
+        logical_name="split-sfx",
+        ranges=[
+            ArchiveInputRange(path=str(first), start=0, end=None),
+            ArchiveInputRange(path=str(second), start=0, end=None),
+        ],
+    )
+    state = ArchiveState.from_archive_input(
+        descriptor,
+        patches=[PatchPlan(
+            id="crop-sfx-prefix-across-split",
+            operations=[PatchOperation.delete_range(offset=0, size=prefix_size)],
+            provenance={"module": "test_split_carrier_crop_patch"},
+            confidence=0.95,
+        )],
+    )
+    task.set_archive_state(state)
+    task.all_parts = [str(first), str(second)]
+    out_dir = tmp_path / "out"
+
+    _completed, worker_result = _run_worker_state(task, out_dir, format_hint="zip")
+    verification = _verify_worker_output(
+        first,
+        out_dir,
+        worker_result,
+        detected_ext="zip",
+        fact_bag=task.fact_bag,
+    )
+
+    input_trace = worker_result["diagnostics"].get("input_trace") or {}
+    assert input_trace.get("mode") in {"patched", "virtual_patch"}
+    assert input_trace.get("virtual_size") == len(data) - prefix_size
+    assert Path(input_trace.get("last_read", {}).get("source_path", "")).name in {first.name, second.name}
+    assert worker_result["status"] == "failed"
+    assert verification.archive_coverage.expected_files == 4
+    assert verification.archive_coverage.complete_files == 3
+    assert verification.archive_coverage.failed_files == 1
+
+
+def test_encrypted_sfx_patch_partial_preserves_password_priority(tmp_path):
+    sfx, patch_stack, expected_digest = _encrypted_sfx_with_payload_damage_and_bad_cd_patch_stack(
+        tmp_path,
+        password="secret",
+    )
+    task = _task(sfx, detected_ext="zip")
+    state = ArchiveState.from_archive_input(task.archive_input(), patches=patch_stack)
+    task.set_archive_state(state)
+
+    _wrong_completed, wrong = _run_worker_state(task, tmp_path / "wrong", format_hint="zip", password="wrong")
+    _ok_completed, ok = _run_worker_state(task, tmp_path / "ok", format_hint="zip", password="secret")
+    task.fact_bag.set("archive.password", "secret")
+    verification = _verify_worker_output(
+        sfx,
+        tmp_path / "ok",
+        ok,
+        detected_ext="zip",
+        fact_bag=task.fact_bag,
+        password="secret",
+    )
+
+    assert task.archive_state().effective_patch_digest() == expected_digest
+    assert [patch.id for patch in task.archive_state().patches] == [
+        "crop-encrypted-sfx-prefix",
+        "rebuild-encrypted-central-directory",
+    ]
+    assert wrong["native_status"] == "wrong_password"
+    assert wrong["wrong_password"] is True
+    assert wrong["failure_kind"] == "encrypted_or_wrong_password"
+    assert wrong["files_written"] == 0
+    assert ok["native_status"] == "damaged"
+    assert ok["wrong_password"] is False
+    assert ok["failure_kind"] in {"checksum_error", "corrupted_data", "data_error"}
+    assert ok["files_written"] == 2
+    assert verification.source_integrity == "payload_damaged"
+    assert verification.archive_coverage.expected_files == 3
+    assert verification.archive_coverage.complete_files == 2
+    assert verification.archive_coverage.failed_files == 1
 
 
 def test_missing_tail_volume_partial_outputs_do_not_become_partial_success(tmp_path):
@@ -845,6 +1050,34 @@ def _sfx_with_zip_payload_damage(tmp_path: Path) -> tuple[Path, int]:
     return sfx, len(prefix)
 
 
+def _sfx_zip_with_payload_damage_and_bad_cd_patch_stack(tmp_path: Path) -> tuple[Path, list[PatchPlan], str]:
+    zip_archive = _zip_with_one_bad_payload(tmp_path)
+    zip_bytes = zip_archive.read_bytes()
+    zip_archive.unlink()
+    cd_start, cd_size = _zip_central_directory_range(zip_bytes)
+    damaged_zip = bytearray(zip_bytes)
+    damaged_zip[cd_start: cd_start + 4] = b"BAD!"
+    prefix = b"MZ" + b"SFX-STUB" * 32
+    sfx = tmp_path / "payload-damaged-bad-cd-sfx.exe"
+    sfx.write_bytes(prefix + bytes(damaged_zip))
+    patch_stack = [
+        PatchPlan(
+            id="crop-sfx-prefix",
+            operations=[PatchOperation.delete_range(offset=0, size=len(prefix))],
+            provenance={"module": "test_carrier_crop_patch"},
+            confidence=0.95,
+        ),
+        PatchPlan(
+            id="rebuild-central-directory",
+            operations=[PatchOperation.replace_bytes(offset=cd_start, data=zip_bytes[cd_start: cd_start + cd_size])],
+            provenance={"module": "test_central_directory_rebuild_patch"},
+            confidence=0.9,
+        ),
+    ]
+    state = ArchiveState.from_archive_input(_archive_input_for_file(sfx, "zip"), patches=patch_stack)
+    return sfx, patch_stack, state.effective_patch_digest()
+
+
 def _zip_with_middle_bad_payload(tmp_path: Path) -> Path:
     archive = tmp_path / "middle-payload-damaged.zip"
     entries = {
@@ -1077,6 +1310,38 @@ def _encrypted_zip(tmp_path: Path, *, password: str, corrupt_payload: bool) -> P
     return archive
 
 
+def _encrypted_sfx_with_payload_damage_and_bad_cd_patch_stack(
+    tmp_path: Path,
+    *,
+    password: str,
+) -> tuple[Path, list[PatchPlan], str]:
+    zip_archive = _encrypted_zip(tmp_path / "encrypted-sfx-source", password=password, corrupt_payload=True)
+    zip_bytes = zip_archive.read_bytes()
+    zip_archive.unlink()
+    cd_start, cd_size = _zip_central_directory_range(zip_bytes)
+    damaged_zip = bytearray(zip_bytes)
+    damaged_zip[cd_start: cd_start + 4] = b"BAD!"
+    prefix = b"MZ" + b"ENCRYPTED-SFX-STUB" * 16
+    sfx = tmp_path / "encrypted-payload-damaged-bad-cd-sfx.exe"
+    sfx.write_bytes(prefix + bytes(damaged_zip))
+    patch_stack = [
+        PatchPlan(
+            id="crop-encrypted-sfx-prefix",
+            operations=[PatchOperation.delete_range(offset=0, size=len(prefix))],
+            provenance={"module": "test_encrypted_sfx_crop"},
+            confidence=0.95,
+        ),
+        PatchPlan(
+            id="rebuild-encrypted-central-directory",
+            operations=[PatchOperation.replace_bytes(offset=cd_start, data=zip_bytes[cd_start: cd_start + cd_size])],
+            provenance={"module": "test_encrypted_cd_rebuild"},
+            confidence=0.9,
+        ),
+    ]
+    state = ArchiveState.from_archive_input(_archive_input_for_file(sfx, "zip"), patches=patch_stack)
+    return sfx, patch_stack, state.effective_patch_digest()
+
+
 def _seven_zip_missing_middle_volume(tmp_path: Path) -> tuple[Path, list[Path]]:
     seven_zip = _require_7z_exe_or_skip()
     source = tmp_path / "split-src"
@@ -1127,6 +1392,25 @@ def _zip_payload_offset_and_size(data: bytes, name: str) -> tuple[int, int]:
             return payload_offset, compressed_size
         offset = payload_offset + compressed_size
     raise AssertionError(f"ZIP local header not found for {name}")
+
+
+def _zip_central_directory_range(data: bytes) -> tuple[int, int]:
+    with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+        start = zf.start_dir
+    eocd = data.rfind(b"PK\x05\x06")
+    assert start >= 0
+    assert eocd >= start
+    comment_size = struct.unpack_from("<H", data, eocd + 20)[0]
+    end = eocd + 22 + comment_size
+    return start, end - start
+
+
+def _archive_input_for_file(path: Path, format_hint: str) -> ArchiveInputDescriptor:
+    return ArchiveInputDescriptor(
+        entry_path=str(path),
+        open_mode="file",
+        format_hint=format_hint,
+    )
 
 
 class _StructureFailureThenWorkerExtractor:
@@ -1209,6 +1493,136 @@ class _ApplyRepairedArchiveStage:
             module_name="fake_structure_repair",
             workspace_paths=[str(self.repaired_archive)],
         )
+
+
+class _LazyBeamCandidateScheduler:
+    def __init__(self, source_state: ArchiveState):
+        self.source_state = source_state
+        self.materialized: list[str] = []
+
+    def generate_repair_candidates(self, job, lazy=True):
+        verified_state = self._patched_state("verified-equivalent-a", b"Z")
+        duplicate_verified_state = self._patched_state("verified-equivalent-b", b"Z")
+        worse_state = self._patched_state("worse", b"W")
+        outside_state = self._patched_state("outside-window", b"O")
+        return RepairCandidateBatch(candidates=[
+            self._lazy_candidate("verified_patch", verified_state, 0.9),
+            self._lazy_candidate("duplicate_verified_patch", duplicate_verified_state, 0.9),
+            self._lazy_candidate("worse_patch", worse_state, 0.4),
+            self._lazy_candidate("outside_window_patch", outside_state, 0.1),
+        ])
+
+    def _patched_state(self, patch_id: str, byte: bytes) -> ArchiveState:
+        descriptor = self.source_state.to_archive_input_descriptor()
+        return ArchiveState.from_archive_input(
+            descriptor,
+            patches=[PatchPlan(
+                id=patch_id,
+                operations=[PatchOperation.replace_bytes(offset=0, data=byte)],
+                provenance={"module": patch_id},
+                confidence=0.9,
+            )],
+        )
+
+    def _lazy_candidate(self, module_name: str, state: ArchiveState, confidence: float) -> RepairCandidate:
+        def materialize():
+            self.materialized.append(module_name)
+            return RepairCandidate(
+                module_name=module_name,
+                format="zip",
+                repaired_input={"kind": "archive_state", "format_hint": "zip", "module": module_name},
+                confidence=confidence,
+                actions=[module_name],
+                plan={"archive_state": state.to_dict()},
+            )
+
+        return RepairCandidate(
+            module_name=module_name,
+            format="zip",
+            repaired_input={},
+            confidence=confidence,
+            actions=[module_name],
+            materializer=materialize,
+            materialized=False,
+            plan={"archive_state": state.to_dict()},
+        )
+
+
+class _AlwaysFailingExtractor:
+    password_session = None
+
+    def __init__(self, archive: Path, out_dir: Path, *, failure_kind: str):
+        self.archive = archive
+        self.out_dir = out_dir
+        self.failure_kind = failure_kind
+
+    def default_output_dir_for_task(self, task):
+        return str(self.out_dir)
+
+    def inspect(self, task, out_dir):
+        return type("Preflight", (), {"skip_result": None})()
+
+    def extract(self, task, out_dir, runtime_scheduler=None):
+        return ExtractionResult(
+            success=False,
+            archive=str(self.archive),
+            out_dir=str(out_dir),
+            all_parts=[str(self.archive)],
+            error=self.failure_kind,
+            diagnostics={
+                "result": {
+                    "status": "failed",
+                    "native_status": "damaged",
+                    "failure_stage": "archive_open",
+                    "failure_kind": self.failure_kind,
+                    "missing_volume": False,
+                    "wrong_password": False,
+                }
+            },
+        )
+
+
+class _TerminalMissingVolumeRepairStage:
+    config = {
+        "max_repair_rounds_per_task": 3,
+        "max_repair_seconds_per_task": 120.0,
+        "max_repair_generated_files_per_task": 16,
+        "max_repair_generated_mb_per_task": 2048.0,
+    }
+
+    def __init__(self):
+        self.calls = 0
+
+    def repair_medium_confidence_task(self, task):
+        return None
+
+    def repair_after_extraction_failure_result(self, task, result):
+        self.calls += 1
+        repair = RepairResult(
+            status="unrepairable",
+            confidence=1.0,
+            format="7z",
+            module_name="missing_volume_classifier",
+            damage_flags=["missing_volume"],
+            diagnosis={
+                "failure_kind": "missing_volume",
+                "structured_reason": {
+                    "code": "missing_volume",
+                    "source": "repair_module_feedback",
+                },
+            },
+            message="split archive is missing a required tail volume",
+        )
+        task.fact_bag.set("repair.last_result", {
+            "status": repair.status,
+            "module": repair.module_name,
+            "diagnosis": dict(repair.diagnosis),
+            "message": repair.message,
+        })
+        return repair
+
+    def repair_after_verification_assessment_result(self, task, result, verification):
+        return None
 
 
 class _MissingVolumePartialExtractor:
