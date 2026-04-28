@@ -1,4 +1,3 @@
-import os
 from typing import Any
 
 from smart_unpacker.support.sevenzip_native import (
@@ -9,10 +8,17 @@ from smart_unpacker.support.sevenzip_native import (
     STATUS_WRONG_PASSWORD,
     cached_read_archive_crc_manifest,
 )
-from smart_unpacker.support.path_names import clean_relative_archive_path, normalize_match_name, normalize_match_path
 from smart_unpacker.verification.evidence import VerificationEvidence
+from smart_unpacker.verification.methods._archive_output_match import coverage_details, coverage_from_archive_and_output
 from smart_unpacker.verification.registry import register_verification_method
-from smart_unpacker.verification.result import VerificationIssue, VerificationStepResult
+from smart_unpacker.verification.result import (
+    DECISION_REPAIR,
+    SOURCE_INTEGRITY_COMPLETE,
+    SOURCE_INTEGRITY_DAMAGED,
+    SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
+    VerificationIssue,
+    VerificationStepResult,
+)
 
 try:
     from smart_unpacker_native import compute_directory_crc_manifest as _compute_directory_crc_manifest
@@ -49,10 +55,7 @@ class ArchiveTestCrcMethod:
         if archive_status_result is not None:
             return archive_status_result
 
-        archive_files = [
-            item for item in archive_manifest.files
-            if isinstance(item, dict) and bool(item.get("has_crc", False))
-        ]
+        archive_files = [item for item in archive_manifest.files if isinstance(item, dict) and item.get("path")]
         if not archive_files:
             return VerificationStepResult(method=self.name, status="skipped")
         if _compute_directory_crc_manifest is None:
@@ -85,59 +88,89 @@ class ArchiveTestCrcMethod:
         if status != "ok":
             return VerificationStepResult(method=self.name, status="skipped")
 
-        output_by_path, output_by_name = _index_output_files(output_manifest.get("files") or [])
         mismatches = []
         missing = []
-        checked = 0
+        issue_by_path: dict[str, list[VerificationIssue]] = {}
         for item in archive_files:
-            expected_path = clean_relative_archive_path(item.get("path"))
-            output_item = output_by_path.get(normalize_match_path(expected_path))
-            if output_item is None:
-                output_item = output_by_name.get(normalize_match_name(os.path.basename(expected_path)))
+            expected_path = str(item.get("path") or "")
+            output_item = _output_by_path_or_name(output_manifest.get("files") or [], expected_path)
             if output_item is None:
                 missing.append(expected_path)
-                continue
-            checked += 1
-            expected_crc = _as_u32(item.get("crc32"))
-            actual_crc = _as_u32(output_item.get("crc32"))
-            if expected_crc != actual_crc:
-                mismatches.append({
-                    "path": expected_path,
-                    "expected_crc32": expected_crc,
-                    "actual_crc32": actual_crc,
-                })
+            elif bool(item.get("has_crc", False)) and item.get("crc32") is not None and output_item.get("crc32") is not None:
+                expected_crc = _as_u32(item.get("crc32"))
+                actual_crc = _as_u32(output_item.get("crc32"))
+                if expected_crc != actual_crc:
+                    mismatches.append({
+                        "path": expected_path,
+                        "expected_crc32": expected_crc,
+                        "actual_crc32": actual_crc,
+                    })
 
         issues: list[VerificationIssue] = []
-        score_delta = 0
         if mismatches:
-            score_delta -= abs(int(config.get("crc_mismatch_penalty", 100) or 100))
-            issues.append(VerificationIssue(
+            issue = VerificationIssue(
                 method=self.name,
                 code="fail.archive_crc_mismatch",
                 message="Output file CRC does not match archive manifest CRC",
                 path=evidence.output_dir,
                 expected=len(archive_files),
                 actual=mismatches[: int(config.get("max_reported_items", 20) or 20)],
-            ))
+            )
+            issues.append(issue)
+            for item in mismatches:
+                issue_by_path.setdefault(str(item.get("path") or ""), []).append(issue)
         if missing:
-            score_delta -= abs(int(config.get("missing_crc_file_penalty", 60) or 60))
-            issues.append(VerificationIssue(
+            issue = VerificationIssue(
                 method=self.name,
                 code="fail.archive_crc_file_missing",
                 message="Some archive CRC entries were not found in extraction output",
                 path=evidence.output_dir,
                 expected=len(archive_files),
                 actual=missing[: int(config.get("max_reported_items", 20) or 20)],
-            ))
+            )
+            issues.append(issue)
+            for path in missing:
+                issue_by_path.setdefault(str(path), []).append(issue)
+
+        coverage = coverage_from_archive_and_output(
+            archive_files,
+            list(output_manifest.get("files") or []),
+            method=self.name,
+            issues_by_path=issue_by_path,
+        )
 
         if not issues:
-            return VerificationStepResult(method=self.name, status="passed")
+            return VerificationStepResult(
+                method=self.name,
+                status="passed",
+                completeness_hint=coverage.completeness,
+                source_integrity_hint=SOURCE_INTEGRITY_COMPLETE,
+                file_observations=coverage.observations,
+                issues=[VerificationIssue(
+                    method=self.name,
+                    code="info.archive_output_coverage",
+                    message="Archive files were matched against extraction output",
+                    path=evidence.output_dir,
+                    expected=coverage.expected_files,
+                    actual=coverage_details(coverage),
+                )],
+            )
+        issues.append(VerificationIssue(
+            method=self.name,
+            code="info.archive_output_coverage",
+            message="Archive files were matched against extraction output",
+            path=evidence.output_dir,
+            expected=coverage.expected_files,
+            actual=coverage_details(coverage),
+        ))
         return VerificationStepResult(
             method=self.name,
             status="failed",
-            score_delta=score_delta,
             issues=issues,
-            hard_fail=bool(config.get("hard_fail_on_crc_mismatch", True) and mismatches),
+            completeness_hint=coverage.completeness,
+            source_integrity_hint=SOURCE_INTEGRITY_COMPLETE,
+            decision_hint=DECISION_REPAIR,
+            file_observations=coverage.observations,
         )
 
     def _archive_status_result(self, archive_manifest, evidence: VerificationEvidence) -> VerificationStepResult | None:
@@ -158,8 +191,6 @@ class ArchiveTestCrcMethod:
             return VerificationStepResult(
                 method=self.name,
                 status="failed",
-                score_delta=-100,
-                hard_fail=True,
                 issues=[VerificationIssue(
                     method=self.name,
                     code="fail.archive_crc_wrong_password",
@@ -171,8 +202,9 @@ class ArchiveTestCrcMethod:
             return VerificationStepResult(
                 method=self.name,
                 status="failed",
-                score_delta=-100,
-                hard_fail=True,
+                completeness_hint=None,
+                source_integrity_hint=SOURCE_INTEGRITY_PAYLOAD_DAMAGED if archive_manifest.checksum_error else SOURCE_INTEGRITY_DAMAGED,
+                decision_hint=DECISION_REPAIR,
                 issues=[VerificationIssue(
                     method=self.name,
                     code="fail.archive_crc_test_failed",
@@ -193,23 +225,22 @@ class ArchiveTestCrcMethod:
         )
 
 
-def _index_output_files(files: list[dict]) -> tuple[dict[str, dict], dict[str, dict]]:
-    by_path = {}
-    by_name = {}
-    duplicate_names = set()
+def _output_by_path_or_name(files: list[dict], expected_path: str) -> dict | None:
+    from smart_unpacker.support.path_names import clean_relative_archive_path, normalize_match_name, normalize_match_path
+    import os
+
+    normalized = normalize_match_path(clean_relative_archive_path(expected_path))
+    basename = normalize_match_name(os.path.basename(normalized))
+    name_matches = []
     for item in files:
         if not isinstance(item, dict):
             continue
         path = clean_relative_archive_path(item.get("path"))
-        by_path[normalize_match_path(path)] = item
-        name = normalize_match_name(os.path.basename(path))
-        if name in by_name:
-            duplicate_names.add(name)
-        else:
-            by_name[name] = item
-    for name in duplicate_names:
-        by_name.pop(name, None)
-    return by_path, by_name
+        if normalize_match_path(path) == normalized:
+            return item
+        if normalize_match_name(os.path.basename(path)) == basename:
+            name_matches.append(item)
+    return name_matches[0] if len(name_matches) == 1 else None
 
 
 def _as_u32(value: Any) -> int:

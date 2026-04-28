@@ -5,16 +5,23 @@ from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.passwords import PasswordSession
 from smart_unpacker.verification.evidence import build_verification_evidence
 from smart_unpacker.verification.pipeline import VerificationPipeline
-from smart_unpacker.verification.result import VerificationResult
+from smart_unpacker.verification.result import (
+    ASSESSMENT_DISABLED,
+    DECISION_ACCEPT,
+    SOURCE_INTEGRITY_UNKNOWN,
+    VerificationResult,
+)
 
 
 DEFAULT_VERIFICATION_CONFIG = {
     "enabled": False,
-    "initial_score": 100,
-    "pass_threshold": 70,
-    "fail_fast_threshold": 40,
     "max_retries": 0,
     "cleanup_failed_output": True,
+    "accept_partial_when_source_damaged": True,
+    "partial_min_completeness": 0.2,
+    "complete_accept_threshold": 0.999,
+    "partial_accept_threshold": 0.2,
+    "retry_on_verification_failure": True,
     "methods": [
         {"name": "extraction_exit_signal", "enabled": True},
         {"name": "output_presence", "enabled": True},
@@ -35,11 +42,11 @@ class VerificationScheduler:
         evidence = build_verification_evidence(task, extraction_result, self.password_session)
         if not self.config.get("enabled", False):
             return VerificationResult(
-                ok=True,
-                status="disabled",
-                score=int(self.config.get("initial_score", 100)),
-                pass_threshold=int(self.config.get("pass_threshold", 70)),
-                fail_fast_threshold=int(self.config.get("fail_fast_threshold", 40)),
+                completeness=1.0,
+                recoverable_upper_bound=1.0,
+                assessment_status=ASSESSMENT_DISABLED,
+                source_integrity=SOURCE_INTEGRITY_UNKNOWN,
+                decision_hint=DECISION_ACCEPT,
             )
         return VerificationPipeline(self.config).run(evidence)
 

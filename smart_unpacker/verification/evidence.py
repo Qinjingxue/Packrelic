@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any
 
 from smart_unpacker.contracts.tasks import ArchiveTask
@@ -18,6 +20,7 @@ class VerificationEvidence:
     health: dict[str, Any]
     analysis: dict[str, Any]
     selected_codepage: str | None = None
+    progress_manifest: dict[str, Any] | None = None
 
 
 def build_verification_evidence(
@@ -40,5 +43,20 @@ def build_verification_evidence(
         health=dict(fact_bag.get("resource.health") or {}),
         analysis=dict(fact_bag.get("resource.analysis") or {}),
         selected_codepage=extraction_result.selected_codepage,
+        progress_manifest=_load_progress_manifest(extraction_result),
     )
 
+
+def _load_progress_manifest(extraction_result: ExtractionResult) -> dict[str, Any] | None:
+    manifest_path = extraction_result.progress_manifest
+    if not manifest_path and extraction_result.out_dir:
+        candidate = Path(extraction_result.out_dir) / ".sunpack" / "extraction_manifest.json"
+        if candidate.exists():
+            manifest_path = str(candidate)
+    if not manifest_path:
+        return None
+    try:
+        payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None

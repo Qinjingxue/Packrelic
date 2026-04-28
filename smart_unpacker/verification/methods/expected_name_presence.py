@@ -2,9 +2,22 @@ import os
 from typing import Any
 
 from smart_unpacker.verification.evidence import VerificationEvidence
+from smart_unpacker.verification.methods._archive_output_match import (
+    archive_files_from_names,
+    coverage_details,
+    coverage_from_archive_and_output,
+    output_files_from_directory,
+)
 from smart_unpacker.verification.methods._output_stats import output_stats_for_evidence
 from smart_unpacker.verification.registry import register_verification_method
-from smart_unpacker.verification.result import VerificationIssue, VerificationStepResult
+from smart_unpacker.verification.result import (
+    DECISION_NONE,
+    DECISION_REPAIR,
+    SOURCE_INTEGRITY_COMPLETE,
+    SOURCE_INTEGRITY_DAMAGED,
+    VerificationIssue,
+    VerificationStepResult,
+)
 from smart_unpacker.support.path_names import clean_relative_archive_path, normalize_match_name, normalize_match_path
 
 
@@ -33,6 +46,12 @@ class ExpectedNamePresenceMethod:
 
         output_paths = {normalize_match_path(path) for path in stats.relative_paths}
         output_basenames = {normalize_match_name(os.path.basename(path)) for path in stats.relative_paths}
+        output_files = output_files_from_directory(evidence.output_dir)
+        coverage = coverage_from_archive_and_output(
+            archive_files_from_names(expected_names),
+            output_files,
+            method=self.name,
+        )
         missing = []
         for expected in expected_names:
             normalized_path = normalize_match_path(expected)
@@ -42,7 +61,21 @@ class ExpectedNamePresenceMethod:
             missing.append(expected)
 
         if not missing:
-            return VerificationStepResult(method=self.name, status="passed")
+            return VerificationStepResult(
+                method=self.name,
+                status="passed",
+                completeness_hint=coverage.completeness,
+                source_integrity_hint=_source_integrity_hint(evidence),
+                file_observations=coverage.observations,
+                issues=[VerificationIssue(
+                    method=self.name,
+                    code="info.expected_name_coverage",
+                    message="Expected archive names were matched against extraction output",
+                    path=evidence.output_dir,
+                    expected=len(expected_names),
+                    actual=coverage_details(coverage),
+                )],
+            )
 
         total = len(expected_names)
         matched = total - len(missing)
@@ -59,7 +92,6 @@ class ExpectedNamePresenceMethod:
             penalty = int(config.get("missing_penalty", 35) or 35)
             code = "fail.expected_names_missing"
 
-        hard_fail = bool(config.get("hard_fail_on_all_missing", False) and matched == 0)
         issue = VerificationIssue(
             method=self.name,
             code=code,
@@ -70,14 +102,19 @@ class ExpectedNamePresenceMethod:
                 "matched": matched,
                 "missing": missing,
                 "missing_ratio": round(missing_ratio, 3),
+                "coverage": coverage_details(coverage),
             },
         )
+        source_integrity = _source_integrity_hint(evidence)
         return VerificationStepResult(
             method=self.name,
-            status="failed" if hard_fail else "warning",
-            score_delta=-abs(penalty),
+            status="warning",
             issues=[issue],
-            hard_fail=hard_fail,
+            completeness_hint=coverage.completeness,
+            recoverable_upper_bound_hint=coverage.completeness if source_integrity != SOURCE_INTEGRITY_COMPLETE else None,
+            source_integrity_hint=source_integrity,
+            decision_hint=DECISION_REPAIR if _expected_names_are_strong(evidence, config, source_integrity) else DECISION_NONE,
+            file_observations=coverage.observations,
         )
 
     def _expected_names(self, evidence: VerificationEvidence, config: dict) -> list[str]:
@@ -133,3 +170,19 @@ def _iter_name_values(value: Any):
         for item in value:
             yield from _iter_name_values(item)
 
+
+def _source_integrity_hint(evidence: VerificationEvidence) -> str:
+    analysis = evidence.analysis or {}
+    status = str(analysis.get("status") or "")
+    if status in {"damaged", "weak"}:
+        return SOURCE_INTEGRITY_DAMAGED
+    return SOURCE_INTEGRITY_COMPLETE
+
+
+def _expected_names_are_strong(evidence: VerificationEvidence, config: dict, source_integrity: str) -> bool:
+    if config.get("expected_names"):
+        return True
+    source = str(config.get("expected_names_source") or evidence.analysis.get("expected_names_source") or "")
+    if source in {"user", "central_directory", "manifest"}:
+        return True
+    return source_integrity == SOURCE_INTEGRITY_COMPLETE

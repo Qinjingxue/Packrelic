@@ -4,8 +4,9 @@ from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.passwords import PasswordSession
 from smart_unpacker.verification import (
-    VerificationStepResult,
+    FileVerificationObservation,
     VerificationScheduler,
+    VerificationStepResult,
     register_verification_method,
 )
 from smart_unpacker.verification.result import VerificationIssue
@@ -14,37 +15,49 @@ from smart_unpacker.verification.result import VerificationIssue
 CALLS = []
 
 
-@register_verification_method("unit_score_delta")
-class UnitScoreDeltaMethod:
+@register_verification_method("unit_complete_observation")
+class UnitCompleteObservationMethod:
     def verify(self, evidence, config):
         CALLS.append(config["name"])
         return VerificationStepResult(
             method=config["name"],
-            score_delta=int(config.get("score_delta", 0)),
-            issues=[VerificationIssue(method=config["name"], code="warning.unit", message="unit")],
+            completeness_hint=float(config.get("completeness", 1.0)),
+            source_integrity_hint=config.get("source_integrity", "complete"),
+            decision_hint=config.get("decision_hint", "none"),
+            file_observations=[
+                FileVerificationObservation(path="inside.txt", archive_path="inside.txt", state="complete", progress=1.0)
+            ],
         )
 
 
-@register_verification_method("unit_hard_fail")
-class UnitHardFailMethod:
+@register_verification_method("unit_missing_observation")
+class UnitMissingObservationMethod:
     def verify(self, evidence, config):
         CALLS.append(config["name"])
+        issue = VerificationIssue(method=config["name"], code="fail.unit_missing", message="missing", path="missing.bin")
         return VerificationStepResult(
             method=config["name"],
-            score_delta=int(config.get("score_delta", 0)),
-            hard_fail=True,
-            issues=[VerificationIssue(method=config["name"], code="fail.unit", message="unit fail")],
+            status="warning",
+            completeness_hint=0.5,
+            decision_hint="repair",
+            issues=[issue],
+            file_observations=[
+                FileVerificationObservation(path="inside.txt", archive_path="inside.txt", state="complete", progress=1.0),
+                FileVerificationObservation(path="missing.bin", archive_path="missing.bin", state="missing", progress=0.0, issues=[issue]),
+            ],
         )
 
 
-@register_verification_method("unit_password_check")
-class UnitPasswordCheckMethod:
+@register_verification_method("unit_password_assessment")
+class UnitPasswordAssessmentMethod:
     def verify(self, evidence, config):
+        if evidence.password == config.get("expected_password"):
+            return VerificationStepResult(method=config["name"], completeness_hint=1.0, decision_hint="accept")
         return VerificationStepResult(
             method=config["name"],
-            status="passed" if evidence.password == config.get("expected_password") else "failed",
-            score_delta=0 if evidence.password == config.get("expected_password") else -100,
-            issues=[] if evidence.password == config.get("expected_password") else [
+            completeness_hint=0.0,
+            decision_hint="repair",
+            issues=[
                 VerificationIssue(
                     method=config["name"],
                     code="fail.password_mismatch",
@@ -54,6 +67,81 @@ class UnitPasswordCheckMethod:
                 )
             ],
         )
+
+
+def test_verification_scheduler_disabled_returns_disabled_assessment(tmp_path):
+    CALLS.clear()
+    task, result = _task_and_result(tmp_path)
+    scheduler = VerificationScheduler({
+        "verification": {
+            "enabled": False,
+            "methods": [{"name": "unit_complete_observation", "enabled": True}],
+        }
+    })
+
+    verification = scheduler.verify(task, result)
+
+    assert verification.assessment_status == "disabled"
+    assert verification.decision_hint == "accept"
+    assert verification.completeness == 1.0
+    assert CALLS == []
+
+
+def test_verification_pipeline_aggregates_completeness_and_decision(tmp_path):
+    CALLS.clear()
+    task, result = _task_and_result(tmp_path)
+    scheduler = VerificationScheduler({
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "unit_complete_observation", "enabled": True, "completeness": 1.0},
+                {"name": "unit_missing_observation", "enabled": True},
+            ],
+        }
+    })
+
+    verification = scheduler.verify(task, result)
+
+    assert verification.decision_hint == "repair"
+    assert verification.assessment_status == "inconsistent"
+    assert verification.completeness == 0.5
+    assert verification.complete_files == 1
+    assert verification.missing_files == 1
+    assert CALLS == ["unit_complete_observation", "unit_missing_observation"]
+
+
+def test_verification_evidence_uses_password_session_when_result_has_no_password(tmp_path):
+    task, result = _task_and_result(tmp_path)
+    session = PasswordSession()
+    session.set_resolved("sample-key", "secret")
+    scheduler = VerificationScheduler({
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "unit_password_assessment", "enabled": True, "expected_password": "secret"},
+            ],
+        }
+    }, password_session=session)
+
+    verification = scheduler.verify(task, result)
+
+    assert verification.decision_hint == "accept"
+    assert verification.completeness == 1.0
+
+
+def test_verification_config_is_normalized_without_legacy_score_fields():
+    config = normalize_config({
+        "recursive_extract": "1",
+        "verification": {
+            "enabled": True,
+            "methods": [{"name": "unit_complete_observation"}],
+        },
+    })
+
+    assert config["verification"]["enabled"] is True
+    assert config["verification"]["complete_accept_threshold"] == 0.999
+    assert config["verification"]["partial_accept_threshold"] == 0.2
+    assert config["verification"]["methods"][0]["enabled"] is True
 
 
 def _task_and_result(tmp_path):
@@ -68,122 +156,3 @@ def _task_and_result(tmp_path):
     task = ArchiveTask(fact_bag=bag, score=10, key="sample-key", main_path=str(archive), all_parts=[str(archive)])
     result = ExtractionResult(success=True, archive=str(archive), out_dir=str(out_dir), all_parts=[str(archive)])
     return task, result
-
-
-def test_verification_scheduler_disabled_returns_disabled_without_running_methods(tmp_path):
-    CALLS.clear()
-    task, result = _task_and_result(tmp_path)
-    scheduler = VerificationScheduler({
-        "verification": {
-            "enabled": False,
-            "methods": [{"name": "unit_score_delta", "enabled": True, "score_delta": -100}],
-        }
-    })
-
-    verification = scheduler.verify(task, result)
-
-    assert verification.ok is True
-    assert verification.status == "disabled"
-    assert CALLS == []
-
-
-def test_verification_pipeline_runs_methods_in_config_order_and_scores(tmp_path):
-    CALLS.clear()
-    task, result = _task_and_result(tmp_path)
-    scheduler = VerificationScheduler({
-        "verification": {
-            "enabled": True,
-            "initial_score": 100,
-            "pass_threshold": 70,
-            "fail_fast_threshold": 40,
-            "methods": [
-                {"name": "unit_score_delta", "enabled": True, "score_delta": -10},
-                {"name": "unit_score_delta", "enabled": True, "score_delta": -15},
-            ],
-        }
-    })
-
-    verification = scheduler.verify(task, result)
-
-    assert verification.ok is True
-    assert verification.status == "passed"
-    assert verification.score == 75
-    assert CALLS == ["unit_score_delta", "unit_score_delta"]
-
-
-def test_verification_pipeline_fails_fast_when_score_drops_below_threshold(tmp_path):
-    CALLS.clear()
-    task, result = _task_and_result(tmp_path)
-    scheduler = VerificationScheduler({
-        "verification": {
-            "enabled": True,
-            "initial_score": 100,
-            "pass_threshold": 70,
-            "fail_fast_threshold": 50,
-            "methods": [
-                {"name": "unit_score_delta", "enabled": True, "score_delta": -60},
-                {"name": "unit_score_delta", "enabled": True, "score_delta": 0},
-            ],
-        }
-    })
-
-    verification = scheduler.verify(task, result)
-
-    assert verification.ok is False
-    assert verification.status == "failed_fast"
-    assert verification.score == 40
-    assert CALLS == ["unit_score_delta"]
-
-
-def test_verification_pipeline_hard_fail_stops_immediately(tmp_path):
-    CALLS.clear()
-    task, result = _task_and_result(tmp_path)
-    scheduler = VerificationScheduler({
-        "verification": {
-            "enabled": True,
-            "methods": [
-                {"name": "unit_hard_fail", "enabled": True, "score_delta": -1},
-                {"name": "unit_score_delta", "enabled": True, "score_delta": 0},
-            ],
-        }
-    })
-
-    verification = scheduler.verify(task, result)
-
-    assert verification.ok is False
-    assert verification.status == "failed"
-    assert CALLS == ["unit_hard_fail"]
-
-
-def test_verification_evidence_uses_password_session_when_result_has_no_password(tmp_path):
-    task, result = _task_and_result(tmp_path)
-    session = PasswordSession()
-    session.set_resolved("sample-key", "secret")
-    scheduler = VerificationScheduler({
-        "verification": {
-            "enabled": True,
-            "methods": [
-                {"name": "unit_password_check", "enabled": True, "expected_password": "secret"},
-            ],
-        }
-    }, password_session=session)
-
-    verification = scheduler.verify(task, result)
-
-    assert verification.ok is True
-    assert verification.status == "passed"
-
-
-def test_verification_config_is_normalized():
-    config = normalize_config({
-        "recursive_extract": "1",
-        "verification": {
-            "enabled": True,
-            "methods": [{"name": "unit_score_delta", "score_delta": -1}],
-        },
-    })
-
-    assert config["verification"]["enabled"] is True
-    assert config["verification"]["initial_score"] == 100
-    assert config["verification"]["methods"][0]["name"] == "unit_score_delta"
-    assert config["verification"]["methods"][0]["enabled"] is True

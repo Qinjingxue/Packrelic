@@ -45,6 +45,84 @@ def test_repair_beam_deduplicates_equivalent_state_outputs():
     assert len(round_result.states_out) == 1
 
 
+def test_repair_beam_ranks_verification_completeness_over_module_confidence():
+    scheduler = _FakeCandidateScheduler([
+        _candidate("confident_but_incomplete", confidence=0.95),
+        _candidate("less_confident_complete", confidence=0.45),
+    ])
+    loop = RepairBeamLoop(
+        scheduler,
+        beam_width=2,
+        max_analyze_candidates=2,
+        max_assess_candidates=2,
+        assess=lambda item: {
+            "assessment_status": "complete" if item.candidate.module_name == "less_confident_complete" else "partial",
+            "decision_hint": "accept" if item.candidate.module_name == "less_confident_complete" else "repair",
+            "completeness": 1.0 if item.candidate.module_name == "less_confident_complete" else 0.35,
+            "recoverable_upper_bound": 1.0,
+            "source_integrity": "complete",
+        },
+    )
+
+    round_result = loop.expand_round([
+        RepairBeamState(source_input={"kind": "file", "path": "broken.zip"}, format="zip", archive_key="broken")
+    ], round_index=1)
+
+    assert round_result.states_out[0].history[-1]["module"] == "less_confident_complete"
+    assert round_result.states_out[0].completeness == 1.0
+    assert round_result.accepted_states[0].decision_hint == "accept"
+
+
+def test_repair_beam_run_stops_on_accepted_state():
+    scheduler = _FakeCandidateScheduler([
+        _candidate("complete", confidence=0.5),
+        _candidate("partial", confidence=0.9),
+    ])
+    loop = RepairBeamLoop(
+        scheduler,
+        beam_width=2,
+        max_analyze_candidates=2,
+        max_assess_candidates=2,
+        assess=lambda item: {
+            "assessment_status": "complete" if item.candidate.module_name == "complete" else "partial",
+            "decision_hint": "accept" if item.candidate.module_name == "complete" else "repair",
+            "completeness": 1.0 if item.candidate.module_name == "complete" else 0.5,
+            "recoverable_upper_bound": 1.0,
+        },
+    )
+
+    result = loop.run([
+        RepairBeamState(source_input={"kind": "file", "path": "broken.zip"}, format="zip", archive_key="broken")
+    ], max_rounds=3)
+
+    assert len(result.rounds) == 1
+    assert result.best_state is not None
+    assert result.best_state.history[-1]["module"] == "complete"
+
+
+def test_repair_beam_builds_from_repair_config():
+    scheduler = _FakeCandidateScheduler([_candidate("one", confidence=0.5)])
+
+    loop = RepairBeamLoop.from_config(
+        scheduler,
+        {
+            "beam": {
+                "beam_width": 3,
+                "max_candidates_per_state": 2,
+                "max_analyze_candidates": 5,
+                "max_assess_candidates": 4,
+                "min_improvement": 0.2,
+            }
+        },
+    )
+
+    assert loop.beam_width == 3
+    assert loop.max_candidates_per_state == 2
+    assert loop.max_analyze_candidates == 5
+    assert loop.max_assess_candidates == 4
+    assert loop.min_improvement == 0.2
+
+
 class _FakeCandidateScheduler:
     def __init__(self, candidates):
         self.candidates = candidates

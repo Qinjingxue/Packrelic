@@ -16,6 +16,7 @@ from smart_unpacker.repair.config import repair_config
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.result import RepairResult
 from smart_unpacker.repair.scheduler import RepairScheduler
+from smart_unpacker.verification.result import VerificationResult
 
 
 class ArchiveRepairStage:
@@ -59,6 +60,21 @@ class ArchiveRepairStage:
         if job is None:
             return None
         return self._run_and_apply(task, job, trigger="extraction")
+
+    def repair_after_verification_assessment_result(
+        self,
+        task: ArchiveTask,
+        result: ExtractionResult,
+        verification: VerificationResult,
+    ) -> RepairResult | None:
+        if not self.enabled or self.scheduler is None or not self.config.get("trigger_on_extraction_failure", True):
+            return None
+        if self._attempts(task) >= self.max_attempts_per_task:
+            return None
+        job = self._job_from_verification_assessment(task, result, verification)
+        if job is None:
+            return None
+        return self._run_and_apply(task, job, trigger="verification")
 
     def _run_and_apply(self, task: ArchiveTask, job: RepairJob, *, trigger: str) -> RepairResult | None:
         if self.scheduler is None or self._attempts(task) >= self.max_attempts_per_task:
@@ -121,6 +137,73 @@ class ArchiveRepairStage:
             extraction_failure=failure,
             extraction_diagnostics=dict(result.diagnostics or {}),
             damage_flags=self._flags_from_failure_text(result.error),
+            password=result.password_used,
+            archive_key=task.key,
+            workspace=str(self._workspace_root()),
+            attempts=self._attempts(task),
+            source_descriptor=task.archive_input(),
+        )
+
+    def _job_from_verification_assessment(
+        self,
+        task: ArchiveTask,
+        result: ExtractionResult,
+        verification: VerificationResult,
+    ) -> RepairJob | None:
+        source_input = self._source_input_from_task(task)
+        if source_input is None:
+            return None
+        failure = self._failure_payload(task, result)
+        failure.update({
+            "status": "verification_failed",
+            "failure_stage": "verification",
+            "assessment_status": verification.assessment_status,
+            "source_integrity": verification.source_integrity,
+            "decision_hint": verification.decision_hint,
+            "completeness": verification.completeness,
+            "recoverable_upper_bound": verification.recoverable_upper_bound,
+            "complete_files": verification.complete_files,
+            "partial_files": verification.partial_files,
+            "failed_files": verification.failed_files,
+            "missing_files": verification.missing_files,
+            "unverified_files": verification.unverified_files,
+            "issues": [
+                {
+                    "method": item.method,
+                    "code": item.code,
+                    "message": item.message,
+                    "path": item.path,
+                    "expected": item.expected,
+                    "actual": item.actual,
+                }
+                for item in verification.issues
+            ],
+            "file_observations": [
+                {
+                    "path": item.path,
+                    "archive_path": item.archive_path,
+                    "state": item.state,
+                    "method": item.method,
+                    "bytes_written": item.bytes_written,
+                    "expected_size": item.expected_size,
+                    "progress": item.progress,
+                }
+                for item in verification.file_observations
+            ],
+        })
+        return RepairJob(
+            source_input=source_input,
+            format=self._format_from_task(task),
+            confidence=float(self._analysis_confidence(task) or 0.0),
+            analysis_evidence=self._analysis_evidence_from_facts(task),
+            analysis_prepass=self._analysis_prepass(task),
+            fuzzy_profile=self._analysis_fuzzy_profile(task),
+            extraction_failure=failure,
+            extraction_diagnostics=dict(result.diagnostics or {}),
+            damage_flags=_dedupe([
+                *self._flags_from_failure_text(result.error),
+                *self._flags_from_verification(verification),
+            ]),
             password=result.password_used,
             archive_key=task.key,
             workspace=str(self._workspace_root()),
@@ -301,6 +384,25 @@ class ArchiveRepairStage:
         if "损坏" in text or "damage" in text or "corrupt" in text or "fatal error" in text:
             flags.append("damaged")
         return flags
+
+    def _flags_from_verification(self, verification: VerificationResult) -> list[str]:
+        flags = []
+        if verification.source_integrity in {"damaged", "truncated", "payload_damaged"}:
+            flags.append("damaged")
+        if verification.source_integrity == "truncated":
+            flags.append("probably_truncated")
+        if verification.source_integrity == "payload_damaged":
+            flags.append("checksum_error")
+            flags.append("crc_error")
+        for issue in verification.issues:
+            code = issue.code.lower()
+            if "crc" in code or "checksum" in code:
+                flags.extend(["checksum_error", "crc_error"])
+            if "missing" in code:
+                flags.append("missing_entries")
+            if "size_under" in code or "file_count_under" in code:
+                flags.append("probably_truncated")
+        return _dedupe(flags)
 
     def _analysis_evidences_from_facts(self, task: ArchiveTask) -> list[ArchiveFormatEvidence]:
         evidences = []

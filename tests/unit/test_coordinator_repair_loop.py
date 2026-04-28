@@ -100,7 +100,7 @@ class _FakeVerifier:
     config = {"max_retries": 0, "cleanup_failed_output": True}
 
     def verify(self, task, result):
-        return type("Verification", (), {"ok": True})()
+        return type("Verification", (), {"decision_hint": "accept", "assessment_status": "complete", "completeness": 1.0})()
 
 
 class _FakeExtractor:

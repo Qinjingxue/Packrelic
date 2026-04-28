@@ -1,6 +1,6 @@
 from smart_unpacker.verification.evidence import VerificationEvidence
 from smart_unpacker.verification.registry import register_verification_method
-from smart_unpacker.verification.result import VerificationIssue, VerificationStepResult
+from smart_unpacker.verification.result import FileVerificationObservation, VerificationIssue, VerificationStepResult
 
 try:
     from smart_unpacker_native import sample_directory_readability as _sample_directory_readability
@@ -51,18 +51,13 @@ class SampleReadabilityMethod:
         unreadable_files = int(sample.get("unreadable_files", 0) or 0)
         empty_files = int(sample.get("empty_files", 0) or 0)
         errors = list(sample.get("errors") or [])
+        samples = [item for item in sample.get("samples") or [] if isinstance(item, dict)]
         if total_files <= 0 or sampled_files <= 0:
             return VerificationStepResult(method=self.name, status="skipped")
 
         issues: list[VerificationIssue] = []
-        score_delta = 0
-        hard_fail = False
         if unreadable_files:
             all_unreadable = readable_files == 0
-            penalty_name = "all_unreadable_penalty" if all_unreadable else "unreadable_penalty"
-            default_penalty = 100 if all_unreadable else 40
-            score_delta -= abs(int(config.get(penalty_name, default_penalty) or default_penalty))
-            hard_fail = bool(all_unreadable and config.get("hard_fail_on_all_unreadable", True))
             issues.append(VerificationIssue(
                 method=self.name,
                 code="fail.sample_unreadable",
@@ -77,8 +72,6 @@ class SampleReadabilityMethod:
             ))
 
         if empty_files and empty_files == sampled_files:
-            penalty = int(config.get("all_empty_penalty", 20) or 20)
-            score_delta -= abs(penalty)
             issues.append(VerificationIssue(
                 method=self.name,
                 code="warning.sample_all_empty",
@@ -88,8 +81,6 @@ class SampleReadabilityMethod:
                 actual={"empty_files": empty_files, "sampled_files": sampled_files},
             ))
         elif empty_files:
-            penalty = int(config.get("empty_sample_penalty", 10) or 10)
-            score_delta -= abs(penalty)
             issues.append(VerificationIssue(
                 method=self.name,
                 code="warning.sample_empty_files",
@@ -100,11 +91,68 @@ class SampleReadabilityMethod:
             ))
 
         if not issues:
-            return VerificationStepResult(method=self.name, status="passed")
+            return VerificationStepResult(
+                method=self.name,
+                status="passed",
+                completeness_hint=1.0,
+                file_observations=_sample_observations(samples, errors, self.name),
+                issues=[VerificationIssue(
+                    method=self.name,
+                    code="info.sample_readability_coverage",
+                    message="Sampled output files were readable",
+                    path=evidence.output_dir,
+                    expected=sampled_files,
+                    actual={
+                        "total_files": total_files,
+                        "sampled_files": sampled_files,
+                        "readable_files": readable_files,
+                        "unreadable_files": unreadable_files,
+                        "sample_ratio": round(sampled_files / max(1, total_files), 6),
+                    },
+                )],
+            )
         return VerificationStepResult(
             method=self.name,
-            status="failed" if hard_fail else "warning",
-            score_delta=score_delta,
+            status="warning",
             issues=issues,
-            hard_fail=hard_fail,
+            completeness_hint=readable_files / max(1, sampled_files),
+            file_observations=_sample_observations(samples, errors, self.name, issues=issues),
         )
+
+
+def _sample_observations(
+    samples: list[dict],
+    errors: list,
+    method: str,
+    *,
+    issues: list[VerificationIssue] | None = None,
+) -> list[FileVerificationObservation]:
+    observations = [
+        FileVerificationObservation(
+            path=str(item.get("path") or ""),
+            archive_path=str(item.get("path") or ""),
+            state="unverified",
+            method=method,
+            bytes_written=int(item.get("size", 0) or 0),
+            progress=1.0,
+            details={
+                "bytes_read": int(item.get("bytes_read", 0) or 0),
+                "empty": bool(item.get("empty", False)),
+                "usability": "readable",
+            },
+        )
+        for item in samples
+    ]
+    for item in errors:
+        if not isinstance(item, dict):
+            continue
+        observations.append(FileVerificationObservation(
+            path=str(item.get("path") or ""),
+            archive_path=str(item.get("path") or ""),
+            state="failed",
+            method=method,
+            progress=0.0,
+            issues=list(issues or []),
+            details={"message": item.get("message"), "usability": "unreadable"},
+        ))
+    return observations

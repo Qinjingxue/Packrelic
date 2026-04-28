@@ -2,6 +2,27 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+SOURCE_INTEGRITY_UNKNOWN = "unknown"
+SOURCE_INTEGRITY_COMPLETE = "complete"
+SOURCE_INTEGRITY_DAMAGED = "damaged"
+SOURCE_INTEGRITY_TRUNCATED = "truncated"
+SOURCE_INTEGRITY_PAYLOAD_DAMAGED = "payload_damaged"
+
+DECISION_NONE = "none"
+DECISION_ACCEPT = "accept"
+DECISION_ACCEPT_PARTIAL = "accept_partial"
+DECISION_RETRY_EXTRACT = "retry_extract"
+DECISION_REPAIR = "repair"
+DECISION_FAIL = "fail"
+
+ASSESSMENT_DISABLED = "disabled"
+ASSESSMENT_COMPLETE = "complete"
+ASSESSMENT_PARTIAL = "partial"
+ASSESSMENT_INCONSISTENT = "inconsistent"
+ASSESSMENT_UNUSABLE = "unusable"
+ASSESSMENT_UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class VerificationIssue:
     method: str
@@ -13,35 +34,80 @@ class VerificationIssue:
 
 
 @dataclass(frozen=True)
+class FileVerificationObservation:
+    path: str
+    state: str = "unverified"
+    method: str = ""
+    archive_path: str = ""
+    bytes_written: int = 0
+    expected_size: int | None = None
+    progress: float | None = None
+    crc_expected: int | None = None
+    crc_actual: int | None = None
+    issues: list[VerificationIssue] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ArchiveCoverageSummary:
+    completeness: float = 1.0
+    file_coverage: float = 1.0
+    byte_coverage: float = 1.0
+    expected_files: int = 0
+    matched_files: int = 0
+    complete_files: int = 0
+    partial_files: int = 0
+    failed_files: int = 0
+    missing_files: int = 0
+    unverified_files: int = 0
+    expected_bytes: int = 0
+    matched_bytes: int = 0
+    complete_bytes: int = 0
+    confidence: float = 0.0
+    sources: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class VerificationStepResult:
     method: str
-    score_delta: int = 0
     status: str = "passed"
     issues: list[VerificationIssue] = field(default_factory=list)
-    hard_fail: bool = False
+    completeness_hint: float | None = None
+    recoverable_upper_bound_hint: float | None = None
+    source_integrity_hint: str = SOURCE_INTEGRITY_UNKNOWN
+    decision_hint: str = DECISION_NONE
+    file_observations: list[FileVerificationObservation] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class VerificationStepRecord:
     method: str
     status: str
-    score_before: int
-    score_delta: int
-    score_after: int
-    hard_fail: bool = False
     issues: list[VerificationIssue] = field(default_factory=list)
+    completeness_hint: float | None = None
+    recoverable_upper_bound_hint: float | None = None
+    source_integrity_hint: str = SOURCE_INTEGRITY_UNKNOWN
+    decision_hint: str = DECISION_NONE
+    file_observations: list[FileVerificationObservation] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class VerificationResult:
-    ok: bool
-    status: str
-    score: int
-    pass_threshold: int
-    fail_fast_threshold: int
     methods_run: list[str] = field(default_factory=list)
     issues: list[VerificationIssue] = field(default_factory=list)
     steps: list[VerificationStepRecord] = field(default_factory=list)
+    completeness: float = 1.0
+    recoverable_upper_bound: float = 1.0
+    assessment_status: str = ASSESSMENT_COMPLETE
+    source_integrity: str = SOURCE_INTEGRITY_UNKNOWN
+    decision_hint: str = DECISION_NONE
+    complete_files: int = 0
+    partial_files: int = 0
+    failed_files: int = 0
+    missing_files: int = 0
+    unverified_files: int = 0
+    archive_coverage: ArchiveCoverageSummary = field(default_factory=ArchiveCoverageSummary)
+    file_observations: list[FileVerificationObservation] = field(default_factory=list)
 
     @property
     def failures(self) -> list[VerificationIssue]:

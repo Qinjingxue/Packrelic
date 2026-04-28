@@ -46,11 +46,13 @@
   },
   "verification": {
     "enabled": true,
-    "initial_score": 100,
-    "pass_threshold": 70,
-    "fail_fast_threshold": 40,
     "max_retries": 2,
     "cleanup_failed_output": true,
+    "accept_partial_when_source_damaged": true,
+    "partial_min_completeness": 0.2,
+    "complete_accept_threshold": 0.999,
+    "partial_accept_threshold": 0.2,
+    "retry_on_verification_failure": true,
       "methods": [
         {"name": "extraction_exit_signal", "enabled": true},
         {"name": "output_presence", "enabled": true},
@@ -90,6 +92,15 @@
       "max_output_size_mb": 2048,
       "max_entry_uncompressed_mb": 512,
       "verify_candidates": true
+    },
+    "beam": {
+      "enabled": false,
+      "beam_width": 4,
+      "max_candidates_per_state": 4,
+      "max_analyze_candidates": 8,
+      "max_assess_candidates": 4,
+      "max_rounds": 3,
+      "min_improvement": 0.01
     }
   },
   "detection": {

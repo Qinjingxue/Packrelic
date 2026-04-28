@@ -38,6 +38,7 @@ def collect_output_stats(output_dir: str) -> OutputStats:
     relative_paths = []
 
     for root, dirs, files in os.walk(output_dir):
+        dirs[:] = [item for item in dirs if item != ".sunpack"]
         dir_count += len(dirs)
         for name in files:
             file_count += 1

@@ -37,6 +37,15 @@ DEFAULT_REPAIR_CONFIG = {
         "max_entry_uncompressed_mb": 512,
         "verify_candidates": True,
     },
+    "beam": {
+        "enabled": False,
+        "beam_width": 4,
+        "max_candidates_per_state": 4,
+        "max_analyze_candidates": 8,
+        "max_assess_candidates": 4,
+        "max_rounds": 3,
+        "min_improvement": 0.01,
+    },
     "modules": [
         {"name": "zip_eocd_repair", "enabled": True},
         {"name": "zip_comment_length_fix", "enabled": True},
@@ -117,6 +126,7 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
     config["stages"] = _normalize_bool_map(config.get("stages"), "repair.stages")
     config["safety"] = _normalize_safety(config.get("safety"))
     config["deep"] = _normalize_deep(config.get("deep"))
+    config["beam"] = _normalize_beam(config.get("beam"))
     config["modules"] = _normalize_modules(config.get("modules"))
     return config
 
@@ -195,6 +205,21 @@ def _normalize_deep(value: Any) -> dict[str, Any]:
         "max_output_size_mb": _float_at_least(value, "max_output_size_mb", 0.0),
         "max_entry_uncompressed_mb": _float_at_least(value, "max_entry_uncompressed_mb", 0.0),
         "verify_candidates": _bool_value(value.get("verify_candidates", True), "repair.deep.verify_candidates"),
+    }
+
+
+def _normalize_beam(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("repair.beam must be an object")
+    return {
+        **value,
+        "enabled": _bool_value(value.get("enabled", False), "repair.beam.enabled"),
+        "beam_width": _int_at_least(value, "beam_width", 1),
+        "max_candidates_per_state": _int_at_least(value, "max_candidates_per_state", 1),
+        "max_analyze_candidates": _int_at_least(value, "max_analyze_candidates", 1),
+        "max_assess_candidates": _int_at_least(value, "max_assess_candidates", 1),
+        "max_rounds": _int_at_least(value, "max_rounds", 0),
+        "min_improvement": _float_at_least(value, "min_improvement", 0.0),
     }
 
 

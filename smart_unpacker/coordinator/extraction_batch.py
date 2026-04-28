@@ -1,7 +1,7 @@
 import os
 import shutil
 from dataclasses import dataclass
-from typing import List
+from typing import Any, List
 
 from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
@@ -18,8 +18,10 @@ from smart_unpacker.coordinator.scheduling import (
 from smart_unpacker.detection import NestedOutputScanPolicy
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.extraction.scheduler import ExtractionScheduler
+from smart_unpacker.extraction.progress import filter_extraction_outputs
 from smart_unpacker.rename.scheduler import RenameScheduler
 from smart_unpacker.verification import VerificationResult, VerificationScheduler
+from smart_unpacker.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
 from smart_unpacker.support.path_keys import absolute_path_key
 
 
@@ -32,8 +34,8 @@ class BatchExtractionOutcome:
     @property
     def success(self) -> bool:
         if not self.result.success:
-            return False
-        return self.verification is None or self.verification.ok
+            return _verification_accepts_partial(self.verification)
+        return self.verification is None or _verification_accepts(self.verification)
 
 
 class ExtractionBatchRunner:
@@ -180,6 +182,7 @@ class ExtractionBatchRunner:
         while attempt_index < attempts:
             result = self.extractor.extract(task, out_dir, runtime_scheduler=runtime_scheduler)
             if not result.success:
+                verification = self.verifier.verify(task, result) if result.partial_outputs else None
                 state = RepairLoopState(task, self.repair_loop_limits)
                 if state.can_attempt(trigger="extraction", failure=result):
                     repair_result = self.repair_stage.repair_after_extraction_failure_result(task, result)
@@ -190,15 +193,36 @@ class ExtractionBatchRunner:
                     shutil.rmtree(out_dir, ignore_errors=True)
                     self.analysis_stage.analyze_task(task)
                     continue
+                if verification is not None and self._accept_partial_output(result, verification):
+                    self._filter_partial_outputs(result)
+                    return BatchExtractionOutcome(
+                        result=result,
+                        verification=verification,
+                        attempts=attempt_index + 1,
+                    )
                 return BatchExtractionOutcome(result=result, attempts=attempt_index + 1)
 
             verification = self.verifier.verify(task, result)
             outcome = BatchExtractionOutcome(result=result, verification=verification, attempts=attempt_index + 1)
-            if verification.ok:
+            if _verification_accepts(verification):
+                return outcome
+
+            if verification.decision_hint == DECISION_REPAIR:
+                state = RepairLoopState(task, self.repair_loop_limits)
+                if state.can_attempt(trigger="verification"):
+                    repair_result = self.repair_stage.repair_after_verification_assessment_result(task, result, verification)
+                    if state.record_result(repair_result, trigger="verification"):
+                        shutil.rmtree(out_dir, ignore_errors=True)
+                        self.analysis_stage.analyze_task(task)
+                        continue
+            if self._accept_partial_output(result, verification):
+                self._filter_partial_outputs(result)
                 return outcome
 
             last_outcome = outcome
             if attempt_index >= max_verification_retries:
+                break
+            if verification.decision_hint not in {DECISION_RETRY_EXTRACT, DECISION_REPAIR} and not self._retry_on_verification_failure():
                 break
             if cleanup_failed_output:
                 shutil.rmtree(result.out_dir, ignore_errors=True)
@@ -214,6 +238,28 @@ class ExtractionBatchRunner:
             ),
             attempts=attempts,
         )
+
+    def _accept_partial_output(self, result: ExtractionResult, verification: VerificationResult) -> bool:
+        config = self.verifier.config
+        if not bool(config.get("accept_partial_when_source_damaged", True)):
+            return False
+        if verification.decision_hint != DECISION_ACCEPT_PARTIAL:
+            return False
+        min_completeness = float(config.get("partial_min_completeness", 0.2) or 0.0)
+        if float(verification.completeness or 0.0) < min_completeness:
+            return False
+        return bool(result.partial_outputs or verification.partial_files or verification.complete_files or verification.unverified_files)
+
+    def _filter_partial_outputs(self, result: ExtractionResult) -> None:
+        if not result.progress_manifest:
+            return
+        try:
+            filter_extraction_outputs(result.progress_manifest)
+        except Exception:
+            return
+
+    def _retry_on_verification_failure(self) -> bool:
+        return bool(self.verifier.config.get("retry_on_verification_failure", True))
 
     def _skip_tasks_inside_batch_outputs(self, tasks: List[ArchiveTask], output_dir_resolver=None) -> List[ArchiveTask]:
         output_dir_resolver = output_dir_resolver or self.extractor.default_output_dir_for_task
@@ -259,7 +305,7 @@ class ExtractionBatchRunner:
 
     def _failure_message(self, task: ArchiveTask, outcome: BatchExtractionOutcome) -> str:
         name = os.path.basename(task.main_path)
-        if outcome.result.success and outcome.verification is not None and not outcome.verification.ok:
+        if outcome.result.success and outcome.verification is not None and not _verification_accepts(outcome.verification):
             return f"{name} [{self._verification_failure_summary(outcome)}]"
         return f"{name} [{outcome.result.error}]"
 
@@ -267,15 +313,21 @@ class ExtractionBatchRunner:
         verification = outcome.verification
         if verification is None:
             return "校验失败"
-        steps = "; ".join(
-            f"{step.method}:{step.score_delta:+d}=>{step.score_after}"
-            for step in verification.steps
-        ) or "none"
+        steps = "; ".join(f"{step.method}:{step.status}" for step in verification.steps) or "none"
         return (
             "校验失败: "
-            f"status={verification.status}, "
-            f"score={verification.score}, "
-            f"pass={verification.pass_threshold}, "
+            f"completeness={getattr(verification, 'completeness', '')}, "
+            f"assessment={getattr(verification, 'assessment_status', '')}, "
+            f"decision={getattr(verification, 'decision_hint', '')}, "
             f"attempts={outcome.attempts}, "
             f"steps={steps}"
         )
+
+
+def _verification_accepts(verification: VerificationResult | Any) -> bool:
+    decision = getattr(verification, "decision_hint", "")
+    return decision in {DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL}
+
+
+def _verification_accepts_partial(verification: VerificationResult | Any) -> bool:
+    return getattr(verification, "decision_hint", "") == DECISION_ACCEPT_PARTIAL
