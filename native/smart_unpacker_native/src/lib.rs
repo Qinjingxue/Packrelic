@@ -13,6 +13,7 @@ mod password_zip;
 mod pe_overlay;
 mod repair_io;
 mod util;
+mod zip_deep_repair;
 mod zip_names;
 
 #[cfg(test)]
@@ -132,5 +133,9 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(repair_io::repair_patch_file, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        zip_deep_repair::zip_deep_partial_recovery,
+        m
+    )?)?;
     Ok(())
 }

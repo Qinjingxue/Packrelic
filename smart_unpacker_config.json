@@ -84,8 +84,11 @@
     },
     "deep": {
       "max_candidates_per_module": 3,
+      "max_entries": 20000,
       "max_seconds_per_module": 30,
       "max_input_size_mb": 512,
+      "max_output_size_mb": 2048,
+      "max_entry_uncompressed_mb": 512,
       "verify_candidates": true
     }
   },

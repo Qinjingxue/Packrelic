@@ -246,6 +246,42 @@ def test_zip_data_descriptor_recovery_supports_zip64_descriptor(tmp_path):
         assert archive.read("zip64-dd.txt") == b"zip64 descriptor payload"
 
 
+def test_zip_deep_partial_recovery_builds_best_verified_candidate(tmp_path):
+    source = tmp_path / "deep_partial.zip"
+    source.write_bytes(b"".join([
+        _raw_stored_local_entry("good.txt", b"good payload"),
+        _raw_stored_local_entry("bad.txt", b"bad payload", crc32=0),
+        _raw_deflate_descriptor_entry("dd.txt", b"descriptor payload"),
+        b"PK\x01\x02BROKEN-CENTRAL-DIR",
+    ]))
+
+    scheduler = RepairScheduler({
+        "repair": {
+            "workspace": str(tmp_path / "repair"),
+            "stages": {"deep": True},
+            "modules": [{"name": "zip_deep_partial_recovery", "enabled": True}],
+        }
+    })
+    result = scheduler.repair(RepairJob(
+        source_input={"kind": "file", "path": str(source)},
+        format="zip",
+        confidence=0.7,
+        damage_flags=["damaged", "local_header_recovery", "data_descriptor"],
+        archive_key=source.name,
+    ))
+
+    assert result.ok is True
+    assert result.status == "partial"
+    assert result.module_name == "zip_deep_partial_recovery"
+    native = result.diagnosis["native_zip_deep_recovery"]
+    assert native["selected_candidate"] == "zip_deep_descriptor_recovered"
+    assert native["verified_entries"] == 2
+    with zipfile.ZipFile(result.repaired_input["path"]) as archive:
+        assert archive.namelist() == ["good.txt", "dd.txt"]
+        assert archive.read("good.txt") == b"good payload"
+        assert archive.read("dd.txt") == b"descriptor payload"
+
+
 def test_zip_eocd_repair_rebuilds_missing_eocd_from_central_directory(tmp_path):
     source = tmp_path / "missing_eocd.zip"
     _write_zip(source, {"payload.txt": b"zip payload"})
@@ -654,6 +690,55 @@ def _descriptor_zip_fragment(name: str, payload: bytes, *, zip64: bool = False) 
         payload,
         descriptor,
         b"PK\x01\x02BROKEN-CENTRAL-DIR",
+    ])
+
+
+def _raw_stored_local_entry(name: str, payload: bytes, *, crc32: int | None = None) -> bytes:
+    encoded_name = name.encode("utf-8")
+    crc = zlib.crc32(payload) & 0xFFFFFFFF if crc32 is None else crc32
+    return b"".join([
+        struct.pack(
+            "<IHHHHHIIIHH",
+            0x04034B50,
+            20,
+            0,
+            0,
+            0,
+            0,
+            crc,
+            len(payload),
+            len(payload),
+            len(encoded_name),
+            0,
+        ),
+        encoded_name,
+        payload,
+    ])
+
+
+def _raw_deflate_descriptor_entry(name: str, payload: bytes) -> bytes:
+    encoded_name = name.encode("utf-8")
+    compressor = zlib.compressobj(level=6, wbits=-15)
+    compressed = compressor.compress(payload) + compressor.flush()
+    crc32 = zlib.crc32(payload) & 0xFFFFFFFF
+    return b"".join([
+        struct.pack(
+            "<IHHHHHIIIHH",
+            0x04034B50,
+            20,
+            0x08,
+            8,
+            0,
+            0,
+            0,
+            0,
+            0,
+            len(encoded_name),
+            0,
+        ),
+        encoded_name,
+        compressed,
+        struct.pack("<IIII", 0x08074B50, crc32, len(compressed), len(payload)),
     ])
 
 

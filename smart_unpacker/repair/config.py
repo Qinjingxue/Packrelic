@@ -26,8 +26,11 @@ DEFAULT_REPAIR_CONFIG = {
     },
     "deep": {
         "max_candidates_per_module": 3,
+        "max_entries": 20000,
         "max_seconds_per_module": 30.0,
         "max_input_size_mb": 512,
+        "max_output_size_mb": 2048,
+        "max_entry_uncompressed_mb": 512,
         "verify_candidates": True,
     },
     "modules": [
@@ -39,6 +42,7 @@ DEFAULT_REPAIR_CONFIG = {
         {"name": "zip_central_directory_rebuild", "enabled": True},
         {"name": "zip_data_descriptor_recovery", "enabled": True},
         {"name": "zip_partial_recovery", "enabled": True},
+        {"name": "zip_deep_partial_recovery", "enabled": True},
         {"name": "tar_header_checksum_fix", "enabled": True},
         {"name": "tar_trailing_junk_trim", "enabled": True},
         {"name": "tar_trailing_zero_block_repair", "enabled": True},
@@ -163,8 +167,11 @@ def _normalize_deep(value: Any) -> dict[str, Any]:
     return {
         **value,
         "max_candidates_per_module": _int_at_least(value, "max_candidates_per_module", 1),
+        "max_entries": _int_at_least(value, "max_entries", 1),
         "max_seconds_per_module": _float_at_least(value, "max_seconds_per_module", 0.0),
         "max_input_size_mb": _float_at_least(value, "max_input_size_mb", 0.0),
+        "max_output_size_mb": _float_at_least(value, "max_output_size_mb", 0.0),
+        "max_entry_uncompressed_mb": _float_at_least(value, "max_entry_uncompressed_mb", 0.0),
         "verify_candidates": _bool_value(value.get("verify_candidates", True), "repair.deep.verify_candidates"),
     }
 
