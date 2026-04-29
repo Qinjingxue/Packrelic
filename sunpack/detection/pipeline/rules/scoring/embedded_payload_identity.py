@@ -4,6 +4,7 @@ from typing import Any, Dict
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.rules import RuleEffect
 from sunpack.detection.pipeline.rules.base import RuleBase
+from sunpack.detection.pipeline.rules.fact_requirements import FactRequirement, MagicBytesStartsWith, PathExtensionInConfig
 from sunpack.detection.pipeline.rules.registry import register_rule
 
 
@@ -13,6 +14,8 @@ DEFAULT_OVERLAY_START_SCORE = 6
 DEFAULT_OVERLAY_NEAR_START_SCORE = 4
 DEFAULT_REQUIRE_ZIP_PLAUSIBILITY_FOR_LOOSE_SCAN = True
 DEFAULT_REQUIRE_ZIP_PLAUSIBILITY_FOR_CARRIER_TAIL = False
+DEFAULT_CARRIER_EXTS = (".jpg", ".jpeg", ".png", ".pdf", ".gif", ".webp")
+DEFAULT_AMBIGUOUS_RESOURCE_EXTS = (".dat", ".bin")
 
 
 def _format_from_ext(ext: str) -> str:
@@ -22,6 +25,19 @@ def _format_from_ext(ext: str) -> str:
 @register_rule(name="embedded_payload_identity", layer="scoring")
 class EmbeddedPayloadIdentityScoreRule(RuleBase):
     required_facts = {"embedded_archive.analysis", "pe.overlay_structure"}
+    fact_requirements = [
+        FactRequirement(
+            "embedded_archive.analysis",
+            PathExtensionInConfig(
+                fields=("carrier_exts", "ambiguous_resource_exts"),
+                defaults={
+                    "carrier_exts": DEFAULT_CARRIER_EXTS,
+                    "ambiguous_resource_exts": DEFAULT_AMBIGUOUS_RESOURCE_EXTS,
+                },
+            ),
+        ),
+        FactRequirement("pe.overlay_structure", MagicBytesStartsWith((b"MZ",))),
+    ]
     produced_facts = {
         "file.detected_ext",
         "file.container_type",

@@ -79,6 +79,25 @@ class DetectionBehaviorTests(unittest.TestCase):
             self.assertEqual(bag.get("file.detected_ext"), ".zip")
             self.assertTrue(bag.get("file.embedded_archive_found"))
 
+    def test_embedded_archive_analysis_is_only_required_for_configured_extensions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = Path(tmp) / "movie.mp4"
+            plain.write_bytes(b"\x00" * 64 + b"PK\x03\x04" + b"not-scanned")
+
+            bag = FactBag()
+            bag.set("file.path", str(plain))
+            decision = DetectionScheduler(config_with_rules([
+                {
+                    "name": "embedded_payload_identity",
+                    "enabled": True,
+                    "carrier_exts": [".jpg"],
+                    "ambiguous_resource_exts": [".bin"],
+                },
+            ])).evaluate_bag(bag)
+
+            self.assertFalse(decision.should_extract)
+            self.assertFalse(bag.has("embedded_archive.analysis"))
+
     def test_embedded_archive_rule_detects_default_prefix_rar5_carrier(self):
         with tempfile.TemporaryDirectory() as tmp:
             carrier = Path(tmp) / "cover.jpg"
