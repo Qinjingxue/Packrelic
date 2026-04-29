@@ -60,12 +60,28 @@ def test_scheduler_profile_override_expands_scheduler_config():
         recursive_extract = None
         archive_cleanup_mode = None
         flatten_single_directory = None
+        write_progress_manifest = False
 
     config = {}
     overrides = apply_runtime_config_overrides(config, Args())
 
     assert overrides["scheduler_profile"] == "aggressive"
     assert config["performance"] == {"scheduler_profile": "aggressive"}
+
+
+def test_write_manifest_override_enables_extraction_manifest_files():
+    class Args:
+        scheduler_profile = None
+        recursive_extract = None
+        archive_cleanup_mode = None
+        flatten_single_directory = None
+        write_progress_manifest = True
+
+    config = {}
+    overrides = apply_runtime_config_overrides(config, Args())
+
+    assert overrides["write_progress_manifest"] is True
+    assert config["extraction"]["write_progress_manifest"] is True
 
 
 def test_effective_config_includes_thresholds_scheduler_and_rule_pipeline():

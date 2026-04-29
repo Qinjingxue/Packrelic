@@ -75,4 +75,5 @@ def build_extract_config_override_parser(ctx: CliContext) -> argparse.ArgumentPa
     flatten_group = parser.add_mutually_exclusive_group()
     flatten_group.add_argument("--flatten", dest="flatten_single_directory", action="store_true", default=None, help=ctx.core_text("flatten"))
     flatten_group.add_argument("--no-flatten", dest="flatten_single_directory", action="store_false", help=ctx.core_text("no_flatten"))
+    parser.add_argument("--write-manifest", dest="write_progress_manifest", action="store_true", help=ctx.core_text("write_manifest"))
     return parser

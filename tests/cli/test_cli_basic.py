@@ -133,6 +133,7 @@ class CliBasicTests(unittest.TestCase):
         self.assertIn("--sched", result.stdout)
         self.assertIn("--cleanup", result.stdout)
         self.assertIn("--out-dir", result.stdout)
+        self.assertIn("--write-manifest", result.stdout)
         self.assertNotIn("--min-size", result.stdout)
 
     def test_inspect_help_documents_analyze_option(self):

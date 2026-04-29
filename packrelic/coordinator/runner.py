@@ -40,6 +40,7 @@ class PipelineRunner:
             max_retries=config.get("max_retries", 3),
             process_config=performance_config,
             output_config=config.get("output", {}),
+            extraction_config=config.get("extraction", {}),
         )
         self.output_scan_policy = NestedOutputScanPolicy(config)
         

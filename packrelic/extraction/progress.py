@@ -68,6 +68,7 @@ def write_extraction_progress_manifest(
         diagnostics=diagnostics,
         round_index=round_index,
         pretty=pretty,
+        write_file=True,
     )
     return path
 
@@ -79,6 +80,7 @@ def write_extraction_progress_manifest_payload(
     diagnostics: dict[str, Any],
     round_index: int = 1,
     pretty: bool = False,
+    write_file: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     manifest = build_extraction_progress_manifest(
         archive=archive,
@@ -86,6 +88,8 @@ def write_extraction_progress_manifest_payload(
         diagnostics=diagnostics,
         round_index=round_index,
     )
+    if not write_file:
+        return "", manifest
     target = Path(out_dir) / ".packrelic" / "extraction_manifest.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(_json_text(manifest, pretty=pretty), encoding="utf-8")
@@ -95,6 +99,12 @@ def write_extraction_progress_manifest_payload(
 def filter_extraction_outputs(manifest_path: str, *, partial_keep_ratio: float = 0.2) -> dict[str, Any]:
     path = Path(manifest_path)
     manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest = filter_extraction_manifest_payload(manifest, partial_keep_ratio=partial_keep_ratio)
+    path.write_text(_json_text(manifest), encoding="utf-8")
+    return manifest
+
+
+def filter_extraction_manifest_payload(manifest: dict[str, Any], *, partial_keep_ratio: float = 0.2) -> dict[str, Any]:
     files = [dict(item) for item in manifest.get("files") or [] if isinstance(item, dict)]
     complete = [item for item in files if item.get("status") == "complete"]
     kept: list[dict[str, Any]] = []
@@ -139,7 +149,6 @@ def filter_extraction_outputs(manifest_path: str, *, partial_keep_ratio: float =
         "kept": len(kept),
         "discarded": len(discarded),
     }
-    path.write_text(_json_text(manifest), encoding="utf-8")
     return manifest
 
 

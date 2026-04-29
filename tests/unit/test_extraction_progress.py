@@ -1,6 +1,6 @@
 import json
 
-from packrelic.extraction.progress import filter_extraction_outputs
+from packrelic.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
 
 
 def test_filter_extraction_outputs_discards_incomplete_when_complete_exists(tmp_path):
@@ -47,9 +47,27 @@ def test_filter_extraction_outputs_keeps_best_partial_without_complete(tmp_path)
     assert updated["files"][0]["retention"] == "kept_best_partial"
 
 
+def test_filter_extraction_manifest_payload_does_not_require_manifest_file(tmp_path):
+    good = tmp_path / "good.txt"
+    partial = tmp_path / "partial.bin"
+    good.write_text("good", encoding="utf-8")
+    partial.write_bytes(b"part")
+    manifest = {
+        "files": [
+            {"path": str(good), "archive_path": "good.txt", "status": "complete", "bytes_written": 4},
+            {"path": str(partial), "archive_path": "partial.bin", "status": "partial", "bytes_written": 4},
+        ]
+    }
+
+    updated = filter_extraction_manifest_payload(manifest)
+
+    assert good.exists()
+    assert not partial.exists()
+    assert [item["archive_path"] for item in updated["files"]] == ["good.txt"]
+
+
 def _write_manifest(tmp_path, files):
     manifest = tmp_path / ".packrelic" / "extraction_manifest.json"
     manifest.parent.mkdir()
     manifest.write_text(json.dumps({"files": files}, ensure_ascii=False), encoding="utf-8")
     return manifest
-

@@ -26,6 +26,7 @@ class SingleArchiveExtractor:
         split_entry_resolver: SplitEntryResolver,
         sevenzip_runner: SevenZipRunner,
         best_effort: bool = True,
+        write_progress_manifest: bool = False,
     ):
         self.seven_z_path = seven_z_path
         self.password_store = password_store
@@ -37,6 +38,7 @@ class SingleArchiveExtractor:
         self.split_entry_resolver = split_entry_resolver
         self.sevenzip_runner = sevenzip_runner
         self.best_effort = bool(best_effort)
+        self.write_progress_manifest = bool(write_progress_manifest)
 
     def extract(
         self,
@@ -174,8 +176,10 @@ class SingleArchiveExtractor:
                                 out_dir=out_dir,
                                 diagnostics=diagnostics,
                                 round_index=retry_count + 1,
+                                write_file=self.write_progress_manifest,
                             )
-                            diagnostics["progress_manifest"] = manifest_path
+                            if manifest_path:
+                                diagnostics["progress_manifest"] = manifest_path
                         return ExtractionResult(
                             success=True,
                             archive=archive,
@@ -218,9 +222,11 @@ class SingleArchiveExtractor:
                     out_dir=out_dir,
                     diagnostics=diagnostics,
                     round_index=retry_count + 1,
+                    write_file=self.write_progress_manifest,
                 )
                 diagnostics["partial_outputs"] = True
-                diagnostics["progress_manifest"] = manifest_path
+                if manifest_path:
+                    diagnostics["progress_manifest"] = manifest_path
                 return self._failed(
                     archive,
                     out_dir,

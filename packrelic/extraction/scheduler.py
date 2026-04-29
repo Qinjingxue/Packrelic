@@ -23,6 +23,7 @@ class ExtractionScheduler:
         max_retries: int = 3,
         process_config: dict | None = None,
         output_config: dict | None = None,
+        extraction_config: dict | None = None,
     ):
         self.password_store = PasswordStore.from_sources(
             cli_passwords=cli_passwords or [],
@@ -39,6 +40,7 @@ class ExtractionScheduler:
         self.ensure_space = ensure_space or (lambda _required_gb: True)
         self.max_retries = max(1, max_retries)
         self.output_config = output_config if isinstance(output_config, dict) else None
+        self.extraction_config = extraction_config if isinstance(extraction_config, dict) else {}
         self.process_config = {
             key: value
             for key, value in (process_config or {}).items()
@@ -95,4 +97,5 @@ class ExtractionScheduler:
             split_entry_resolver=self.split_entry_resolver,
             sevenzip_runner=self.sevenzip_runner,
             best_effort=True,
+            write_progress_manifest=bool(self.extraction_config.get("write_progress_manifest", False)),
         )

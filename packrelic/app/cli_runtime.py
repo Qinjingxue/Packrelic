@@ -147,6 +147,9 @@ def apply_runtime_config_overrides(config: dict, args) -> dict:
     if getattr(args, "flatten_single_directory", None) is not None:
         overrides["flatten_single_directory"] = args.flatten_single_directory
         config.setdefault("post_extract", {})["flatten_single_directory"] = args.flatten_single_directory
+    if getattr(args, "write_progress_manifest", False):
+        overrides["write_progress_manifest"] = True
+        config.setdefault("extraction", {})["write_progress_manifest"] = True
     return overrides
 
 

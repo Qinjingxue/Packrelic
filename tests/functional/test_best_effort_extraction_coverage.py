@@ -1073,7 +1073,10 @@ def test_main_flow_nested_archive_keeps_outer_complete_and_inner_partial_coverag
     input_root.mkdir()
     outer = _outer_zip_with_damaged_inner_zip(input_root)
 
-    summary = PipelineRunner(_best_effort_pipeline_config(tmp_path)).run(str(input_root))
+    config = _best_effort_pipeline_config(tmp_path)
+    config.setdefault("extraction", {})["write_progress_manifest"] = True
+
+    summary = PipelineRunner(config).run(str(input_root))
 
     outer_out_dir = input_root / outer.stem
     inner_out_dir = outer_out_dir / "inner"
@@ -1130,6 +1133,7 @@ def test_main_flow_outer_complete_inner_missing_volume_does_not_mix_coverage(tmp
     input_root.mkdir()
     archive = _outer_zip_with_inner_missing_volume_marker(input_root)
     config = _zip_7z_recursive_pipeline_config(tmp_path)
+    config.setdefault("extraction", {})["write_progress_manifest"] = True
 
     summary = PipelineRunner(config).run(str(input_root))
 

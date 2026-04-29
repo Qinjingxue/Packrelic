@@ -23,7 +23,7 @@ from packrelic.coordinator.scheduling import (
 from packrelic.detection import NestedOutputScanPolicy
 from packrelic.extraction.result import ExtractionResult
 from packrelic.extraction.scheduler import ExtractionScheduler
-from packrelic.extraction.progress import filter_extraction_outputs
+from packrelic.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
 from packrelic.rename.scheduler import RenameScheduler
 from packrelic.repair.candidate import RepairCandidate
 from packrelic.verification import RecoveryAttempt, VerificationResult, VerificationScheduler, compare_attempts, rank_attempt
@@ -469,10 +469,11 @@ class ExtractionBatchRunner:
         return bool(result.partial_outputs or verification.partial_files or verification.complete_files or verification.unverified_files)
 
     def _filter_partial_outputs(self, result: ExtractionResult) -> None:
-        if not result.progress_manifest:
-            return
         try:
-            result.progress_manifest_payload = filter_extraction_outputs(result.progress_manifest)
+            if result.progress_manifest:
+                result.progress_manifest_payload = filter_extraction_outputs(result.progress_manifest)
+            elif isinstance(result.progress_manifest_payload, dict):
+                result.progress_manifest_payload = filter_extraction_manifest_payload(result.progress_manifest_payload)
         except Exception:
             return
 
