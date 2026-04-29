@@ -171,6 +171,9 @@ def attach_pipeline_timing(runner: PipelineRunner) -> TimingRecorder:
     wrap_method(runner.batch_runner, "prepare_tasks", recorder, "prepare")
     wrap_method(runner.batch_runner.analysis_stage, "analyze_tasks", recorder, "analysis")
     wrap_method(runner.batch_runner.repair_stage, "repair_after_verification_assessment_result", recorder, "repair_after_verification")
+    wrap_method(runner.batch_runner, "_repair_after_verification_with_beam", recorder, "repair_beam")
+    if runner.batch_runner.repair_stage.scheduler is not None:
+        wrap_method(runner.batch_runner.repair_stage.scheduler, "generate_repair_candidates", recorder, "repair_candidates")
     wrap_method(runner.batch_runner, "_execute_ready_tasks", recorder, "execute_ready")
     wrap_method(runner.batch_runner, "collect_result", recorder, "collect_result")
     wrap_method(runner.output_scan_policy, "scan_roots_from_outputs", recorder, "output_scan")
@@ -218,7 +221,12 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
         "batch_execute_ms": recorder.ms("batch_execute"),
         "prepare_ms": recorder.ms("prepare"),
         "analysis_ms": recorder.ms("analysis"),
-        "repair_ms": recorder.ms("repair_after_failure"),
+        "repair_ms": round(
+            recorder.ms("repair_after_verification")
+            + recorder.ms("repair_beam")
+            + recorder.ms("repair_candidates"),
+            2,
+        ),
         "execute_ready_ms": recorder.ms("execute_ready"),
         "execute_all_wall_ms": recorder.ms("execute_all_wall"),
         "preflight_ms": recorder.ms("health_password_preflight"),
