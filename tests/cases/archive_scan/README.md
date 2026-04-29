@@ -78,6 +78,7 @@ tests/cases/archive_scan/
 | `min_score` | `integer` | 否 | 最低允许分数。 |
 | `max_score` | `integer` | 否 | 最高允许分数。 |
 | `matched_rules_include` | `array<string>` | 否 | 要求命中的规则名列表。 |
+| `facts` | `object` | 否 | 要求 `FactBag` 中指定 fact 匹配给定值。普通值精确匹配；对象值做局部匹配，只要求实际 dict 包含这些键值。 |
 
 ## decision 可选值
 
@@ -148,6 +149,32 @@ tests/cases/archive_scan/
       "should_extract": true,
       "decision": "archive",
       "matched_rules_include": ["seven_zip_structure_identity"]
+    }
+  ]
+}
+```
+
+锁定具体 detection facts：
+
+```json
+{
+  "name": "jpg carrier encrypted rar is archive",
+  "expect": [
+    {
+      "path": "R3961.jpg",
+      "should_extract": true,
+      "decision": "archive",
+      "matched_rules_include": ["embedded_payload_identity", "seven_zip_probe"],
+      "facts": {
+        "file.detected_ext": ".rar",
+        "file.probe_offset": 904331,
+        "7z.probe": {
+          "is_archive": true,
+          "is_encrypted": true,
+          "type": "rar",
+          "offset": 904331
+        }
+      }
     }
   ]
 }

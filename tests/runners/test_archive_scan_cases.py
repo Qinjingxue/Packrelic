@@ -46,3 +46,23 @@ def test_archive_scan_case(case, case_workspace):
             assert decision.total_score <= int(expected["max_score"])
         for rule in expected.get("matched_rules_include", []):
             assert rule in decision.matched_rules
+        fact_bag = by_relative_path[rel_path].fact_bag
+        for fact_name, expected_value in expected.get("facts", {}).items():
+            actual_value = fact_bag.get(fact_name)
+            assert_fact_matches(rel_path, fact_name, actual_value, expected_value)
+
+
+def assert_fact_matches(rel_path, fact_name, actual_value, expected_value):
+    if isinstance(expected_value, dict):
+        assert isinstance(actual_value, dict), (
+            f"{rel_path}: expected fact {fact_name} to be a dict containing "
+            f"{expected_value!r}, got {actual_value!r}"
+        )
+        for key, nested_expected in expected_value.items():
+            nested_actual = actual_value.get(key)
+            assert_fact_matches(rel_path, f"{fact_name}.{key}", nested_actual, nested_expected)
+        return
+    assert actual_value == expected_value, (
+        f"{rel_path}: expected fact {fact_name}={expected_value!r}, "
+        f"got {actual_value!r}"
+    )
