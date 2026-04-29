@@ -677,6 +677,9 @@ class ExtractionBatchRunner:
 
         digest = _source_input_digest(best.source_input)
         selected = evaluated.get(digest)
+        if selected is None and best.archive_state:
+            digest = _source_input_digest({"archive_state": best.archive_state})
+            selected = evaluated.get(digest)
         if selected is None:
             self._cleanup_beam_evaluations(evaluated)
             return None
