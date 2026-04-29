@@ -993,15 +993,10 @@ fn select_conflict_free_zip_entries(entries: &[RecoveredEntry]) -> Vec<usize> {
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     for index in order {
         let entry = &entries[index];
-        let name_key = String::from_utf8_lossy(&entry.name)
-            .replace('\\', "/")
-            .trim_start_matches('/')
-            .to_ascii_lowercase();
-        if name_key.is_empty()
-            || name_key.contains('\0')
-            || name_key.split('/').any(|part| part == ".." || part.is_empty())
-            || !used_names.insert(name_key)
-        {
+        let Some(name_key) = conflict_safe_name_key(&entry.name) else {
+            continue;
+        };
+        if !used_names.insert(name_key) {
             continue;
         }
         if ranges
@@ -1015,6 +1010,82 @@ fn select_conflict_free_zip_entries(entries: &[RecoveredEntry]) -> Vec<usize> {
     }
     selected.sort_by_key(|index| entries[*index].data_start);
     selected
+}
+
+fn conflict_safe_name_key(name: &[u8]) -> Option<String> {
+    let raw = String::from_utf8_lossy(name).replace('\\', "/");
+    if raw.is_empty() || raw.contains('\0') || raw.starts_with('/') || has_windows_drive_prefix(&raw) {
+        return None;
+    }
+    let mut key_parts = Vec::new();
+    for part in raw.split('/') {
+        if part.is_empty() || part == "." || part == ".." {
+            return None;
+        }
+        if part.ends_with(' ') || part.ends_with('.') {
+            return None;
+        }
+        if is_windows_reserved_name(part) {
+            return None;
+        }
+        let folded = fold_conflict_component(part);
+        if folded.is_empty() {
+            return None;
+        }
+        key_parts.push(folded);
+    }
+    if key_parts.is_empty() {
+        None
+    } else {
+        Some(key_parts.join("/"))
+    }
+}
+
+fn has_windows_drive_prefix(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic()
+}
+
+fn is_windows_reserved_name(part: &str) -> bool {
+    let base = part
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' ', '.'])
+        .to_ascii_uppercase();
+    matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (base.len() == 4
+            && (base.starts_with("COM") || base.starts_with("LPT"))
+            && base.as_bytes()[3].is_ascii_digit()
+            && base.as_bytes()[3] != b'0')
+}
+
+fn fold_conflict_component(part: &str) -> String {
+    let mut out = String::new();
+    for ch in part.chars() {
+        if ('\u{0300}'..='\u{036f}').contains(&ch) {
+            continue;
+        }
+        for lower in ch.to_lowercase() {
+            match lower {
+                'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => out.push('a'),
+                'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => out.push('c'),
+                'ď' | 'đ' => out.push('d'),
+                'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => out.push('e'),
+                'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => out.push('i'),
+                'ñ' | 'ń' | 'ņ' | 'ň' => out.push('n'),
+                'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => out.push('o'),
+                'ŕ' | 'ŗ' | 'ř' => out.push('r'),
+                'ś' | 'ŝ' | 'ş' | 'š' => out.push('s'),
+                'ť' | 'ţ' | 'ŧ' => out.push('t'),
+                'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => out.push('u'),
+                'ý' | 'ÿ' | 'ŷ' => out.push('y'),
+                'ź' | 'ż' | 'ž' => out.push('z'),
+                _ => out.push(lower),
+            }
+        }
+    }
+    out
 }
 
 fn zip_entry_score(entry: &RecoveredEntry) -> i64 {

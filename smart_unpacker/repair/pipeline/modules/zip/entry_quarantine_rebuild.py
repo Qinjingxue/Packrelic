@@ -23,7 +23,7 @@ class ZipEntryQuarantineRebuild:
                 formats=("zip",),
                 require_any_categories=("content_recovery",),
                 require_any_flags=("damaged", "crc_error", "checksum_error", "payload_damaged", "entry_payload_bad"),
-                reject_any_flags=("wrong_password", "data_descriptor"),
+                reject_any_flags=("wrong_password", "data_descriptor", "duplicate_entries", "overlapping_entries", "local_header_conflict"),
                 require_any_failure_kinds=("checksum_error", "corrupted_data", "data_error"),
                 base_score=0.91,
             ),
@@ -32,7 +32,7 @@ class ZipEntryQuarantineRebuild:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        if "data_descriptor" in flags:
+        if flags & {"data_descriptor", "duplicate_entries", "overlapping_entries", "local_header_conflict"}:
             return 0.0
         coverage = coverage_view_from_job(job)
         if coverage.mixed_damage_suspected or coverage.payload_only_suspected:

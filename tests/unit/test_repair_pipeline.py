@@ -14,6 +14,7 @@ import pytest
 
 from smart_unpacker.analysis.result import ArchiveFormatEvidence, ArchiveSegment
 from smart_unpacker.config.schema import normalize_config
+from smart_unpacker.repair.config import enabled_module_configs
 from smart_unpacker.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate
 from smart_unpacker.repair import RepairJob, RepairScheduler
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
@@ -23,6 +24,13 @@ from smart_unpacker.repair.result import RepairResult
 
 RAR4_MAGIC = b"Rar!\x1a\x07\x00"
 RAR5_MAGIC = b"Rar!\x1a\x07\x01\x00"
+DEFAULT_SALVAGE_MODULES = {
+    "archive_nested_payload_salvage",
+    "rar_file_quarantine_rebuild",
+    "seven_zip_solid_block_partial_salvage",
+    "tar_sparse_pax_longname_repair",
+    "zip_conflict_resolver_rebuild",
+}
 
 
 def test_repair_scheduler_without_modules_returns_unsupported(tmp_path):
@@ -40,6 +48,89 @@ def test_repair_scheduler_without_modules_returns_unsupported(tmp_path):
     assert result.status == "unsupported"
     assert result.format == "zip"
     assert result.diagnosis["categories"] == ["boundary_repair"]
+
+
+def test_default_repair_config_enables_deep_salvage_modules(tmp_path):
+    scheduler = RepairScheduler({"repair": {"workspace": str(tmp_path / "repair")}})
+    enabled = set(enabled_module_configs(scheduler.config))
+
+    assert DEFAULT_SALVAGE_MODULES <= enabled
+
+
+@pytest.mark.parametrize(
+    ("module_name", "fmt", "flags", "failure_kind"),
+    [
+        (
+            "archive_nested_payload_salvage",
+            "archive",
+            ["outer_container_bad", "nested_archive"],
+            "structure_recognition",
+        ),
+        (
+            "rar_file_quarantine_rebuild",
+            "rar",
+            ["file_block_bad", "crc_error", "checksum_error"],
+            "checksum_error",
+        ),
+        (
+            "seven_zip_solid_block_partial_salvage",
+            "7z",
+            ["solid_block_damaged", "packed_stream_bad", "damaged"],
+            "data_error",
+        ),
+        (
+            "tar_sparse_pax_longname_repair",
+            "tar",
+            ["pax_header_bad", "gnu_longname_bad", "damaged"],
+            "structure_recognition",
+        ),
+        (
+            "zip_conflict_resolver_rebuild",
+            "zip",
+            ["duplicate_entries", "overlapping_entries", "local_header_conflict"],
+            "checksum_error",
+        ),
+    ],
+)
+def test_default_repair_config_routes_salvage_modules_without_module_override(
+    tmp_path,
+    module_name,
+    fmt,
+    flags,
+    failure_kind,
+):
+    source = tmp_path / f"{module_name}.{fmt}"
+    source.write_bytes(b"x" * 128)
+    scheduler = RepairScheduler({"repair": {"workspace": str(tmp_path / "repair")}})
+    job = RepairJob(
+        source_input={"kind": "file", "path": str(source), "format_hint": fmt},
+        format=fmt,
+        confidence=0.82,
+        damage_flags=flags,
+        extraction_failure={
+            "failure_stage": "verification",
+            "failure_kind": failure_kind,
+            "decision_hint": "repair",
+        },
+        archive_key=module_name,
+    )
+
+    batch = scheduler.generate_repair_candidates(
+        job,
+        lazy=True,
+    )
+    selected = {candidate.module_name for candidate in batch.candidates}
+    if module_name in selected:
+        return
+
+    result = scheduler.repair(job)
+    decisions = result.diagnosis["capability_decision"]["modules"]
+    selected_after_primary = {
+        item["name"]
+        for item in decisions
+        if item["selected"] and "selected" in item["reasons"]
+    }
+    assert module_name in selected_after_primary
 
 
 def test_repair_diagnosis_combines_analysis_and_extraction_evidence(tmp_path):

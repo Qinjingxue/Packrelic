@@ -21,7 +21,7 @@ class TarSparsePaxLongnameRepair:
             RepairRoute(
                 formats=("tar",),
                 require_any_categories=("directory_rebuild", "content_recovery"),
-                require_any_flags=("pax_header_bad", "gnu_longname_bad", "sparse_metadata_bad", "tar_size_bad", "damaged"),
+                require_any_flags=("gnu_longname_bad", "sparse_metadata_bad", "tar_size_bad", "damaged"),
                 require_any_failure_kinds=("structure_recognition", "corrupted_data", "data_error"),
                 base_score=0.82,
             ),
@@ -30,7 +30,7 @@ class TarSparsePaxLongnameRepair:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        if flags & {"pax_header_bad", "gnu_longname_bad", "sparse_metadata_bad", "tar_size_bad"}:
+        if flags & {"gnu_longname_bad", "sparse_metadata_bad", "tar_size_bad"}:
             return 0.92
         if diagnosis.format == "tar" and flags & {"damaged", "corrupted_data"}:
             return 0.72

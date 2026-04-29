@@ -22,8 +22,8 @@ class ArchiveNestedPayloadSalvage:
             RepairRoute(
                 formats=("zip", "7z", "seven_zip", "rar", "tar", "gzip", "archive"),
                 require_any_categories=("content_recovery", "directory_rebuild", "boundary_repair"),
-                require_any_flags=("damaged", "outer_container_bad", "nested_archive", "embedded_archive", "carrier_archive"),
-                require_any_failure_kinds=("corrupted_data", "data_error", "structure_recognition"),
+                require_any_flags=("outer_container_bad", "nested_archive"),
+                reject_any_flags=("carrier_archive", "sfx", "carrier_prefix"),
                 base_score=0.8,
             ),
         ),
@@ -31,12 +31,10 @@ class ArchiveNestedPayloadSalvage:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & {"carrier_archive", "sfx", "carrier_prefix"}:
+            return 0.0
         if flags & {"nested_archive", "outer_container_bad"}:
             return 0.94
-        if flags & {"embedded_archive", "carrier_archive"}:
-            return 0.72
-        if "content_recovery" in diagnosis.categories and flags & {"damaged", "corrupted_data"}:
-            return 0.78
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict):

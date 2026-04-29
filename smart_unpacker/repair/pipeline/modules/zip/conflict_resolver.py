@@ -22,7 +22,7 @@ class ZipConflictResolverRebuild:
             RepairRoute(
                 formats=("zip",),
                 require_any_categories=("directory_rebuild", "content_recovery"),
-                require_any_flags=("duplicate_entries", "overlapping_entries", "local_header_conflict", "central_directory_bad", "damaged"),
+                require_any_flags=("duplicate_entries", "overlapping_entries", "local_header_conflict"),
                 require_any_failure_kinds=("structure_recognition", "corrupted_data", "checksum_error"),
                 base_score=0.9,
             ),
@@ -33,10 +33,6 @@ class ZipConflictResolverRebuild:
         flags = set(job.damage_flags)
         if flags & {"duplicate_entries", "overlapping_entries", "local_header_conflict"}:
             return 0.96
-        if flags & {"central_directory_bad", "damaged"} and diagnosis.format == "zip":
-            return 0.84
-        if diagnosis.format == "zip" and "directory_rebuild" in diagnosis.categories:
-            return 0.78
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:

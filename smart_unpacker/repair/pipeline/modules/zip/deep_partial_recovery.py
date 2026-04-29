@@ -38,6 +38,7 @@ class ZipDeepPartialRecovery:
                 ),
                 require_any_failure_stages=("item_extract", "archive_open"),
                 require_any_failure_kinds=("checksum_error", "corrupted_data", "data_error", "structure_recognition"),
+                reject_any_flags=("duplicate_entries", "overlapping_entries", "local_header_conflict"),
                 base_score=0.88,
             ),
         ),
@@ -45,6 +46,8 @@ class ZipDeepPartialRecovery:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & {"duplicate_entries", "overlapping_entries", "local_header_conflict"}:
+            return 0.0
         coverage = coverage_view_from_job(job)
         if coverage.mixed_damage_suspected:
             return 0.98
