@@ -215,6 +215,49 @@ def test_directory_scanner_scan_filters_global_switch_disables_filters(tmp_path)
     assert "skip.py" in names
 
 
+def test_directory_scanner_applies_filters_in_config_order(tmp_path, monkeypatch):
+    target = tmp_path / "archive.zip"
+    target.write_bytes(b"PK\x03\x04payload")
+    observed = []
+
+    from sunpack.filesystem.filters.modules.blacklist import BlacklistScanFilter
+    from sunpack.filesystem.filters.modules.mtime_range import MtimeRangeScanFilter
+    from sunpack.filesystem.filters.modules.size_minimum import SizeRangeScanFilter
+    from sunpack.filesystem.filters.modules.whitelist import WhitelistScanFilter
+
+    originals = {
+        "whitelist": WhitelistScanFilter.evaluate,
+        "blacklist": BlacklistScanFilter.evaluate,
+        "size_range": SizeRangeScanFilter.evaluate,
+        "mtime_range": MtimeRangeScanFilter.evaluate,
+    }
+
+    def record(name, original):
+        def wrapped(self, candidate):
+            if candidate.path == target:
+                observed.append(name)
+            return original(self, candidate)
+        return wrapped
+
+    monkeypatch.setattr(WhitelistScanFilter, "evaluate", record("whitelist", originals["whitelist"]))
+    monkeypatch.setattr(BlacklistScanFilter, "evaluate", record("blacklist", originals["blacklist"]))
+    monkeypatch.setattr(SizeRangeScanFilter, "evaluate", record("size_range", originals["size_range"]))
+    monkeypatch.setattr(MtimeRangeScanFilter, "evaluate", record("mtime_range", originals["mtime_range"]))
+
+    DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "mtime_range", "enabled": True},
+                {"name": "whitelist", "enabled": True},
+                {"name": "size_range", "enabled": True},
+                {"name": "blacklist", "enabled": True},
+            ]
+        }
+    }).scan()
+
+    assert observed == ["mtime_range", "whitelist", "size_range", "blacklist"]
+
+
 def test_directory_scanner_whitelist_disabled_does_not_filter(tmp_path):
     (tmp_path / "keep.zip").write_bytes(b"PK\x03\x04payload")
     (tmp_path / "other.rar").write_bytes(b"Rar!\x1a\x07\x00payload")

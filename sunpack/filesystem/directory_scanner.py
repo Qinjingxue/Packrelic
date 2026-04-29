@@ -51,7 +51,7 @@ class DirectoryScanner:
             for row in rows
             if isinstance(row, dict) and row.get("path")
         ]
-        entries = self._apply_post_native_filters(entries)
+        entries = self._apply_ordered_filters(entries)
         return DirectorySnapshot(root_path=root_path, entries=entries)
 
     def _native_scan_options(self) -> dict | None:
@@ -71,8 +71,6 @@ class DirectoryScanner:
                 prune_dirs.extend(getattr(scan_filter, "prune_dirs", []) or [])
                 blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
                 continue
-            if name == "whitelist" and stage == "path":
-                continue
             if name in {"size_minimum", "size_range"} and stage == "size":
                 value = getattr(scan_filter, "min_inspection_size_bytes", None)
                 if value is not None:
@@ -81,8 +79,8 @@ class DirectoryScanner:
                     except (TypeError, ValueError):
                         return None
                 continue
-            if name == "mtime_range" and stage == "mtime":
-                continue
+            if name in {"whitelist", "mtime_range"}:
+                break
             return None
 
         return {
@@ -92,24 +90,16 @@ class DirectoryScanner:
             "min_size": min_size,
         }
 
-    def _apply_post_native_filters(self, entries: list[FileEntry]) -> list[FileEntry]:
-        post_filters = [
-            scan_filter for scan_filter in self.filters
-            if (
-                getattr(scan_filter, "name", "") == "whitelist"
-                and getattr(scan_filter, "stage", "") == "path"
-            )
-            or getattr(scan_filter, "stage", "") in {"size", "mtime"}
-        ]
-        if not post_filters:
+    def _apply_ordered_filters(self, entries: list[FileEntry]) -> list[FileEntry]:
+        if not self.filters:
             return entries
 
         current = entries
-        for scan_filter in post_filters:
-            current = self._apply_post_native_filter(current, scan_filter)
+        for scan_filter in self.filters:
+            current = self._apply_ordered_filter(current, scan_filter)
         return current
 
-    def _apply_post_native_filter(self, entries: list[FileEntry], scan_filter: ScanFilter) -> list[FileEntry]:
+    def _apply_ordered_filter(self, entries: list[FileEntry], scan_filter: ScanFilter) -> list[FileEntry]:
         kept: list[FileEntry] = []
         pruned_dirs: list[Path] = []
         for entry in sorted(entries, key=lambda item: (len(item.path.parts), str(item.path).lower())):

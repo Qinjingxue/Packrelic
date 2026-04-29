@@ -84,7 +84,7 @@ CLI 可用 `--recur` 临时覆盖。
 
 扫描过滤器在目录遍历阶段执行，被过滤的条目不会进入 relation、detection 或 analysis。
 
-`whitelist` 是最高优先级允许集合，默认关闭。启用后，文件必须先命中 whitelist 才会进入后续扫描；字段与 `blacklist` 一致，但语义是“允许”。例如：
+`scan_filters` 按配置数组中的顺序执行；第一个启用的过滤器就第一个处理扫描条目。`whitelist` 默认关闭，启用后文件必须命中 whitelist 才会继续进入它后面的过滤器；字段与 `blacklist` 一致，但语义是“允许”。例如：
 
 ```json
 {
