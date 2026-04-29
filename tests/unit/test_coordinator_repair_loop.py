@@ -11,7 +11,7 @@ from smart_unpacker.repair.candidate import RepairCandidate, RepairCandidateBatc
 from smart_unpacker.verification.result import ArchiveCoverageSummary, VerificationResult
 
 
-def test_extraction_failure_repair_reanalysis_loop_runs_until_success(tmp_path):
+def test_extraction_failure_repair_reanalysis_loop_skips_reanalysis_after_accepted_candidate(tmp_path):
     source = tmp_path / "broken.zip"
     source.write_bytes(b"broken")
     fixed_1 = tmp_path / "fixed-1.zip"
@@ -28,7 +28,7 @@ def test_extraction_failure_repair_reanalysis_loop_runs_until_success(tmp_path):
     outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
 
     assert outcome.success is True
-    assert runner.analysis_stage.calls == 2
+    assert runner.analysis_stage.calls == 1
     archive_input = task.archive_input()
     assert archive_input.entry_path.endswith("fixed-2.zip")
     rounds = task.fact_bag.get("repair.loop.rounds")

@@ -647,6 +647,7 @@ class ExtractionBatchRunner:
             self.repair_stage.config,
             analyze=lambda candidate: {"confidence": float(candidate.confidence or 0.0)},
             assess=lambda item: self._assess_beam_candidate(task, item, out_dir, runtime_scheduler, evaluated),
+            should_assess=self._beam_candidate_should_assess,
         )
         initial = RepairBeamState(
             source_input=dict(job.source_input),
@@ -751,7 +752,6 @@ class ExtractionBatchRunner:
                 evaluation.temp_dir,
             )})
             return False
-        self.analysis_stage.analyze_task(task)
 
         if _verification_accepts(evaluation.verification):
             if self._accept_partial_output(evaluation.result, evaluation.verification):
@@ -760,6 +760,8 @@ class ExtractionBatchRunner:
             beam_outcome.result = final_result
             self._promote_recovery_outcome(beam_outcome, out_dir)
             return beam_outcome
+
+        self.analysis_stage.analyze_task(task)
 
         if not bool(beam_outcome.comparison.get("should_continue_repair", True)):
             loop_state.stop("no_repair_improvement", trigger="verification_beam", result=evaluation.repair_result)
@@ -812,6 +814,100 @@ class ExtractionBatchRunner:
             return None
         return ArchiveState.from_archive_input(descriptor)
 
+    def _beam_candidate_should_assess(self, item: RepairBeamCandidate) -> bool:
+        threshold = self._partial_accept_threshold()
+        incumbent = max(0.0, float(item.state.completeness or 0.0))
+        if item.state.decision_hint != DECISION_ACCEPT_PARTIAL or incumbent < threshold:
+            return True
+        predicted = self._candidate_validation_completeness(item.candidate)
+        min_improvement = self._recovery_min_improvement()
+        if predicted is not None and predicted <= incumbent + min_improvement and item.score < 0.55:
+            return False
+        patch_cost = self._candidate_patch_cost(item.candidate)
+        if patch_cost > 0.85 and item.score < 0.55:
+            return False
+        if item.candidate.partial and item.score < 0.45:
+            return False
+        return item.score >= 0.25
+
+    def _verify_beam_candidate_light(self, task: ArchiveTask, result: ExtractionResult) -> VerificationResult:
+        verification_config = dict(self.verifier.config)
+        verification_config["methods"] = [
+            method
+            for method in verification_config.get("methods", [])
+            if isinstance(method, dict)
+            and method.get("enabled", True)
+            and str(method.get("name") or "") in {
+                "extraction_exit_signal",
+                "output_presence",
+                "expected_name_presence",
+                "manifest_size_match",
+            }
+        ]
+        if not verification_config["methods"]:
+            return self.verifier.verify(task, result)
+        light_config = dict(self.config)
+        light_config["verification"] = verification_config
+        return VerificationScheduler(light_config, password_session=self.extractor.password_session).verify(task, result)
+
+    def _beam_candidate_needs_full_verification(
+        self,
+        item: RepairBeamCandidate,
+        light_assessment: VerificationResult,
+    ) -> bool:
+        threshold = self._partial_accept_threshold()
+        incumbent = max(0.0, float(item.state.completeness or 0.0))
+        if item.state.decision_hint != DECISION_ACCEPT_PARTIAL or incumbent < threshold:
+            return True
+        if light_assessment.decision_hint == DECISION_ACCEPT:
+            return True
+        if float(light_assessment.completeness or 0.0) + 0.02 >= incumbent:
+            return True
+        if float(light_assessment.recoverable_upper_bound or 0.0) > float(item.state.recoverable_upper_bound or 0.0) + 0.01:
+            return True
+        incumbent_complete = _coverage_complete_files(item.state.verification)
+        if int(light_assessment.archive_coverage.complete_files or 0) > incumbent_complete:
+            return True
+        return False
+
+    def _partial_accept_threshold(self) -> float:
+        try:
+            return max(0.0, min(1.0, float(self.verifier.config.get("partial_accept_threshold", 0.2) or 0.2)))
+        except (TypeError, ValueError):
+            return 0.2
+
+    def _candidate_validation_completeness(self, candidate: RepairCandidate) -> float | None:
+        values: list[float] = []
+        for validation in candidate.validations:
+            details = validation.details if isinstance(validation.details, dict) else {}
+            coverage = details.get("archive_coverage") if isinstance(details.get("archive_coverage"), dict) else {}
+            if "completeness" in coverage:
+                try:
+                    values.append(float(coverage.get("completeness") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+        return max(values) if values else None
+
+    def _candidate_patch_cost(self, candidate: RepairCandidate) -> float:
+        plan = candidate.plan if isinstance(candidate.plan, dict) else {}
+        archive_state = plan.get("archive_state") if isinstance(plan.get("archive_state"), dict) else {}
+        patches = archive_state.get("patches") or archive_state.get("patch_stack") or []
+        operation_count = 0
+        byte_cost = 0
+        for patch in patches:
+            if not isinstance(patch, dict):
+                continue
+            for operation in patch.get("operations") or []:
+                if not isinstance(operation, dict):
+                    continue
+                operation_count += 1
+                try:
+                    byte_cost += max(0, int(operation.get("size") or 0))
+                except (TypeError, ValueError):
+                    pass
+                byte_cost += len(str(operation.get("data_b64") or operation.get("data") or ""))
+        return min(1.0, operation_count * 0.12 + byte_cost / (64 * 1024 * 1024))
+
     def _assess_beam_candidate(
         self,
         task: ArchiveTask,
@@ -837,7 +933,12 @@ class ExtractionBatchRunner:
                 else:
                     task.set_archive_input(item.candidate.repaired_input)
             extracted = self.extractor.extract(task, temp_dir, runtime_scheduler=runtime_scheduler)
-            assessed = self.verifier.verify(task, extracted)
+            light_assessment = self._verify_beam_candidate_light(task, extracted)
+            assessed = (
+                self.verifier.verify(task, extracted)
+                if self._beam_candidate_needs_full_verification(item, light_assessment)
+                else light_assessment
+            )
             evaluated[digest] = (item.candidate, extracted, assessed, temp_dir)
             return assessed
         finally:
@@ -1182,6 +1283,16 @@ def _coverage_payload(verification: VerificationResult) -> dict[str, Any]:
         "confidence": coverage.confidence,
         "sources": list(coverage.sources),
     }
+
+
+def _coverage_complete_files(payload: dict[str, Any]) -> int:
+    coverage = payload.get("archive_coverage") if isinstance(payload, dict) else {}
+    if not isinstance(coverage, dict):
+        return 0
+    try:
+        return max(0, int(coverage.get("complete_files") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _verification_payload(verification: VerificationResult) -> dict[str, Any]:

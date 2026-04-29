@@ -25,6 +25,7 @@ from smart_unpacker.verification.comparison import score_verification_payload
 
 AnalyzeFn = Callable[[RepairCandidate], dict[str, Any]]
 AssessFn = Callable[["RepairBeamCandidate"], VerificationResult | dict[str, Any] | None]
+ShouldAssessFn = Callable[["RepairBeamCandidate"], bool]
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,7 @@ class RepairBeamLoop:
         max_assess_candidates: int | None = None,
         analyze: AnalyzeFn | None = None,
         assess: AssessFn | None = None,
+        should_assess: ShouldAssessFn | None = None,
         min_improvement: float = 0.0,
     ):
         self.scheduler = scheduler
@@ -150,6 +152,7 @@ class RepairBeamLoop:
         self.max_assess_candidates = max(1, int(max_assess_candidates or self.max_analyze_candidates))
         self.analyze = analyze or (lambda _candidate: {})
         self.assess = assess or (lambda _candidate: None)
+        self.should_assess = should_assess or (lambda _item: True)
         self.min_improvement = max(0.0, float(min_improvement or 0.0))
 
     @classmethod
@@ -160,6 +163,7 @@ class RepairBeamLoop:
         *,
         analyze: AnalyzeFn | None = None,
         assess: AssessFn | None = None,
+        should_assess: ShouldAssessFn | None = None,
     ) -> "RepairBeamLoop":
         beam = config.get("beam") if isinstance(config.get("beam"), dict) else {}
         return cls(
@@ -170,6 +174,7 @@ class RepairBeamLoop:
             max_assess_candidates=int(beam.get("max_assess_candidates", 4) or 4),
             analyze=analyze,
             assess=assess,
+            should_assess=should_assess,
             min_improvement=float(beam.get("min_improvement", 0.0) or 0.0),
         )
 
@@ -225,16 +230,19 @@ class RepairBeamLoop:
                     score=_candidate_pre_score(candidate, state),
                 ))
 
+        raw_candidates = _dedupe_generation_candidates(raw_candidates)
         ranked = sorted(raw_candidates, key=lambda item: item.score, reverse=True)
         analyzed = [
             _with_analyze(item, self.analyze(item.candidate))
             for item in ranked[: self.max_analyze_candidates]
         ]
         analyzed = sorted(analyzed, key=lambda item: item.score, reverse=True)
-        analyzed = _dedupe_equivalent_candidates(analyzed)
+        analyzed = _dedupe_generation_candidates(analyzed)
+        analyzed = [item for item in analyzed if self.should_assess(item)]
         assessment_window = _materialize_beam_items(analyzed[: self.max_assess_candidates])
         assessment_window = _dedupe_equivalent_candidates(assessment_window)
         assessment_window = sorted(assessment_window, key=lambda item: item.score, reverse=True)
+        assessment_window = [item for item in assessment_window if self.should_assess(item)]
         assessed = [
             _with_assessment(item, self.assess(item))
             for item in assessment_window
@@ -327,6 +335,34 @@ def _dedupe_equivalent_candidates(items: list[RepairBeamCandidate]) -> list[Repa
         seen.add(key)
         output.append(item)
     return output
+
+
+def _dedupe_generation_candidates(items: list[RepairBeamCandidate]) -> list[RepairBeamCandidate]:
+    output: list[RepairBeamCandidate] = []
+    seen: set[str] = set()
+    for item in items:
+        key = _candidate_generation_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(item)
+    return output
+
+
+def _candidate_generation_key(item: RepairBeamCandidate) -> str:
+    candidate_state = _candidate_archive_state(item.candidate)
+    if candidate_state:
+        digest = _stable_digest(_archive_state_equivalence_payload(candidate_state))
+        return f"state:{digest}"
+    repaired_input = item.candidate.repaired_input if isinstance(item.candidate.repaired_input, dict) else {}
+    if repaired_input:
+        digest = _stable_digest(_source_input_equivalence_payload(repaired_input))
+        patch_digest = repaired_input.get("patch_digest") or ""
+        return f"input:{digest}:{patch_digest}"
+    if isinstance(item.candidate.plan, dict):
+        patch_digest = item.candidate.plan.get("patch_digest") or ""
+        return f"{item.candidate.module_name}:plan:{_stable_digest(item.candidate.plan)}:{patch_digest}"
+    return f"{item.candidate.module_name}:{item.candidate.format}:{item.candidate.confidence}"
 
 
 def _candidate_equivalence_key(item: RepairBeamCandidate) -> str:

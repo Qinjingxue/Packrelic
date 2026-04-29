@@ -1,6 +1,7 @@
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from smart_unpacker.analysis import ArchiveAnalysisReport, ArchiveAnalysisScheduler
@@ -22,6 +23,8 @@ class ArchiveAnalysisStage:
         analysis_config = self.config.get("analysis") if isinstance(self.config.get("analysis"), dict) else {}
         self.enabled = bool(analysis_config.get("enabled", True))
         self.scheduler = ArchiveAnalysisScheduler(self.config) if self.enabled else None
+        self._report_cache: dict[tuple, ArchiveAnalysisReport] = {}
+        self._report_cache_lock = threading.Lock()
 
     def analyze_tasks(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
         if not self.enabled or self.scheduler is None:
@@ -60,6 +63,36 @@ class ArchiveAnalysisStage:
             configured = min(4, os.cpu_count() or 1)
         return max(1, min(int(configured or 1), task_count))
 
+    def _remember_report(self, cache_key: tuple, report: ArchiveAnalysisReport) -> None:
+        analysis_config = self.config.get("analysis") if isinstance(self.config.get("analysis"), dict) else {}
+        limit = max(0, int(analysis_config.get("cache_size", 512) or 512))
+        if limit <= 0:
+            return
+        with self._report_cache_lock:
+            if len(self._report_cache) >= limit:
+                self._report_cache.pop(next(iter(self._report_cache)))
+            self._report_cache[cache_key] = report
+
+    def _analysis_cache_key(self, task: ArchiveTask) -> tuple:
+        try:
+            patch_digest = task.archive_state().effective_patch_digest()
+        except (TypeError, ValueError, AttributeError):
+            patch_digest = str(task.fact_bag.get("archive.patch_digest") or "")
+        parts = self._ordered_parts(task) or list(task.all_parts or [task.main_path])
+        return (
+            patch_digest,
+            tuple(self._path_cache_fingerprint(path) for path in parts if path),
+        )
+
+    @staticmethod
+    def _path_cache_fingerprint(path: str) -> tuple:
+        normalized = os.path.abspath(os.path.normpath(path))
+        try:
+            stat = os.stat(normalized)
+            return (normalized, int(stat.st_size), int(stat.st_mtime_ns))
+        except OSError:
+            return (normalized, -1, -1)
+
     def analyze_task(self, task: ArchiveTask) -> ArchiveAnalysisReport | None:
         report, _ = self._analyze_task_to_tasks(task)
         return report
@@ -73,7 +106,14 @@ class ArchiveAnalysisStage:
             return None, [task]
         task.ensure_archive_state()
         try:
-            report = self.scheduler.analyze_task(task)
+            cache_key = self._analysis_cache_key(task)
+            with self._report_cache_lock:
+                report = self._report_cache.get(cache_key)
+            if report is None:
+                report = self.scheduler.analyze_task(task)
+                self._remember_report(cache_key, report)
+            else:
+                report = replace(report, cache_hits=report.cache_hits + 1)
         except Exception as exc:
             task.fact_bag.set("analysis.status", "error")
             task.fact_bag.set("analysis.error", str(exc))
