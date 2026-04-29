@@ -51,6 +51,28 @@ def test_directory_scanner_size_range_filters_files_outside_range(tmp_path):
     assert "large.zip" not in names
 
 
+def test_directory_scanner_size_range_accepts_human_expression(tmp_path):
+    small = tmp_path / "small.zip"
+    keep = tmp_path / "keep.zip"
+    large = tmp_path / "large.zip"
+    small.write_bytes(b"a" * 512 * 1024)
+    keep.write_bytes(b"b" * 2 * 1024 * 1024)
+    large.write_bytes(b"c" * 11 * 1024 * 1024)
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "size_range", "enabled": True, "range": "1 MB < r < 10 MB"},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "small.zip" not in names
+    assert "keep.zip" in names
+    assert "large.zip" not in names
+
+
 def test_directory_scanner_size_minimum_legacy_config_still_filters(tmp_path):
     small = tmp_path / "small.zip"
     keep = tmp_path / "keep.zip"
@@ -89,6 +111,38 @@ def test_directory_scanner_mtime_range_filters_files_outside_range(tmp_path):
         "filesystem": {
             "scan_filters": [
                 {"name": "mtime_range", "enabled": True, "gte": keep_ns, "lt": new_ns},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "old.zip" not in names
+    assert "keep.zip" in names
+    assert "new.zip" not in names
+
+
+def test_directory_scanner_mtime_range_accepts_date_expression(tmp_path):
+    old = tmp_path / "old.zip"
+    keep = tmp_path / "keep.zip"
+    new = tmp_path / "new.zip"
+    old.write_bytes(b"old")
+    keep.write_bytes(b"keep")
+    new.write_bytes(b"new")
+
+    from datetime import datetime
+    import os
+
+    def ns(value: str) -> int:
+        return int(datetime.strptime(value, "%Y%m%d %H:%M").timestamp() * 1_000_000_000)
+
+    os.utime(old, ns=(ns("20250101 00:00"), ns("20250101 00:00")))
+    os.utime(keep, ns=(ns("20260101 00:00"), ns("20260101 00:00")))
+    os.utime(new, ns=(ns("20270101 00:00"), ns("20270101 00:00")))
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "mtime_range", "enabled": True, "date": "20260430 01:40 > d > 20250320 01:30"},
             ]
         }
     }).scan()

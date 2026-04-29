@@ -110,7 +110,13 @@ CLI 可用 `--recur` 临时覆盖。
 
 高级兼容字段 `patterns` 和 `prune_dirs` 仍按正则读取，但默认配置不再使用它们。
 
-`size_range` 用文件大小限制 filesystem 输出。只有落在配置范围内的文件才会进入 relation、detection 或 analysis；目录不受该过滤器影响。范围字段可混用：
+`size_range` 用文件大小限制 filesystem 输出。只有落在配置范围内的文件才会进入 relation、detection 或 analysis；目录不受该过滤器影响。推荐写数学不等式，`r` 表示文件大小：
+
+```json
+{"name": "size_range", "enabled": true, "range": "1 MB < r < 10 MB"}
+```
+
+大小单位支持 `B`、`KB`、`MB`、`GB`、`TB` 和 `KiB`、`MiB`、`GiB`、`TiB`，按 1024 进位。也兼容旧的原始范围字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -120,17 +126,15 @@ CLI 可用 `--recur` 临时覆盖。
 | `lte` / `less_than_or_equal` | `int` | 文件大小必须小于等于该值。 |
 | `eq` / `equal` | `int` | 文件大小必须等于该值。 |
 
-旧的 `size_minimum` 仍兼容，等价于 `size_range` 的 `gte`：
+旧的 `size_minimum` 仍兼容，等价于 `size_range` 的 `gte`。
+
+`mtime_range` 用文件修改时间限制 filesystem 输出，推荐写数学不等式，`d` 表示文件修改时间：
 
 ```json
-{"name": "size_range", "enabled": true, "gte": 1048576, "lt": 1073741824}
+{"name": "mtime_range", "enabled": false, "date": "20260430 01:40 > d > 20250320 01:30"}
 ```
 
-`mtime_range` 用文件修改时间限制 filesystem 输出，字段语义与 `size_range` 相同。值可以写纳秒时间戳，也可以写 ISO 时间字符串：
-
-```json
-{"name": "mtime_range", "enabled": false, "gte": "2024-01-01T00:00:00+08:00", "lt": "2027-01-01T00:00:00+08:00"}
-```
+日期值支持纳秒时间戳、ISO 时间字符串，以及 `YYYYMMDD HH:MM` / `YYYYMMDD HH:MM:SS` / `YYYYMMDD`。旧的 `gt/gte/lt/lte/eq` 字段仍兼容。
 
 目录扫描使用 Rust `scan_directory_entries`。过滤器无法映射到 native 参数时会显性报错，不做 Python fallback。
 
