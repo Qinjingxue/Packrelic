@@ -40,5 +40,5 @@ def test_cli_parser_uses_command_module_language_text():
     help_text = parser.format_help()
 
     assert "执行预检查、扫描、解压和清理" in help_text
-    assert "查看或校验 sunpack_config.json" in help_text
+    assert "查看或校验 SunPack 有效配置" in help_text
     assert "选项" in help_text

@@ -4,6 +4,7 @@ from sunpack.support.resources import find_resource_path
 
 
 CONFIG_FILENAME = "sunpack_config.json"
+ADVANCED_CONFIG_FILENAME = "sunpack_advanced_config.json"
 
 
 def get_config_path() -> Path:

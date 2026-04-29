@@ -9,15 +9,15 @@ COMMAND = "config"
 ORDER = 50
 TEXTS = {
     "en": {
-        "help": "Show or validate sunpack_config.json.",
-        "show_help": "Print the current config file.",
+        "help": "Show or validate the effective SunPack config.",
+        "show_help": "Print the merged effective config.",
         "validate_help": "Validate JSON, rules, rule config schemas, and fact schemas.",
         "valid_config": "[CONFIG] Configuration is valid.",
         "unknown_config_command": "Unknown config command: {action}",
     },
     "zh": {
-        "help": "查看或校验 sunpack_config.json。",
-        "show_help": "打印当前配置文件。",
+        "help": "查看或校验 SunPack 有效配置。",
+        "show_help": "打印合并后的有效配置。",
         "validate_help": "校验 JSON、规则、规则配置 schema 和 fact schema。",
         "valid_config": "[CONFIG] 配置有效。",
         "unknown_config_command": "未知配置命令：{action}",

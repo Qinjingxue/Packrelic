@@ -11,7 +11,7 @@
 3. 规则读取 facts 和自身配置，返回预检接受/拒绝、加减分或确认结果。
 4. 最终分数和确认结果决定文件是否进入解压任务。
 
-默认配置见 `sunpack_config.json` 的 `detection.rule_pipeline`。
+默认完整规则配置见 `sunpack_advanced_config.json` 的 `detection.rule_pipeline`；常用覆盖项可以放进 `sunpack_config.json`。
 
 ## 规则插件
 

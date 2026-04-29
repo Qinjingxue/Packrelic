@@ -11,6 +11,10 @@ class ConfigError(RuntimeError):
     pass
 
 
+SIMPLE_CONFIG_FILENAME = "sunpack_config.json"
+ADVANCED_CONFIG_FILENAME = "sunpack_advanced_config.json"
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     payload = load_json_file(path)
     if not isinstance(payload, dict):
@@ -25,6 +29,34 @@ def _candidate_config_paths(filename: str) -> list[Path]:
 
 def _first_existing_config(filename: str) -> Path | None:
     return first_existing_path(_candidate_config_paths(filename))
+
+
+def _deep_merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_config(base_value, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_layered_config() -> tuple[Path, dict[str, Any]]:
+    simple_path = _first_existing_config(SIMPLE_CONFIG_FILENAME)
+    advanced_path = _first_existing_config(ADVANCED_CONFIG_FILENAME)
+    if simple_path is None and advanced_path is None:
+        searched = [
+            *[str(path) for path in _candidate_config_paths(SIMPLE_CONFIG_FILENAME)],
+            *[str(path) for path in _candidate_config_paths(ADVANCED_CONFIG_FILENAME)],
+        ]
+        raise ConfigError(f"Missing required {SIMPLE_CONFIG_FILENAME} or {ADVANCED_CONFIG_FILENAME}. Searched: {', '.join(searched)}")
+
+    advanced = _load_json(advanced_path) if advanced_path is not None else {}
+    if simple_path is None:
+        return advanced_path, advanced
+    simple = _load_json(simple_path)
+    return simple_path, _deep_merge_config(advanced, simple)
 
 
 def _validate_pipeline(config: dict[str, Any]):
@@ -70,14 +102,15 @@ def _validate_pipeline(config: dict[str, Any]):
 
 def load_config() -> dict[str, Any]:
     """Read the external configuration required to run the pipeline."""
-    config_path = _first_existing_config("sunpack_config.json")
-    if config_path is None:
-        searched = ", ".join(str(path) for path in _candidate_config_paths("sunpack_config.json"))
-        raise ConfigError(f"Missing required sunpack_config.json. Searched: {searched}")
-
-    config = _load_json(config_path)
+    _, config = _load_layered_config()
     _validate_pipeline(config)
     try:
         return normalize_config(config)
     except ConfigSchemaError as exc:
         raise ConfigError(str(exc)) from exc
+
+
+def load_effective_config_payload() -> tuple[Path, dict[str, Any]]:
+    config_path, config = _load_layered_config()
+    _validate_pipeline(config)
+    return config_path, config

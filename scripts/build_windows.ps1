@@ -623,6 +623,7 @@ Assert-PathExists -LiteralPath $distInternalRoot -Description "PyInstaller inter
 Assert-PackagedNativeExtension -PackageRoot $distAppRoot -BuildArch $buildArch
 Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "builtin_passwords.txt") -Description "Duplicate internal password file"
 Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "sunpack_config.json") -Description "Duplicate internal config file"
+Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "sunpack_advanced_config.json") -Description "Duplicate internal advanced config file"
 
 Write-Step "Adding release metadata and helper scripts"
 $distPasswordPath = Join-Path $distAppRoot "builtin_passwords.txt"

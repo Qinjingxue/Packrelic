@@ -19,7 +19,7 @@ sunpack.exe <command> [options] [paths...]
 - `scan`：只扫描可解压任务，不修改文件。
 - `inspect`：输出每个文件的检测细节，不修改文件。
 - `passwords`：查看实际会参与尝试的密码列表。
-- `config`：查看或校验 `sunpack_config.json`。
+- `config`：查看或校验简化配置与高级配置合并后的有效配置。
 
 ## 通用输出参数
 
