@@ -1,10 +1,12 @@
 import json
+from pathlib import Path
 
 from smart_unpacker.contracts.detection import FactBag
 from smart_unpacker.contracts.run_context import RunContext
 from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
 from smart_unpacker.extraction.result import ExtractionResult
+from smart_unpacker.repair.result import RepairResult
 from smart_unpacker.verification import VerificationScheduler
 
 
@@ -49,6 +51,37 @@ def test_partial_extraction_manifest_produces_accept_partial_assessment(tmp_path
     assert verification.completeness == 0.5
     assert verification.complete_files == 1
     assert verification.failed_files == 1
+
+
+def test_repair_loop_keeps_original_partial_when_repaired_attempt_is_worse(tmp_path):
+    archive = tmp_path / "broken.zip"
+    archive.write_bytes(b"broken")
+    out_dir = tmp_path / "out"
+    extractor = _TwoPartialResultsExtractor(archive)
+    runner = ExtractionBatchRunner(
+        RunContext(),
+        extractor,
+        _FakeOutputScanPolicy(),
+        config={
+            "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 1},
+            "verification": {
+                "enabled": True,
+                "methods": [{"name": "extraction_exit_signal"}, {"name": "output_presence"}],
+                "partial_min_completeness": 0.1,
+            },
+        },
+    )
+    runner.repair_stage = _OneShotRepairStage()
+
+    outcome = runner._extract_verify_with_retries(_task(archive), str(out_dir), runtime_scheduler=None)
+
+    assert outcome.success is True
+    assert outcome.verification is not None
+    assert outcome.verification.archive_coverage.complete_files == 3
+    assert (out_dir / "good-0.txt").exists()
+    assert (out_dir / "good-1.txt").exists()
+    assert (out_dir / "good-2.txt").exists()
+    assert not (out_dir / "worse-only.txt").exists()
 
 
 def test_output_presence_ignores_sunpack_manifest_files(tmp_path):
@@ -154,6 +187,89 @@ class _SingleResultExtractor:
 
     def extract(self, task, out_dir, runtime_scheduler=None):
         return self.result
+
+
+class _TwoPartialResultsExtractor:
+    password_session = None
+
+    def __init__(self, archive):
+        self.archive = archive
+        self.calls = 0
+
+    def default_output_dir_for_task(self, task):
+        return str(self.archive.with_suffix(""))
+
+    def inspect(self, task, out_dir):
+        return type("Preflight", (), {"skip_result": None})()
+
+    def extract(self, task, out_dir, runtime_scheduler=None):
+        self.calls += 1
+        out_path = Path(out_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+        if self.calls == 1:
+            files = []
+            for index in range(3):
+                path = out_path / f"good-{index}.txt"
+                path.write_text(f"good-{index}", encoding="utf-8")
+                files.append({
+                    "path": str(path),
+                    "archive_path": f"good-{index}.txt",
+                    "status": "complete",
+                    "bytes_written": 6,
+                    "expected_size": 6,
+                })
+            files.append({
+                "path": str(out_path / "bad.bin"),
+                "archive_path": "bad.bin",
+                "status": "failed",
+                "bytes_written": 0,
+                "expected_size": 10,
+            })
+        else:
+            path = out_path / "worse-only.txt"
+            path.write_text("worse", encoding="utf-8")
+            files = [
+                {"path": str(path), "archive_path": "worse-only.txt", "status": "complete", "bytes_written": 5, "expected_size": 5},
+                {"path": str(out_path / "missing-1.bin"), "archive_path": "missing-1.bin", "status": "failed", "bytes_written": 0, "expected_size": 10},
+                {"path": str(out_path / "missing-2.bin"), "archive_path": "missing-2.bin", "status": "failed", "bytes_written": 0, "expected_size": 10},
+                {"path": str(out_path / "missing-3.bin"), "archive_path": "missing-3.bin", "status": "failed", "bytes_written": 0, "expected_size": 10},
+            ]
+        manifest = _write_manifest(out_path, self.archive, files)
+        return ExtractionResult(
+            success=False,
+            archive=str(self.archive),
+            out_dir=str(out_path),
+            all_parts=[str(self.archive)],
+            error="crc error",
+            partial_outputs=True,
+            progress_manifest=str(manifest),
+            diagnostics={"result": {"failure_stage": "item_extract", "failure_kind": "checksum_error", "native_status": "damaged"}},
+        )
+
+
+class _OneShotRepairStage:
+    config = {
+        "max_repair_rounds_per_task": 1,
+        "max_repair_seconds_per_task": 120.0,
+        "max_repair_generated_files_per_task": 16,
+        "max_repair_generated_mb_per_task": 2048.0,
+    }
+
+    def __init__(self):
+        self.calls = 0
+
+    def repair_after_extraction_failure_result(self, task, result):
+        self.calls += 1
+        if self.calls > 1:
+            return None
+        repaired_input = {"kind": "file", "path": task.main_path, "format_hint": task.detected_ext}
+        return RepairResult(
+            status="repaired",
+            confidence=0.5,
+            format=task.detected_ext,
+            repaired_input=repaired_input,
+            module_name="fake_worse_repair",
+        )
 
 
 class _FakeOutputScanPolicy:

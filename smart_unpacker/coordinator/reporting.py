@@ -34,9 +34,10 @@ class RunReporter:
                 coverage = item.get("archive_coverage") if isinstance(item.get("archive_coverage"), dict) else {}
                 completeness = _percent(coverage.get("completeness", item.get("completeness", 0.0)))
                 files = _file_coverage(coverage)
+                reason = _selection_reason(item)
                 print(self.text(
-                    f" [partial] {archive}: coverage {completeness}{files} -> {item.get('out_dir', '')}",
-                    f" [partial] {archive}：覆盖度 {completeness}{files} -> {item.get('out_dir', '')}",
+                    f" [partial] {archive}: coverage {completeness}{files}{reason} -> {item.get('out_dir', '')}",
+                    f" [partial] {archive}：覆盖度 {completeness}{files}{reason} -> {item.get('out_dir', '')}",
                 ))
 
         if failed_tasks:
@@ -76,3 +77,13 @@ def _file_coverage(coverage: dict) -> str:
     if expected <= 0:
         return ""
     return f" ({complete}/{matched}/{expected} complete/matched/expected)"
+
+
+def _selection_reason(item: dict) -> str:
+    selected = item.get("selected_attempt") if isinstance(item.get("selected_attempt"), dict) else {}
+    vector = selected.get("rank_vector") if isinstance(selected.get("rank_vector"), dict) else {}
+    if not vector:
+        return ""
+    source = vector.get("source") or ""
+    decision = selected.get("decision") or ""
+    return f" [{decision or 'selected'} via {source or 'verification'}]"

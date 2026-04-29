@@ -7,41 +7,6 @@ from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.repair.result import RepairResult
 
 
-def test_repair_stage_repairs_medium_confidence_analysis(tmp_path):
-    source = tmp_path / "carrier.bin"
-    repaired = tmp_path / "repaired.zip"
-    source.write_bytes(b"shellPK")
-    repaired.write_bytes(b"PK")
-    task = _task(source)
-    task.fact_bag.set("analysis.evidences", [
-        {
-            "format": "zip",
-            "confidence": 0.62,
-            "status": "damaged",
-            "segments": [
-                {
-                    "start_offset": 5,
-                    "end_offset": None,
-                    "confidence": 0.62,
-                    "damage_flags": ["boundary_unreliable", "local_header_recovery"],
-                }
-            ],
-        }
-    ])
-    scheduler = _FakeRepairScheduler(repaired)
-    stage = ArchiveRepairStage({"repair": {"workspace": str(tmp_path / "repair")}})
-    stage.scheduler = scheduler
-
-    stage.repair_medium_confidence_tasks([task])
-
-    assert scheduler.jobs[0].format == "zip"
-    assert scheduler.jobs[0].source_input["kind"] == "file_range"
-    assert task.fact_bag.get("archive.repaired") is True
-    archive_input = task.archive_input()
-    assert archive_input.open_mode == "file"
-    assert archive_input.entry_path == str(repaired)
-
-
 def test_repair_stage_repairs_after_extraction_failure(tmp_path):
     source = tmp_path / "broken.zip"
     repaired = tmp_path / "fixed.zip"

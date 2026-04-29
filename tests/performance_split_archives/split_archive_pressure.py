@@ -170,7 +170,6 @@ def attach_pipeline_timing(runner: PipelineRunner) -> TimingRecorder:
     wrap_method(runner.batch_runner, "execute", recorder, "batch_execute")
     wrap_method(runner.batch_runner, "prepare_tasks", recorder, "prepare")
     wrap_method(runner.batch_runner.analysis_stage, "analyze_tasks", recorder, "analysis")
-    wrap_method(runner.batch_runner.repair_stage, "repair_medium_confidence_tasks", recorder, "repair_medium_confidence")
     wrap_method(runner.batch_runner.repair_stage, "repair_after_extraction_failure", recorder, "repair_after_failure")
     wrap_method(runner.batch_runner, "_execute_ready_tasks", recorder, "execute_ready")
     wrap_method(runner.batch_runner, "collect_result", recorder, "collect_result")
@@ -219,7 +218,7 @@ def timing_columns(recorder: TimingRecorder | None) -> dict[str, float | dict]:
         "batch_execute_ms": recorder.ms("batch_execute"),
         "prepare_ms": recorder.ms("prepare"),
         "analysis_ms": recorder.ms("analysis"),
-        "repair_ms": round(recorder.ms("repair_medium_confidence") + recorder.ms("repair_after_failure"), 2),
+        "repair_ms": recorder.ms("repair_after_failure"),
         "execute_ready_ms": recorder.ms("execute_ready"),
         "execute_all_wall_ms": recorder.ms("execute_all_wall"),
         "preflight_ms": recorder.ms("health_password_preflight"),

@@ -2,7 +2,7 @@ import os
 import shutil
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List
 
@@ -26,7 +26,7 @@ from smart_unpacker.extraction.scheduler import ExtractionScheduler
 from smart_unpacker.extraction.progress import filter_extraction_outputs
 from smart_unpacker.rename.scheduler import RenameScheduler
 from smart_unpacker.repair.candidate import RepairCandidate
-from smart_unpacker.verification import VerificationResult, VerificationScheduler
+from smart_unpacker.verification import RecoveryAttempt, VerificationResult, VerificationScheduler, compare_attempts, rank_attempt
 from smart_unpacker.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
 from smart_unpacker.support.path_keys import absolute_path_key
 
@@ -36,6 +36,16 @@ class BatchExtractionOutcome:
     result: ExtractionResult
     verification: VerificationResult | None = None
     attempts: int = 1
+    attempt_id: str = ""
+    attempt_source: str = "original"
+    repair_module: str = ""
+    round_index: int = 0
+    archive_state_payload: dict[str, Any] | None = None
+    patch_digest: str = ""
+    patch_lineage: list[dict[str, Any]] = field(default_factory=list)
+    recovery_rank: dict[str, Any] = field(default_factory=dict)
+    comparison: dict[str, Any] = field(default_factory=dict)
+    rejected_attempts: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -104,7 +114,6 @@ class ExtractionBatchRunner:
 
         self.prepare_tasks(tasks)
         tasks = self.analysis_stage.analyze_tasks(tasks)
-        tasks = self._settle_analysis_repair_loops(tasks)
         output_dir_resolver = self.rename_scheduler.build_output_dir_resolver(
             tasks,
             self.extractor.default_output_dir_for_task,
@@ -220,69 +229,6 @@ class ExtractionBatchRunner:
         })
         return scheduler_config
 
-    def _settle_analysis_repair_loops(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
-        max_workers = self._stage_max_workers(
-            enabled_key="parallel_repair_settle",
-            workers_key="repair_settle_max_workers",
-            task_count=len(tasks),
-            default_workers=2,
-        )
-        if max_workers > 1:
-            indexed = [_IndexedStageTask(index, task) for index, task in enumerate(tasks)]
-            results = self._execute_indexed_stage(
-                indexed,
-                max_workers=max_workers,
-                worker=lambda item: (
-                    item.index,
-                    self._settle_single_analysis_repair_loop(
-                        item.task,
-                        analysis_stage=self._parallel_analysis_stage(),
-                        repair_stage=self._parallel_repair_stage(),
-                    ),
-                ),
-            )
-            settled: list[ArchiveTask] = []
-            for _index, task_group in sorted(results, key=lambda item: item[0]):
-                settled.extend(task_group)
-            return settled
-
-        settled: list[ArchiveTask] = []
-        for task in tasks:
-            settled.extend(self._settle_single_analysis_repair_loop(task))
-        return settled
-
-    def _settle_single_analysis_repair_loop(
-        self,
-        task: ArchiveTask,
-        *,
-        analysis_stage: ArchiveAnalysisStage | None = None,
-        repair_stage: ArchiveRepairStage | None = None,
-    ) -> list[ArchiveTask]:
-        analysis_stage = analysis_stage or self.analysis_stage
-        repair_stage = repair_stage or self.repair_stage
-        current_tasks = [task]
-        settled: list[ArchiveTask] = []
-        while current_tasks:
-            current = current_tasks.pop(0)
-            state = RepairLoopState(current, self.repair_loop_limits)
-            while state.can_attempt(trigger="analysis"):
-                repair_result = repair_stage.repair_medium_confidence_task(current)
-                if repair_result is None:
-                    break
-                if not state.record_result(repair_result, trigger="analysis"):
-                    break
-                analyzed = analysis_stage.analyze_task_to_tasks(current)
-                if len(analyzed) == 1:
-                    current = analyzed[0]
-                    state = RepairLoopState(current, self.repair_loop_limits)
-                    continue
-                current_tasks.extend(analyzed)
-                current = None
-                break
-            if current is not None:
-                settled.append(current)
-        return settled
-
     def _inspect_tasks_before_extract(self, tasks: list[ArchiveTask], output_dir_resolver) -> list[tuple[int, ArchiveTask, str, Any]]:
         max_workers = self._stage_max_workers(
             enabled_key="parallel_preflight_inspect",
@@ -360,16 +306,6 @@ class ExtractionBatchRunner:
             worker_limit = int(default_workers)
         return max(1, min(int(task_count), int(self.max_workers), max(1, worker_limit)))
 
-    def _parallel_analysis_stage(self):
-        if type(self.analysis_stage) is ArchiveAnalysisStage:
-            return ArchiveAnalysisStage(self.config)
-        return self.analysis_stage
-
-    def _parallel_repair_stage(self):
-        if type(self.repair_stage) is ArchiveRepairStage:
-            return ArchiveRepairStage(self.config)
-        return self.repair_stage
-
     def _extract_verify_with_retries(
         self,
         task: ArchiveTask,
@@ -381,12 +317,27 @@ class ExtractionBatchRunner:
         cleanup_failed_output = bool(verification_config.get("cleanup_failed_output", True))
         attempts = max_verification_retries + 1
         last_outcome: BatchExtractionOutcome | None = None
+        incumbent_outcome: BatchExtractionOutcome | None = None
 
         attempt_index = 0
+        attempt_sequence = 0
         while attempt_index < attempts:
             result = self.extractor.extract(task, out_dir, runtime_scheduler=runtime_scheduler)
+            current_sequence = attempt_sequence
+            attempt_sequence += 1
             if not result.success:
                 verification = self.verifier.verify(task, result) if result.partial_outputs else None
+                current_outcome = BatchExtractionOutcome(
+                    result=result,
+                    verification=verification,
+                    attempts=attempt_index + 1,
+                )
+                self._annotate_recovery_outcome(task, current_outcome, source="original", round_index=current_sequence)
+                if verification is not None:
+                    incumbent_outcome = self._select_better_recovery_outcome(
+                        incumbent_outcome,
+                        current_outcome,
+                    )
                 state = RepairLoopState(task, self.repair_loop_limits)
                 if state.can_attempt(trigger="extraction", failure=result):
                     repair_result = self.repair_stage.repair_after_extraction_failure_result(task, result)
@@ -394,27 +345,30 @@ class ExtractionBatchRunner:
                 else:
                     can_continue = False
                 if can_continue:
+                    self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
                     shutil.rmtree(out_dir, ignore_errors=True)
                     self.analysis_stage.analyze_task(task)
                     continue
-                if verification is not None and self._accept_partial_output(result, verification):
-                    self._filter_partial_outputs(result)
-                    return BatchExtractionOutcome(
-                        result=result,
-                        verification=verification,
-                        attempts=attempt_index + 1,
-                    )
-                return BatchExtractionOutcome(result=result, verification=verification, attempts=attempt_index + 1)
+                selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir)
+                if selected is not None:
+                    return selected
+                return current_outcome
 
             verification = self.verifier.verify(task, result)
             outcome = BatchExtractionOutcome(result=result, verification=verification, attempts=attempt_index + 1)
+            self._annotate_recovery_outcome(task, outcome, source="original", round_index=current_sequence)
             if _verification_accepts(verification):
-                return outcome
+                selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir) or outcome
+                self._cleanup_shelved_outcome(incumbent_outcome, keep=selected)
+                return selected
+
+            incumbent_outcome = self._select_better_recovery_outcome(incumbent_outcome, outcome)
 
             if verification.decision_hint == DECISION_REPAIR:
                 state = RepairLoopState(task, self.repair_loop_limits)
                 if state.can_attempt(trigger="verification"):
                     if self._beam_enabled():
+                        self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
                         beam_outcome = self._repair_after_verification_with_beam(
                             task,
                             result,
@@ -424,15 +378,21 @@ class ExtractionBatchRunner:
                             state,
                         )
                         if beam_outcome is not None:
-                            return beam_outcome
+                            self._annotate_recovery_outcome(task, beam_outcome, source="beam", round_index=current_sequence)
+                            selected = self._select_better_recovery_outcome(incumbent_outcome, beam_outcome)
+                            acceptable = self._selected_acceptable_outcome(selected, beam_outcome, out_dir)
+                            if acceptable is not None:
+                                self._cleanup_shelved_outcome(incumbent_outcome, keep=acceptable)
+                                return acceptable
                     repair_result = self.repair_stage.repair_after_verification_assessment_result(task, result, verification)
                     if state.record_result(repair_result, trigger="verification"):
+                        self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
                         shutil.rmtree(out_dir, ignore_errors=True)
                         self.analysis_stage.analyze_task(task)
                         continue
-            if self._accept_partial_output(result, verification):
-                self._filter_partial_outputs(result)
-                return outcome
+            selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir)
+            if selected is not None:
+                return selected
 
             last_outcome = outcome
             if attempt_index >= max_verification_retries:
@@ -443,6 +403,9 @@ class ExtractionBatchRunner:
                 shutil.rmtree(result.out_dir, ignore_errors=True)
             attempt_index += 1
 
+        selected = self._selected_acceptable_outcome(incumbent_outcome, last_outcome, out_dir)
+        if selected is not None:
+            return selected
         return last_outcome or BatchExtractionOutcome(
             result=ExtractionResult(
                 success=False,
@@ -474,6 +437,126 @@ class ExtractionBatchRunner:
             filter_extraction_outputs(result.progress_manifest)
         except Exception:
             return
+
+    def _annotate_recovery_outcome(
+        self,
+        task: ArchiveTask,
+        outcome: BatchExtractionOutcome,
+        *,
+        source: str,
+        round_index: int = 0,
+        repair_module: str = "",
+    ) -> None:
+        if outcome.verification is None:
+            return
+        if outcome.archive_state_payload is None:
+            try:
+                state = task.archive_state()
+                outcome.archive_state_payload = state.to_dict()
+                outcome.patch_digest = state.effective_patch_digest()
+                outcome.patch_lineage = [patch.to_dict() for patch in state.patches]
+            except (TypeError, ValueError, AttributeError):
+                outcome.archive_state_payload = {}
+                outcome.patch_digest = ""
+                outcome.patch_lineage = []
+        outcome.attempt_source = source or outcome.attempt_source
+        outcome.repair_module = repair_module or outcome.repair_module
+        outcome.round_index = int(round_index or outcome.round_index or 0)
+        if not outcome.attempt_id:
+            outcome.attempt_id = _recovery_attempt_id(outcome)
+
+    def _select_better_recovery_outcome(
+        self,
+        incumbent: BatchExtractionOutcome | None,
+        challenger: BatchExtractionOutcome | None,
+    ) -> BatchExtractionOutcome | None:
+        if incumbent is None:
+            return challenger
+        if challenger is None or challenger.verification is None:
+            return incumbent
+        if incumbent.verification is None:
+            return challenger
+        incumbent_attempt = _recovery_attempt_from_outcome(incumbent)
+        challenger_attempt = _recovery_attempt_from_outcome(challenger)
+        comparison = compare_attempts(
+            [challenger_attempt],
+            incumbent=incumbent_attempt,
+            min_improvement=self._recovery_min_improvement(),
+        )
+        _apply_recovery_comparison(comparison, [incumbent, challenger])
+        if comparison.best is None:
+            return incumbent
+        return challenger if comparison.best.attempt_id == challenger_attempt.attempt_id else incumbent
+
+    def _selected_acceptable_outcome(
+        self,
+        incumbent: BatchExtractionOutcome | None,
+        challenger: BatchExtractionOutcome | None,
+        out_dir: str,
+    ) -> BatchExtractionOutcome | None:
+        selected = self._select_better_recovery_outcome(incumbent, challenger)
+        if selected is None or selected.verification is None:
+            return None
+        if not self._outcome_accepts(selected):
+            return None
+        _ensure_recovery_rank(selected)
+        self._promote_recovery_outcome(selected, out_dir)
+        if self._accept_partial_output(selected.result, selected.verification):
+            self._filter_partial_outputs(selected.result)
+        return selected
+
+    def _outcome_accepts(self, outcome: BatchExtractionOutcome) -> bool:
+        verification = outcome.verification
+        if verification is None:
+            return False
+        if outcome.result.success and _verification_accepts(verification):
+            return True
+        return self._accept_partial_output(outcome.result, verification)
+
+    def _recovery_min_improvement(self) -> float:
+        verification_config = self.verifier.config
+        try:
+            return max(0.0, float(verification_config.get("recovery_min_improvement", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _shelve_outcome_if_needed(self, outcome: BatchExtractionOutcome | None, out_dir: str) -> None:
+        if outcome is None:
+            return
+        current = Path(outcome.result.out_dir)
+        target = Path(out_dir)
+        if os.path.abspath(str(current)) != os.path.abspath(str(target)):
+            return
+        if not current.exists():
+            return
+        suffix = (outcome.attempt_id or _recovery_attempt_id(outcome))[:12]
+        held = target.with_name(f"{target.name}.incumbent_{suffix}")
+        shutil.rmtree(held, ignore_errors=True)
+        shutil.move(str(current), str(held))
+        _retarget_result_output(outcome.result, str(current), str(held))
+
+    def _promote_recovery_outcome(self, outcome: BatchExtractionOutcome, out_dir: str) -> None:
+        current = Path(outcome.result.out_dir)
+        target = Path(out_dir)
+        if os.path.abspath(str(current)) == os.path.abspath(str(target)):
+            return
+        shutil.rmtree(target, ignore_errors=True)
+        if current.exists():
+            shutil.move(str(current), str(target))
+        _retarget_result_output(outcome.result, str(current), str(target))
+
+    def _cleanup_shelved_outcome(
+        self,
+        outcome: BatchExtractionOutcome | None,
+        *,
+        keep: BatchExtractionOutcome | None = None,
+    ) -> None:
+        if outcome is None or keep is outcome:
+            return
+        path = Path(outcome.result.out_dir)
+        if ".incumbent_" not in path.name:
+            return
+        shutil.rmtree(path, ignore_errors=True)
 
     def _retry_on_verification_failure(self) -> bool:
         return bool(self.verifier.config.get("retry_on_verification_failure", True))
@@ -646,6 +729,7 @@ class ExtractionBatchRunner:
             if outcome.success:
                 self.context.success_count += 1
                 if outcome.verification is not None and outcome.verification.decision_hint == DECISION_ACCEPT_PARTIAL:
+                    _ensure_recovery_rank(outcome)
                     recovery_report = _write_recovery_report(task, outcome, out_dir)
                     self.context.partial_success_count += 1
                     self.context.recovered_outputs.append({
@@ -657,6 +741,8 @@ class ExtractionBatchRunner:
                         "archive_coverage": _coverage_payload(outcome.verification),
                         "progress_manifest": res.progress_manifest,
                         "recovery_report": recovery_report,
+                        "selected_attempt": dict(outcome.recovery_rank),
+                        "comparison": dict(outcome.comparison),
                     })
                 self.context.processed_keys.add(task.key)
                 self.context.unpacked_archives.append(res.all_parts or task.all_parts)
@@ -750,6 +836,154 @@ def _source_input_digest(source_input: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _recovery_attempt_from_outcome(outcome: BatchExtractionOutcome) -> RecoveryAttempt:
+    return RecoveryAttempt(
+        attempt_id=outcome.attempt_id or _recovery_attempt_id(outcome),
+        verification=outcome.verification,
+        extraction_result=outcome.result,
+        archive_state=dict(outcome.archive_state_payload or {}),
+        patch_digest=outcome.patch_digest,
+        patch_lineage=list(outcome.patch_lineage or []),
+        round_index=outcome.round_index,
+        source=outcome.attempt_source,
+        repair_module=outcome.repair_module,
+        patch_cost=_patch_cost(outcome.archive_state_payload or {}),
+        metadata={
+            "out_dir": outcome.result.out_dir,
+            "progress_manifest": outcome.result.progress_manifest,
+        },
+    )
+
+
+def _apply_recovery_comparison(comparison, outcomes: list[BatchExtractionOutcome | None]) -> None:
+    by_id = {
+        outcome.attempt_id or _recovery_attempt_id(outcome): outcome
+        for outcome in outcomes
+        if outcome is not None
+    }
+    rejected = [
+        _attempt_summary(attempt, comparison.ranks.get(attempt.attempt_id))
+        for attempt in comparison.rejected
+    ]
+    selected_id = comparison.best.attempt_id if comparison.best is not None else ""
+    for attempt_id, outcome in by_id.items():
+        rank = comparison.ranks.get(attempt_id)
+        if rank is not None:
+            outcome.recovery_rank = _rank_payload(rank)
+        outcome.comparison = {
+            "selected_attempt_id": selected_id,
+            "stop_reason": comparison.stop_reason,
+            "should_continue_repair": comparison.should_continue_repair,
+            "selected": _attempt_summary(comparison.best, comparison.ranks.get(selected_id)) if comparison.best is not None else {},
+        }
+        outcome.rejected_attempts = list(rejected)
+
+
+def _ensure_recovery_rank(outcome: BatchExtractionOutcome) -> None:
+    if outcome.recovery_rank or outcome.verification is None:
+        return
+    attempt = _recovery_attempt_from_outcome(outcome)
+    rank = rank_attempt(attempt)
+    outcome.recovery_rank = _rank_payload(rank)
+    outcome.comparison = {
+        "selected_attempt_id": attempt.attempt_id,
+        "stop_reason": "single_attempt",
+        "should_continue_repair": rank.decision == "continue_repair",
+        "selected": _attempt_summary(attempt, rank),
+    }
+
+
+
+
+def _rank_payload(rank) -> dict[str, Any]:
+    return {
+        "attempt_id": rank.attempt_id,
+        "rank_score": rank.rank_score,
+        "decision": rank.decision,
+        "rank_vector": dict(rank.rank_vector),
+        "reasons": list(rank.reasons),
+    }
+
+
+def _attempt_summary(attempt, rank) -> dict[str, Any]:
+    if attempt is None:
+        return {}
+    verification = attempt.verification
+    coverage = verification.archive_coverage
+    return {
+        "attempt_id": attempt.attempt_id,
+        "source": attempt.source,
+        "repair_module": attempt.repair_module,
+        "patch_digest": attempt.patch_digest,
+        "round_index": attempt.round_index,
+        "rank": _rank_payload(rank) if rank is not None else {},
+        "verification": {
+            "decision_hint": verification.decision_hint,
+            "assessment_status": verification.assessment_status,
+            "completeness": verification.completeness,
+        },
+        "archive_coverage": {
+            "completeness": coverage.completeness,
+            "expected_files": coverage.expected_files,
+            "complete_files": coverage.complete_files,
+            "partial_files": coverage.partial_files,
+            "failed_files": coverage.failed_files,
+            "missing_files": coverage.missing_files,
+        },
+    }
+
+
+def _recovery_attempt_id(outcome: BatchExtractionOutcome) -> str:
+    payload = {
+        "archive": outcome.result.archive,
+        "out_dir": outcome.result.out_dir,
+        "source": outcome.attempt_source,
+        "round_index": outcome.round_index,
+        "patch_digest": outcome.patch_digest,
+        "repair_module": outcome.repair_module,
+        "progress_manifest": outcome.result.progress_manifest,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _patch_cost(archive_state: dict[str, Any]) -> float:
+    patches = archive_state.get("patches") or archive_state.get("patch_stack") or []
+    cost = 0.0
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        operations = patch.get("operations") or []
+        cost += 0.02
+        for operation in operations:
+            if not isinstance(operation, dict):
+                continue
+            size = operation.get("size")
+            data = operation.get("data_b64") or operation.get("data") or ""
+            cost += 0.01
+            try:
+                cost += min(0.2, max(0, int(size or len(str(data)))) / (1024 * 1024 * 100))
+            except (TypeError, ValueError):
+                continue
+    return min(1.0, cost)
+
+
+def _retarget_result_output(result: ExtractionResult, old_dir: str, new_dir: str) -> None:
+    old = Path(old_dir)
+    new = Path(new_dir)
+    progress_manifest = result.progress_manifest
+    result.out_dir = str(new)
+    if not progress_manifest:
+        return
+    manifest_path = Path(progress_manifest)
+    try:
+        relative = manifest_path.relative_to(old)
+    except ValueError:
+        candidate = new / ".sunpack" / "extraction_manifest.json"
+        result.progress_manifest = str(candidate) if candidate.exists() else progress_manifest
+        return
+    result.progress_manifest = str(new / relative)
+
+
 def _coverage_payload(verification: VerificationResult) -> dict[str, Any]:
     coverage = verification.archive_coverage
     return {
@@ -793,9 +1027,12 @@ def _write_recovery_report(task: ArchiveTask, outcome: BatchExtractionOutcome, o
         "out_dir": out_dir,
         "success_kind": "partial",
         "progress_manifest": outcome.result.progress_manifest,
-        "archive_state": _archive_state_payload(task),
+        "archive_state": _archive_state_payload_for_outcome(task, outcome),
         "verification": _verification_payload(verification),
         "archive_coverage": _coverage_payload(verification),
+        "selected_attempt": dict(outcome.recovery_rank),
+        "comparison": dict(outcome.comparison),
+        "rejected_attempts": list(outcome.rejected_attempts),
         "files": _file_recovery_items(verification, manifest_path=outcome.result.progress_manifest),
     }
     target = Path(out_dir) / ".sunpack" / "recovery_report.json"
@@ -819,6 +1056,18 @@ def _archive_state_payload(task: ArchiveTask) -> dict[str, Any]:
         "source": state.source.to_dict(),
         "patch_stack": [patch.to_dict() for patch in state.patches],
     }
+
+
+def _archive_state_payload_for_outcome(task: ArchiveTask, outcome: BatchExtractionOutcome) -> dict[str, Any]:
+    if isinstance(outcome.archive_state_payload, dict) and outcome.archive_state_payload:
+        raw = dict(outcome.archive_state_payload)
+        return {
+            "patch_digest": outcome.patch_digest or str(raw.get("patch_digest") or ""),
+            "state_is_patched": bool(raw.get("patches") or raw.get("patch_stack")),
+            "source": raw.get("source") if isinstance(raw.get("source"), dict) else {},
+            "patch_stack": list(raw.get("patches") or raw.get("patch_stack") or []),
+        }
+    return _archive_state_payload(task)
 
 
 def _annotate_progress_manifest(manifest_path: str, recovery_report: dict[str, Any]) -> None:

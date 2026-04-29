@@ -148,7 +148,7 @@ class _FakeVerifier:
     config = {"max_retries": 0, "cleanup_failed_output": True}
 
     def verify(self, task, result):
-        return type("Verification", (), {"decision_hint": "accept", "assessment_status": "complete", "completeness": 1.0})()
+        return VerificationResult(decision_hint="accept", assessment_status="complete", completeness=1.0)
 
 
 class _FakeExtractor:
@@ -233,9 +233,6 @@ class _FakeRepairStage:
             "max_repair_generated_files_per_task": 16,
             "max_repair_generated_mb_per_task": 2048.0,
         }
-
-    def repair_medium_confidence_task(self, task):
-        return None
 
     def repair_after_extraction_failure_result(self, task, result):
         path = self.paths.pop(0)

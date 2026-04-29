@@ -382,6 +382,8 @@ def test_candidate_selector_prefers_validated_candidate_over_module_confidence()
 
     assert selected is validated
     assert selection["selected_module"] == "validated"
+    assert selection["generation_priority"] > 0
+    assert "score" not in selection
 
 
 def test_candidate_native_validation_uses_candidate_password_for_encrypted_archive(tmp_path, monkeypatch):
@@ -628,6 +630,13 @@ def test_repair_config_is_normalized_by_config_schema():
     assert config["repair"]["deep"]["max_entry_uncompressed_mb"] == 8.0
     assert config["repair"]["deep"]["verify_candidates"] is False
     assert config["repair"]["beam"]["enabled"] is True
+
+
+def test_repair_config_rejects_removed_analysis_repair_settings():
+    with pytest.raises(ValueError, match="trigger_on_medium_confidence"):
+        normalize_config({"repair": {"trigger_on_medium_confidence": True}})
+    with pytest.raises(ValueError, match="repair.thresholds"):
+        normalize_config({"repair": {"thresholds": {"medium_confidence_min": 0.1}}})
 
 
 def test_zip_central_directory_rebuild_repairs_missing_eocd(tmp_path):

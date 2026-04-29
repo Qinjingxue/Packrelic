@@ -25,28 +25,8 @@ class ArchiveRepairStage:
         self.config = repair_config(config or {})
         self.enabled = bool(self.config.get("enabled", True))
         self.scheduler = RepairScheduler(config or {}) if self.enabled else None
-        thresholds = self.config.get("thresholds") if isinstance(self.config.get("thresholds"), dict) else {}
-        self.medium_min = float(thresholds.get("medium_confidence_min", 0.35) or 0.35)
-        self.extractable_confidence = float(thresholds.get("extractable_confidence", 0.85) or 0.85)
         round_limit = self.config.get("max_repair_rounds_per_task", self.config.get("max_attempts_per_task", 3))
         self.max_attempts_per_task = max(0, int(round_limit or 0))
-
-    def repair_medium_confidence_tasks(self, tasks: list[ArchiveTask]) -> None:
-        if not self.enabled or self.scheduler is None or not self.config.get("trigger_on_medium_confidence", True):
-            return
-        for task in tasks:
-            self.repair_medium_confidence_task(task)
-
-    def repair_medium_confidence_task(self, task: ArchiveTask) -> RepairResult | None:
-        if not self.enabled or self.scheduler is None or not self.config.get("trigger_on_medium_confidence", True):
-            return None
-        evidence = self._medium_confidence_evidence(task)
-        if evidence is None:
-            return None
-        job = self._job_from_analysis(task, evidence)
-        if job is None:
-            return None
-        return self._run_and_apply(task, job, trigger="analysis")
 
     def repair_after_extraction_failure(self, task: ArchiveTask, result: ExtractionResult) -> bool:
         repair_result = self.repair_after_extraction_failure_result(task, result)
@@ -100,33 +80,6 @@ class ArchiveRepairStage:
             task.fact_bag.set("archive.password", job.password)
         task.fact_bag.set("archive.repaired", True)
         return result
-
-    def _job_from_analysis(self, task: ArchiveTask, evidence: ArchiveFormatEvidence) -> RepairJob | None:
-        source_input = self._source_input_for_evidence(task, evidence)
-        if source_input is None:
-            return None
-        flags = self._damage_flags_from_evidence(evidence)
-        return RepairJob(
-            source_input=source_input,
-            format=self._normalize_format(evidence.format),
-            confidence=float(evidence.confidence),
-            analysis_evidence=evidence,
-            analysis_prepass=self._analysis_prepass(task),
-            fuzzy_profile=self._analysis_fuzzy_profile(task),
-            damage_flags=flags,
-            password=self._password_from_task(task),
-            archive_key=task.key,
-            workspace=str(self._workspace_root()),
-            attempts=self._attempts(task),
-            source_descriptor=ArchiveInputDescriptor.from_any(
-                source_input,
-                archive_path=task.main_path,
-                part_paths=list(task.all_parts or []),
-                format_hint=self._normalize_format(evidence.format),
-                logical_name=str(task.logical_name or ""),
-            ),
-            archive_state=task.archive_state(),
-        )
 
     def _job_from_extraction_failure(self, task: ArchiveTask, result: ExtractionResult) -> RepairJob | None:
         source_input = self._source_input_from_task(task)
@@ -219,44 +172,6 @@ class ArchiveRepairStage:
             source_descriptor=task.archive_input(),
             archive_state=task.archive_state(),
         )
-
-    def _medium_confidence_evidence(self, task: ArchiveTask) -> ArchiveFormatEvidence | None:
-        evidences = [
-            evidence
-            for evidence in self._analysis_evidences_from_facts(task)
-            if self.medium_min <= evidence.confidence < self.extractable_confidence
-            and evidence.status in {"weak", "damaged", "extractable"}
-            and (evidence.segments or self._damage_flags_from_evidence(evidence))
-        ]
-        if not evidences:
-            return None
-        return max(evidences, key=lambda item: item.confidence)
-
-    def _source_input_for_evidence(self, task: ArchiveTask, evidence: ArchiveFormatEvidence) -> dict[str, Any] | None:
-        current_source = task.archive_state().to_archive_input_descriptor()
-        current_parts = current_source.part_paths() or list(task.all_parts or [task.main_path])
-        current_entry = current_source.entry_path or task.main_path
-        if evidence.segments:
-            segment = evidence.segments[0]
-            if len(current_parts) > 1:
-                ranges = self._logical_range_to_file_ranges(
-                    current_parts,
-                    int(segment.start_offset),
-                    int(segment.end_offset) if segment.end_offset is not None else None,
-                )
-                if ranges:
-                    return {"kind": "concat_ranges", "ranges": ranges, "format_hint": evidence.format}
-            if int(segment.start_offset) > 0 or segment.end_offset is not None:
-                payload: dict[str, Any] = {
-                    "kind": "file_range",
-                    "path": current_entry,
-                    "start": int(segment.start_offset),
-                    "format_hint": evidence.format,
-                }
-                if segment.end_offset is not None:
-                    payload["end"] = int(segment.end_offset)
-                return payload
-        return self._source_input_from_task(task, format_hint=evidence.format)
 
     def _source_input_from_task(self, task: ArchiveTask, *, format_hint: str = "") -> dict[str, Any] | None:
         descriptor = task.archive_state().to_archive_input_descriptor()
@@ -489,27 +404,6 @@ class ArchiveRepairStage:
         text = str(fmt or "").lower().lstrip(".")
         aliases = {"gz": "gzip", "bz2": "bzip2", "seven_zip": "7z"}
         return aliases.get(text, text or "unknown")
-
-    def _logical_range_to_file_ranges(self, parts: list[str], start: int, end: int | None) -> list[dict[str, Any]]:
-        ranges = []
-        cursor = 0
-        for path in parts:
-            try:
-                size = Path(path).stat().st_size
-            except OSError:
-                return []
-            part_start = cursor
-            part_end = cursor + size
-            cursor = part_end
-            if start >= part_end:
-                continue
-            if end is not None and end <= part_start:
-                break
-            local_start = max(start, part_start) - part_start
-            local_end = size if end is None else min(end, part_end) - part_start
-            if local_end > local_start:
-                ranges.append({"path": path, "start": int(local_start), "end": int(local_end)})
-        return ranges
 
     def _result_payload(self, result: RepairResult) -> dict[str, Any]:
         payload = asdict(result)

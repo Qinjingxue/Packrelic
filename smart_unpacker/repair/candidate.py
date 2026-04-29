@@ -132,15 +132,15 @@ class CandidateSelector:
                 "message": "no accepted repair candidates",
                 "warnings": _selection_warnings(validated),
             }
-        scored = [(self._score(candidate), candidate) for candidate in accepted]
+        scored = [(self.generation_priority(candidate), candidate) for candidate in accepted]
         scored.sort(key=lambda item: item[0], reverse=True)
-        score, selected = scored[0]
+        priority, selected = scored[0]
         return selected, {
             "candidate_count": len(validated),
             "accepted_count": len(accepted),
             "selected_module": selected.module_name,
             "selected_format": selected.format,
-            "score": score,
+            "generation_priority": priority,
             "validations": [
                 {
                     "name": validation.name,
@@ -304,27 +304,29 @@ class CandidateSelector:
         return bool(candidate.repaired_input) and not candidate.is_lazy and all(item.accepted for item in candidate.validations)
 
     @staticmethod
-    def _score(candidate: RepairCandidate) -> float:
+    def generation_priority(candidate: RepairCandidate) -> float:
         confidence = _clamp01(float(candidate.confidence or 0.0))
         score_hint = _clamp01(float(candidate.score_hint or 0.0))
         native_validation = _native_validation(candidate.validations)
         validation_score = max([_clamp01(float(item.score or 0.0)) for item in candidate.validations] or [0.0])
 
         if native_validation is not None and not _native_validation_skipped(native_validation):
-            score = confidence * 0.1
-            score += _native_validation_strength(native_validation) * 0.85
-            score += validation_score * 0.04
+            score = confidence * 0.06
+            score += _native_validation_strength(native_validation) * 0.6
+            score += validation_score * 0.06
         else:
-            score = confidence * 0.86
-            score += validation_score * 0.09
-        score += score_hint * 0.05
+            score = confidence * 0.45
+            score += validation_score * 0.1
+        score += score_hint * 0.12
+        score += _patch_plan_priority(candidate) * 0.18
+        score += _module_generation_bias(candidate)
         if candidate.stage == "deep":
-            score -= 0.12
+            score -= 0.08
         if candidate.partial:
-            score -= 0.02
+            score -= 0.01
         if _content_damage_candidate(candidate) and not candidate.partial and native_validation is None:
             score = min(score, 0.45)
-        return score
+        return _clamp01(score)
 
 
 def _selection_warnings(candidates: list[RepairCandidate]) -> list[str]:
@@ -416,6 +418,49 @@ def _content_damage_candidate(candidate: RepairCandidate) -> bool:
         "corrupted_data",
         "data_error",
     } & {str(flag) for flag in candidate.damage_flags})
+
+
+def _patch_plan_priority(candidate: RepairCandidate) -> float:
+    plan = candidate.plan if isinstance(candidate.plan, dict) else {}
+    archive_state = plan.get("archive_state") if isinstance(plan.get("archive_state"), dict) else {}
+    patches = archive_state.get("patches") or archive_state.get("patch_stack") or []
+    if not patches and plan:
+        return 0.5
+    if not patches:
+        return 0.25
+    operation_count = 0
+    byte_cost = 0
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        for operation in patch.get("operations") or []:
+            if not isinstance(operation, dict):
+                continue
+            operation_count += 1
+            try:
+                byte_cost += max(0, int(operation.get("size") or 0))
+            except (TypeError, ValueError):
+                pass
+            data = operation.get("data_b64") or operation.get("data") or ""
+            byte_cost += len(str(data))
+    complexity = min(0.7, operation_count * 0.08 + byte_cost / (1024 * 1024 * 50))
+    return _clamp01(0.85 - complexity)
+
+
+def _module_generation_bias(candidate: RepairCandidate) -> float:
+    module_name = str(candidate.module_name or "")
+    if module_name == "zip64_field_repair":
+        return 0.16
+    if module_name == "zip_eocd_repair":
+        return 0.12
+    if module_name == "seven_zip_crc_field_repair":
+        return 0.1
+    if module_name == "zip_central_directory_rebuild":
+        flags = {str(flag) for flag in candidate.damage_flags}
+        if "eocd_bad" in flags and not (flags & {"central_directory_bad", "directory_integrity_bad_or_unknown", "local_header_recovery"}):
+            return 0.0
+        return 0.08
+    return 0.0
 
 
 def _native_validation_skipped(validation: CandidateValidation) -> bool:

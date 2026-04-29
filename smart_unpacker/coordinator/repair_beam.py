@@ -15,14 +15,12 @@ from smart_unpacker.verification.result import (
     ASSESSMENT_PARTIAL,
     ASSESSMENT_UNUSABLE,
     DECISION_ACCEPT,
-    DECISION_ACCEPT_PARTIAL,
-    DECISION_FAIL,
     DECISION_NONE,
     DECISION_REPAIR,
-    DECISION_RETRY_EXTRACT,
     SOURCE_INTEGRITY_UNKNOWN,
     VerificationResult,
 )
+from smart_unpacker.verification.comparison import score_verification_payload
 
 
 AnalyzeFn = Callable[[RepairCandidate], dict[str, Any]]
@@ -287,7 +285,7 @@ class RepairBeamLoop:
 
 
 def _candidate_pre_score(candidate: RepairCandidate, state: RepairBeamState) -> float:
-    selector_score = CandidateSelector._score(candidate)
+    selector_score = CandidateSelector.generation_priority(candidate)
     progress_score = _candidate_progress_score(candidate)
     prior_score = min(1.0, max(0.0, state.score)) * 0.03
     prior_completeness = min(1.0, max(0.0, state.completeness)) * 0.04
@@ -460,7 +458,7 @@ def _with_assessment(item: RepairBeamCandidate, assessment: VerificationResult |
     payload = _assessment_payload(assessment)
     if not payload:
         return item
-    score = _score_with_assessment(item.score, payload)
+    score = _verification_score_with_assessment(item.score, payload)
     return RepairBeamCandidate(
         state=item.state,
         candidate=item.candidate,
@@ -481,6 +479,23 @@ def _assessment_payload(assessment: VerificationResult | dict[str, Any] | None) 
             "assessment_status": assessment.assessment_status,
             "source_integrity": assessment.source_integrity,
             "decision_hint": assessment.decision_hint,
+            "archive_coverage": {
+                "completeness": assessment.archive_coverage.completeness,
+                "file_coverage": assessment.archive_coverage.file_coverage,
+                "byte_coverage": assessment.archive_coverage.byte_coverage,
+                "expected_files": assessment.archive_coverage.expected_files,
+                "matched_files": assessment.archive_coverage.matched_files,
+                "complete_files": assessment.archive_coverage.complete_files,
+                "partial_files": assessment.archive_coverage.partial_files,
+                "failed_files": assessment.archive_coverage.failed_files,
+                "missing_files": assessment.archive_coverage.missing_files,
+                "unverified_files": assessment.archive_coverage.unverified_files,
+                "expected_bytes": assessment.archive_coverage.expected_bytes,
+                "matched_bytes": assessment.archive_coverage.matched_bytes,
+                "complete_bytes": assessment.archive_coverage.complete_bytes,
+                "confidence": assessment.archive_coverage.confidence,
+                "sources": list(assessment.archive_coverage.sources),
+            },
             "complete_files": assessment.complete_files,
             "partial_files": assessment.partial_files,
             "failed_files": assessment.failed_files,
@@ -500,28 +515,9 @@ def _assessment_payload(assessment: VerificationResult | dict[str, Any] | None) 
     return payload
 
 
-def _score_with_assessment(base_score: float, assessment: dict[str, Any]) -> float:
-    completeness = _clamp01(float(assessment.get("completeness", 0.0) or 0.0))
-    upper_bound = _clamp01(float(assessment.get("recoverable_upper_bound", 1.0) or 1.0))
-    decision = str(assessment.get("decision_hint") or DECISION_NONE)
-    status = str(assessment.get("assessment_status") or assessment.get("status") or "")
-    score = min(1.0, max(0.0, base_score)) * 0.35
-    score += completeness * 0.55
-    score += min(completeness, upper_bound) * 0.1
-    score += {
-        DECISION_ACCEPT: 0.35,
-        DECISION_ACCEPT_PARTIAL: 0.2,
-        DECISION_REPAIR: 0.04,
-        DECISION_RETRY_EXTRACT: -0.05,
-        DECISION_FAIL: -0.45,
-    }.get(decision, 0.0)
-    score += {
-        ASSESSMENT_COMPLETE: 0.18,
-        ASSESSMENT_PARTIAL: 0.08,
-        ASSESSMENT_INCONSISTENT: -0.12,
-        ASSESSMENT_UNUSABLE: -0.35,
-    }.get(status, 0.0)
-    return score
+def _verification_score_with_assessment(base_score: float, assessment: dict[str, Any]) -> float:
+    verification_score = score_verification_payload(assessment)
+    return verification_score + min(1.0, max(0.0, base_score)) * 0.01
 
 
 def _candidate_progress_score(candidate: RepairCandidate) -> float:
@@ -539,7 +535,7 @@ def _candidate_progress_score(candidate: RepairCandidate) -> float:
 
 
 def _state_accepted(state: RepairBeamState) -> bool:
-    if state.decision_hint in {DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL}:
+    if state.decision_hint == DECISION_ACCEPT:
         return True
     return state.assessment_status == ASSESSMENT_COMPLETE
 
@@ -555,7 +551,3 @@ def _top_states(states: list[RepairBeamState], limit: int) -> list[RepairBeamSta
         if len(output) >= max(1, int(limit or 1)):
             break
     return output
-
-
-def _clamp01(value: float) -> float:
-    return min(1.0, max(0.0, value))

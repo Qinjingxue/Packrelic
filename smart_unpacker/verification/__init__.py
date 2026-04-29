@@ -9,6 +9,14 @@ from smart_unpacker.verification.result import (
     VerificationStepResult,
 )
 from smart_unpacker.verification.scheduler import VerificationScheduler
+from smart_unpacker.verification.comparison import (
+    RecoveryAttempt,
+    RecoveryComparisonResult,
+    RecoveryRank,
+    compare_attempts,
+    rank_attempt,
+    rank_attempts,
+)
 
 
 __all__ = [
@@ -20,5 +28,11 @@ __all__ = [
     "VerificationScheduler",
     "VerificationStepRecord",
     "VerificationStepResult",
+    "RecoveryAttempt",
+    "RecoveryComparisonResult",
+    "RecoveryRank",
+    "compare_attempts",
+    "rank_attempt",
+    "rank_attempts",
     "register_verification_method",
 ]

@@ -185,6 +185,13 @@ def _emit_verbose_recovery_details(reporter, summary) -> None:
         report_path = str(item.get("recovery_report") or "")
         report = _read_recovery_report(report_path)
         files = [file for file in report.get("files") or [] if isinstance(file, dict)]
+        selected = report.get("selected_attempt") if isinstance(report.get("selected_attempt"), dict) else {}
+        comparison = report.get("comparison") if isinstance(report.get("comparison"), dict) else {}
+        if selected:
+            reporter.detail(_selected_attempt_label(item, selected, comparison))
+        rejected = [entry for entry in report.get("rejected_attempts") or [] if isinstance(entry, dict)]
+        for entry in rejected[:5]:
+            reporter.detail(_rejected_attempt_label(entry))
         if not files:
             continue
         reporter.detail(f"[CLI] Partial recovery files for {item.get('archive', '')}:")
@@ -205,6 +212,44 @@ def _read_recovery_report(path: str) -> dict:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _selected_attempt_label(item: dict, selected: dict, comparison: dict) -> str:
+    vector = selected.get("rank_vector") if isinstance(selected.get("rank_vector"), dict) else {}
+    reasons = selected.get("reasons") if isinstance(selected.get("reasons"), list) else []
+    reason_label = ", ".join(_reason_label(reason) for reason in reasons[:3] if isinstance(reason, dict))
+    stop_reason = comparison.get("stop_reason") or ""
+    score = selected.get("rank_score")
+    try:
+        score_label = f"{float(score):.3f}"
+    except (TypeError, ValueError):
+        score_label = str(score or "")
+    return (
+        f"[CLI] Selected recovery attempt for {item.get('archive', '')}: "
+        f"{selected.get('decision', 'selected')} score={score_label} "
+        f"source={vector.get('source', 'verification')} stop={stop_reason}"
+        + (f" ({reason_label})" if reason_label else "")
+    )
+
+
+def _rejected_attempt_label(entry: dict) -> str:
+    rank = entry.get("rank") if isinstance(entry.get("rank"), dict) else {}
+    vector = rank.get("rank_vector") if isinstance(rank.get("rank_vector"), dict) else {}
+    coverage = entry.get("archive_coverage") if isinstance(entry.get("archive_coverage"), dict) else {}
+    return (
+        "[CLI] Rejected recovery attempt: "
+        f"source={entry.get('source', '')} module={entry.get('repair_module', '')} "
+        f"decision={rank.get('decision', '')} completeness={coverage.get('completeness', '')} "
+        f"complete_files={coverage.get('complete_files', '')} failed_missing={vector.get('failed_missing_files', '')}"
+    )
+
+
+def _reason_label(reason: dict) -> str:
+    code = str(reason.get("code") or "")
+    value = reason.get("value")
+    if isinstance(value, float):
+        value = f"{value:.3f}"
+    return f"{code}={value}"
 
 
 def _file_size_label(file: dict) -> str:

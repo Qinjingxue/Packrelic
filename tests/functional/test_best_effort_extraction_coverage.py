@@ -804,6 +804,9 @@ def test_recovery_report_schema_contract_for_partial_result(tmp_path):
 
     _assert_recovery_report_schema(report)
     assert report["archive_coverage"]["completeness"] == pytest.approx(0.75, abs=0.02)
+    assert report["selected_attempt"]["decision"] == "keep_partial"
+    assert report["selected_attempt"]["rank_vector"]["completeness"] == pytest.approx(0.75, abs=0.02)
+    assert report["comparison"]["selected_attempt_id"] == report["selected_attempt"]["attempt_id"]
     assert any(item["archive_path"] == "bad.bin" and item["failure_kind"] for item in report["files"])
 
 
@@ -2040,7 +2043,7 @@ def _archive_input_for_file(path: Path, format_hint: str) -> ArchiveInputDescrip
 
 def _assert_recovery_report_schema(report: dict) -> None:
     assert report["version"] == 1
-    for field in ("archive", "out_dir", "success_kind", "verification", "archive_coverage", "files"):
+    for field in ("archive", "out_dir", "success_kind", "verification", "archive_coverage", "selected_attempt", "comparison", "files"):
         assert field in report
     coverage = report["archive_coverage"]
     for field in (
@@ -2340,9 +2343,6 @@ class _TerminalMissingVolumeRepairStage:
 
     def __init__(self):
         self.calls = 0
-
-    def repair_medium_confidence_task(self, task):
-        return None
 
     def repair_after_extraction_failure_result(self, task, result):
         self.calls += 1

@@ -143,6 +143,36 @@ def test_repair_beam_run_stops_on_accepted_state():
     assert result.best_state.history[-1]["module"] == "complete"
 
 
+def test_repair_beam_does_not_stop_on_accept_partial_before_next_round_improves():
+    scheduler = _SequencedCandidateScheduler([
+        [_candidate("partial_round_1", confidence=0.9)],
+        [_candidate("complete_round_2", confidence=0.3)],
+    ])
+
+    def assess(item):
+        complete = item.candidate.module_name == "complete_round_2"
+        return {
+            "assessment_status": "complete" if complete else "partial",
+            "decision_hint": "accept" if complete else "accept_partial",
+            "completeness": 1.0 if complete else 0.6,
+            "recoverable_upper_bound": 1.0,
+        }
+
+    result = RepairBeamLoop(
+        scheduler,
+        beam_width=1,
+        max_analyze_candidates=1,
+        max_assess_candidates=1,
+        assess=assess,
+    ).run([
+        RepairBeamState(source_input={"kind": "file", "path": "broken.zip"}, format="zip", archive_key="broken")
+    ], max_rounds=2)
+
+    assert len(result.rounds) == 2
+    assert result.best_state is not None
+    assert result.best_state.history[-1]["module"] == "complete_round_2"
+
+
 def test_repair_beam_builds_from_repair_config():
     scheduler = _FakeCandidateScheduler([_candidate("one", confidence=0.5)])
 
@@ -229,6 +259,17 @@ class _FakeCandidateScheduler:
     def generate_repair_candidates(self, job):
         self.jobs.append(job)
         return RepairCandidateBatch(candidates=list(self.candidates), diagnosis={"format": job.format, "confidence": job.confidence})
+
+
+class _SequencedCandidateScheduler:
+    def __init__(self, rounds):
+        self.rounds = list(rounds)
+        self.jobs = []
+
+    def generate_repair_candidates(self, job):
+        self.jobs.append(job)
+        index = min(len(self.jobs) - 1, len(self.rounds) - 1)
+        return RepairCandidateBatch(candidates=list(self.rounds[index]), diagnosis={"format": job.format, "confidence": job.confidence})
 
 
 class _FakeLazyCandidateScheduler:

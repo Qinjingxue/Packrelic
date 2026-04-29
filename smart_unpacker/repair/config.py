@@ -12,12 +12,7 @@ DEFAULT_REPAIR_CONFIG = {
     "max_repair_seconds_per_task": 120.0,
     "max_repair_generated_files_per_task": 16,
     "max_repair_generated_mb_per_task": 2048.0,
-    "trigger_on_medium_confidence": True,
     "trigger_on_extraction_failure": True,
-    "thresholds": {
-        "medium_confidence_min": 0.35,
-        "extractable_confidence": 0.85,
-    },
     "stages": {
         "targeted": True,
         "safe_repair": True,
@@ -111,6 +106,10 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
         value = {}
     if not isinstance(value, dict):
         raise ValueError("repair must be an object")
+    if "trigger_on_medium_confidence" in value:
+        raise ValueError("repair.trigger_on_medium_confidence was removed; repair now runs after extraction verification")
+    if "thresholds" in value:
+        raise ValueError("repair.thresholds was removed; analysis confidence no longer triggers repair directly")
     config = _merge(DEFAULT_REPAIR_CONFIG, value)
     config["enabled"] = _bool_value(config.get("enabled", True), "repair.enabled")
     config["workspace"] = str(config.get("workspace") or ".smart_unpacker_repair")
@@ -121,15 +120,10 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
     config["max_repair_seconds_per_task"] = _float_at_least(config, "max_repair_seconds_per_task", 0.0)
     config["max_repair_generated_files_per_task"] = _int_at_least(config, "max_repair_generated_files_per_task", 0)
     config["max_repair_generated_mb_per_task"] = _float_at_least(config, "max_repair_generated_mb_per_task", 0.0)
-    config["trigger_on_medium_confidence"] = _bool_value(
-        config.get("trigger_on_medium_confidence", True),
-        "repair.trigger_on_medium_confidence",
-    )
     config["trigger_on_extraction_failure"] = _bool_value(
         config.get("trigger_on_extraction_failure", True),
         "repair.trigger_on_extraction_failure",
     )
-    config["thresholds"] = _normalize_thresholds(config.get("thresholds"))
     config["stages"] = _normalize_bool_map(config.get("stages"), "repair.stages")
     config["safety"] = _normalize_safety(config.get("safety"))
     config["deep"] = _normalize_deep(config.get("deep"))
@@ -164,20 +158,6 @@ def _merge(base: dict, override: dict) -> dict:
         else:
             result[key] = deepcopy(value)
     return result
-
-
-def _normalize_thresholds(value: Any) -> dict[str, float]:
-    if not isinstance(value, dict):
-        raise ValueError("repair.thresholds must be an object")
-    medium = _float_at_least(value, "medium_confidence_min", 0.0)
-    extractable = _float_at_least(value, "extractable_confidence", 0.0)
-    if medium > extractable:
-        raise ValueError("repair.thresholds.medium_confidence_min must be <= extractable_confidence")
-    return {
-        **value,
-        "medium_confidence_min": medium,
-        "extractable_confidence": extractable,
-    }
 
 
 def _normalize_bool_map(value: Any, path: str) -> dict[str, bool]:
