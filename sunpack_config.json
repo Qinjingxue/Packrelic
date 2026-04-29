@@ -18,11 +18,11 @@
       {
         "name": "blacklist",
         "enabled": true,
-        "patterns": ["\\.git", "\\.vscode", "^\\$RECYCLE\\.BIN"],
-        "prune_dirs": [
-          "^\\.git$", "^\\.vscode$", "^__pycache__$", "^node_modules$",
-          "^site-packages$", "^\\.venv$", "^venv$", "^env$",
-          "^\\.cache$", "^repositories$"
+        "path_globs": [".git/**", ".vscode/**", "$RECYCLE.BIN/**"],
+        "prune_dir_globs": [
+          ".git", ".vscode", "__pycache__", "node_modules",
+          "site-packages", ".venv", "venv", "env",
+          ".cache", "repositories"
         ],
         "blocked_extensions": [
           ".dll", ".save", ".py", ".pyc", ".json", ".xml", ".cfg", ".ini",

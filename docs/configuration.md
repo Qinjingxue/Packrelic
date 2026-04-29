@@ -88,9 +88,11 @@ CLI 可用 `--recur` 临时覆盖。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `patterns` | `list[str]` | 路径正则，命中后阻止扫描。 |
-| `prune_dirs` | `list[str]` | 目录正则，命中后剪枝整个子树。 |
+| `path_globs` | `list[str]` | 路径 glob，使用 `/` 作为分隔符，例如 `.git/**`、`$RECYCLE.BIN/**`。 |
+| `prune_dir_globs` | `list[str]` | 目录名 glob，命中后剪枝整个子树，例如 `.venv`、`node_modules`。 |
 | `blocked_extensions` | `list[str]` | 阻止扫描的文件扩展名。 |
+
+高级兼容字段 `patterns` 和 `prune_dirs` 仍按正则读取，但默认配置不再使用它们。
 
 `size_minimum`：
 

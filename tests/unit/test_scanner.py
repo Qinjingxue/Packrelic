@@ -146,6 +146,46 @@ def test_directory_scanner_blacklist_prunes_directory(tmp_path):
     assert "keep.zip" in names
 
 
+def test_directory_scanner_blacklist_supports_path_globs(tmp_path):
+    blocked_dir = tmp_path / "$RECYCLE.BIN"
+    blocked_dir.mkdir()
+    (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
+    (tmp_path / "keep.zip").write_bytes(b"PK\x03\x04payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "blacklist", "enabled": True, "path_globs": ["$RECYCLE.BIN/**"]},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "$RECYCLE.BIN" not in names
+    assert "payload.zip" not in names
+    assert "keep.zip" in names
+
+
+def test_directory_scanner_blacklist_supports_prune_dir_globs(tmp_path):
+    blocked_dir = tmp_path / "node_modules"
+    blocked_dir.mkdir()
+    (blocked_dir / "payload.zip").write_bytes(b"PK\x03\x04payload")
+    (tmp_path / "keep.zip").write_bytes(b"PK\x03\x04payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "blacklist", "enabled": True, "prune_dir_globs": ["node_*"]},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "node_modules" not in names
+    assert "payload.zip" not in names
+    assert "keep.zip" in names
+
+
 def test_directory_scanner_blacklist_prune_dirs_is_directory_only(tmp_path):
     blocked_dir = tmp_path / "site-packages"
     blocked_dir.mkdir()

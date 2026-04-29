@@ -9,9 +9,15 @@ class BlacklistScanFilter:
     name = "blacklist"
     stage = "path"
 
-    def __init__(self, patterns=None, blocked_extensions=None, prune_dirs=None):
-        self.patterns = [str(pattern) for pattern in (patterns or []) if isinstance(pattern, str)]
-        self.prune_dirs = [str(pattern) for pattern in (prune_dirs or []) if isinstance(pattern, str)]
+    def __init__(self, patterns=None, blocked_extensions=None, prune_dirs=None, path_globs=None, prune_dir_globs=None):
+        self.patterns = [
+            *[str(pattern) for pattern in (patterns or []) if isinstance(pattern, str)],
+            *[_path_glob_to_regex(pattern) for pattern in (path_globs or []) if isinstance(pattern, str) and pattern.strip()],
+        ]
+        self.prune_dirs = [
+            *[str(pattern) for pattern in (prune_dirs or []) if isinstance(pattern, str)],
+            *[_dir_glob_to_regex(pattern) for pattern in (prune_dir_globs or []) if isinstance(pattern, str) and pattern.strip()],
+        ]
         self.blocked_extensions = {
             ext if ext.startswith(".") else f".{ext}"
             for ext in (str(item).strip().lower() for item in (blocked_extensions or []))
@@ -24,6 +30,8 @@ class BlacklistScanFilter:
             patterns=config.get("patterns") or [],
             blocked_extensions=config.get("blocked_extensions") or [],
             prune_dirs=config.get("prune_dirs") or [],
+            path_globs=config.get("path_globs") or [],
+            prune_dir_globs=config.get("prune_dir_globs") or [],
         )
 
     def evaluate(self, candidate: ScanCandidate) -> ScanDecision:
@@ -55,3 +63,43 @@ class BlacklistScanFilter:
 
     def _matches(self, pattern: str, candidates: list[str]) -> bool:
         return any(re.search(pattern, item, re.IGNORECASE) for item in candidates)
+
+
+def _normalize_glob(value: str) -> str:
+    return str(value).strip().replace("\\", "/").strip("/")
+
+
+def _glob_body_to_regex(value: str) -> str:
+    output = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "*":
+            if index + 1 < len(value) and value[index + 1] == "*":
+                output.append(".*")
+                index += 2
+                continue
+            output.append("[^/]*")
+        elif char == "?":
+            output.append("[^/]")
+        else:
+            output.append(re.escape(char))
+        index += 1
+    return "".join(output)
+
+
+def _path_glob_to_regex(value: str) -> str:
+    glob = _normalize_glob(value)
+    if not glob:
+        return r"a\A"
+    if glob.endswith("/**"):
+        base = glob[:-3].rstrip("/")
+        return rf"(^|/){_glob_body_to_regex(base)}($|/.*)"
+    return rf"(^|/){_glob_body_to_regex(glob)}($|/)"
+
+
+def _dir_glob_to_regex(value: str) -> str:
+    glob = _normalize_glob(value).rstrip("/")
+    if not glob:
+        return r"a\A"
+    return rf"^{_glob_body_to_regex(glob)}$"
