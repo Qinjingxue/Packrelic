@@ -925,17 +925,17 @@ def test_repair_terminal_missing_volume_feedback_stops_later_repairs(tmp_path):
         _NoNestedOutputScanPolicy(),
         config={
             "repair": {"enabled": True, "workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 3},
-            "verification": {"enabled": True, "methods": []},
+            "verification": {"enabled": True, "methods": [{"name": "extraction_exit_signal"}]},
         },
     )
-    repair_stage = _TerminalMissingVolumeRepairStage()
-    runner.repair_stage = repair_stage
+    repair_scheduler = _TerminalMissingVolumeRepairScheduler()
+    runner.repair_stage.scheduler = repair_scheduler
     task = _task(archive, detected_ext="7z")
 
     outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
 
     assert outcome.success is False
-    assert repair_stage.calls == 1
+    assert repair_scheduler.calls == 1
     assert task.fact_bag.get("repair.loop.terminal_reason") == "repair_unrepairable"
     terminal = task.fact_bag.get("repair.loop.terminal")
     assert terminal["module"] == "missing_volume_classifier"
@@ -1214,6 +1214,7 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
             "enabled": True,
             "workspace": str(tmp_path / "repair"),
             "max_repair_rounds_per_task": 1,
+            "beam": {"max_rounds": 1},
         },
         "verification": {
             "enabled": True,
@@ -1228,8 +1229,8 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
     }
     extractor = _StructureFailureThenWorkerExtractor(repaired_archive)
     runner = ExtractionBatchRunner(RunContext(), extractor, _NoNestedOutputScanPolicy(), config=config)
-    repair_stage = _ApplyRepairedArchiveStage(repaired_archive)
-    runner.repair_stage = repair_stage
+    repair_scheduler = _ApplyRepairedArchiveScheduler(repaired_archive)
+    runner.repair_stage.scheduler = repair_scheduler
     task = _task(archive)
 
     outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
@@ -1240,7 +1241,7 @@ def test_batch_flow_repair_structure_then_accepts_best_effort_payload_partial(tm
     assert outcome.success is True
     assert outcome.result.partial_outputs is True
     assert extractor.calls == 2
-    assert repair_stage.calls == 1
+    assert repair_scheduler.calls == 1
     assert runner.context.partial_success_count == 1
     assert report["success_kind"] == "partial"
     assert report["archive"].endswith(archive.name)
@@ -2121,25 +2122,30 @@ class _StructureFailureThenWorkerExtractor:
         )
 
 
-class _ApplyRepairedArchiveStage:
-    config = {
-        "max_repair_rounds_per_task": 1,
-        "max_repair_seconds_per_task": 120.0,
-        "max_repair_generated_files_per_task": 16,
-        "max_repair_generated_mb_per_task": 2048.0,
-    }
-
+class _ApplyRepairedArchiveScheduler:
     def __init__(self, repaired_archive: Path):
         self.repaired_archive = repaired_archive
         self.calls = 0
 
-    def repair_after_extraction_failure_result(self, task, result):
+    def generate_repair_candidates(self, job, *, lazy=False):
         self.calls += 1
         repaired_input = {"kind": "file", "path": str(self.repaired_archive), "format_hint": "zip"}
-        task.set_archive_input(repaired_input)
-        task.fact_bag.set("archive.repaired", True)
-        task.fact_bag.set("repair.status", "repaired")
-        task.fact_bag.set("repair.module", "fake_structure_repair")
+        return RepairCandidateBatch(candidates=[
+            RepairCandidate(
+                module_name="fake_structure_repair",
+                format="zip",
+                repaired_input=repaired_input,
+                status="repaired",
+                stage="targeted",
+                confidence=0.95,
+                actions=["apply_repaired_archive_for_best_effort_loop_test"],
+                workspace_paths=[str(self.repaired_archive)],
+            )
+        ])
+
+    def repair(self, job):
+        self.calls += 1
+        repaired_input = {"kind": "file", "path": str(self.repaired_archive), "format_hint": "zip"}
         return RepairResult(
             status="repaired",
             confidence=0.95,
@@ -2333,18 +2339,11 @@ class _NoopExtractor:
         raise AssertionError("noop extractor should not be called")
 
 
-class _TerminalMissingVolumeRepairStage:
-    config = {
-        "max_repair_rounds_per_task": 3,
-        "max_repair_seconds_per_task": 120.0,
-        "max_repair_generated_files_per_task": 16,
-        "max_repair_generated_mb_per_task": 2048.0,
-    }
-
+class _TerminalMissingVolumeRepairScheduler:
     def __init__(self):
         self.calls = 0
 
-    def repair_after_extraction_failure_result(self, task, result):
+    def generate_repair_candidates(self, job, *, lazy=False):
         self.calls += 1
         repair = RepairResult(
             status="unrepairable",
@@ -2361,16 +2360,7 @@ class _TerminalMissingVolumeRepairStage:
             },
             message="split archive is missing a required tail volume",
         )
-        task.fact_bag.set("repair.last_result", {
-            "status": repair.status,
-            "module": repair.module_name,
-            "diagnosis": dict(repair.diagnosis),
-            "message": repair.message,
-        })
-        return repair
-
-    def repair_after_verification_assessment_result(self, task, result, verification):
-        return None
+        return RepairCandidateBatch(terminal_result=repair)
 
 
 class _MissingVolumePartialExtractor:

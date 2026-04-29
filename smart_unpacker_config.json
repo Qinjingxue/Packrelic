@@ -68,7 +68,6 @@
     "keep_candidates": false,
     "max_modules_per_job": 4,
     "max_attempts_per_task": 1,
-    "trigger_on_extraction_failure": true,
     "stages": {
       "targeted": true,
       "safe_repair": true,
@@ -87,6 +86,13 @@
       "max_output_size_mb": 2048,
       "max_entry_uncompressed_mb": 512,
       "verify_candidates": true
+    },
+    "auto_deep": {
+      "enabled": true,
+      "require_verification_repair": true,
+      "max_modules": 2,
+      "max_candidates_per_module": 1,
+      "max_input_size_mb": 128
     },
     "beam": {
       "enabled": true,

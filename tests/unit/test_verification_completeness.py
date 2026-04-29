@@ -257,8 +257,9 @@ class _OneShotRepairStage:
 
     def __init__(self):
         self.calls = 0
+        self.scheduler = None
 
-    def repair_after_extraction_failure_result(self, task, result):
+    def repair_after_verification_assessment_result(self, task, result, verification):
         self.calls += 1
         if self.calls > 1:
             return None
@@ -285,7 +286,9 @@ class _NoCandidateRepairStage:
         "max_repair_generated_mb_per_task": 2048.0,
     }
 
-    def repair_after_extraction_failure_result(self, task, result):
+    scheduler = None
+
+    def repair_after_verification_assessment_result(self, task, result, verification):
         return None
 
 

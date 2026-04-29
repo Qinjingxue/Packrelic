@@ -112,6 +112,7 @@ class RepairBeamRound:
     candidates: list[RepairBeamCandidate]
     states_out: list[RepairBeamState]
     accepted_states: list[RepairBeamState] = field(default_factory=list)
+    terminal_results: list[Any] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ class RepairBeamRunResult:
     rounds: list[RepairBeamRound]
     states: list[RepairBeamState]
     accepted_states: list[RepairBeamState]
+    terminal_results: list[Any] = field(default_factory=list)
 
     @property
     def best_state(self) -> RepairBeamState | None:
@@ -175,29 +177,44 @@ class RepairBeamLoop:
         frontier = list(states)
         rounds: list[RepairBeamRound] = []
         accepted: list[RepairBeamState] = []
+        terminal_results: list[Any] = []
         best_completeness = max([float(state.completeness or 0.0) for state in frontier] or [0.0])
         for round_index in range(1, max(0, int(max_rounds or 0)) + 1):
             if not frontier:
                 break
             round_result = self.expand_round(frontier, round_index=round_index)
             rounds.append(round_result)
+            terminal_results.extend(round_result.terminal_results)
             accepted.extend(round_result.accepted_states)
             if round_result.accepted_states:
-                return RepairBeamRunResult(rounds=rounds, states=round_result.states_out, accepted_states=_top_states(accepted, self.beam_width))
+                return RepairBeamRunResult(
+                    rounds=rounds,
+                    states=round_result.states_out,
+                    accepted_states=_top_states(accepted, self.beam_width),
+                    terminal_results=terminal_results,
+                )
             next_best = max([float(state.completeness or 0.0) for state in round_result.states_out] or [0.0])
             if round_index > 1 and next_best <= best_completeness + self.min_improvement:
                 break
             best_completeness = max(best_completeness, next_best)
             frontier = round_result.states_out
-        return RepairBeamRunResult(rounds=rounds, states=frontier, accepted_states=_top_states(accepted, self.beam_width))
+        return RepairBeamRunResult(
+            rounds=rounds,
+            states=frontier,
+            accepted_states=_top_states(accepted, self.beam_width),
+            terminal_results=terminal_results,
+        )
 
     def expand_round(self, states: list[RepairBeamState], *, round_index: int) -> RepairBeamRound:
         raw_candidates: list[RepairBeamCandidate] = []
+        terminal_results: list[Any] = []
         for state in states:
             try:
                 batch = self.scheduler.generate_repair_candidates(state.to_job(), lazy=True)
             except TypeError:
                 batch = self.scheduler.generate_repair_candidates(state.to_job())
+            if batch.terminal_result is not None:
+                terminal_results.append(batch.terminal_result)
             candidates = list(batch.candidates)
             if self.max_candidates_per_state is not None:
                 candidates = candidates[: max(0, int(self.max_candidates_per_state))]
@@ -231,6 +248,7 @@ class RepairBeamLoop:
             candidates=assessed,
             states_out=states_out,
             accepted_states=accepted_states,
+            terminal_results=terminal_results,
         )
 
     def _states_from_candidates(self, candidates: list[RepairBeamCandidate], *, round_index: int) -> list[RepairBeamState]:

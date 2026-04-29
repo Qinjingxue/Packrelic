@@ -31,9 +31,22 @@ class RepairScheduler:
         if batch.candidates:
             selected, selection = selector.select(_with_job_password_candidates(batch.candidates, job))
             if selected is not None:
-                return selected.to_result(selection=selection)
+                result = selected.to_result(selection=selection)
+                if warnings:
+                    result = replace(result, warnings=_dedupe([*result.warnings, *warnings]))
+                return result
             warnings.extend(selection.get("warnings") or [])
             warnings.append("repair candidates were produced but none passed selection")
+            if self._auto_deep_should_escalate(job) and not _batch_used_auto_deep(batch):
+                auto_batch = self._generate_auto_deep_candidates(job)
+                warnings.extend(auto_batch.warnings)
+                if auto_batch.candidates:
+                    selected, selection = selector.select(_with_job_password_candidates(auto_batch.candidates, job))
+                    if selected is not None:
+                        result = selected.to_result(selection=selection)
+                        return replace(result, warnings=_dedupe([*result.warnings, *warnings]))
+                    warnings.extend(selection.get("warnings") or [])
+                    warnings.append("auto_deep candidates were produced but none passed selection")
         diagnosis = batch.diagnosis
         return RepairResult(
             status="unrepairable",
@@ -62,22 +75,113 @@ class RepairScheduler:
             )
 
         modules, capability = self._select_modules(job, diagnosis, context)
+        auto_deep_attempted = False
         if not modules:
-            status = "unrepairable" if capability.automatic_unrepairable else "unsupported"
-            result = self._result(status, job, diagnosis, capability.message(), capability)
-            return RepairCandidateBatch(
-                terminal_result=result,
-                diagnosis=result.diagnosis,
-                message=result.message,
-            )
+            if self._auto_deep_should_escalate(job):
+                auto_deep_attempted = True
+                modules, capability = self._select_modules(job, diagnosis, context, auto_deep=True)
+            if not modules:
+                status = "unrepairable" if capability.automatic_unrepairable else "unsupported"
+                result = self._result(status, job, diagnosis, capability.message(), capability)
+                return RepairCandidateBatch(
+                    terminal_result=result,
+                    diagnosis=result.diagnosis,
+                    message=result.message,
+                )
 
         workspace = self._workspace_for(job)
         workspace.mkdir(parents=True, exist_ok=True)
         module_configs = enabled_module_configs(self.config)
-        warnings = []
+        repair_candidates, warnings, capability = self._run_modules(
+            job,
+            diagnosis,
+            modules,
+            capability,
+            workspace,
+            module_configs,
+            lazy=lazy,
+            auto_deep=auto_deep_attempted,
+        )
+        if not repair_candidates and not auto_deep_attempted and self._auto_deep_should_escalate(job):
+            auto_modules, auto_capability = self._select_modules(job, diagnosis, context, auto_deep=True)
+            if auto_modules:
+                auto_candidates, auto_warnings, auto_capability = self._run_modules(
+                    job,
+                    diagnosis,
+                    auto_modules,
+                    auto_capability,
+                    workspace,
+                    module_configs,
+                    lazy=lazy,
+                    auto_deep=True,
+                )
+                repair_candidates.extend(auto_candidates)
+                warnings.extend(auto_warnings)
+                capability = auto_capability
+                auto_deep_attempted = True
+        repair_candidates = [
+            replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability))
+            for candidate in repair_candidates
+        ]
+        if auto_deep_attempted:
+            warnings.append("auto_deep: escalated to limited deep repair after primary stages produced no candidates")
+        return RepairCandidateBatch(
+            candidates=repair_candidates,
+            warnings=_dedupe(warnings),
+            diagnosis=_with_capability_diagnosis(diagnosis.as_dict(), capability),
+            message="registered repair modules did not produce a candidate",
+        )
+
+    def _generate_auto_deep_candidates(self, job: RepairJob, *, lazy: bool = False) -> RepairCandidateBatch:
+        diagnosis = self.diagnose(job)
+        context = build_repair_context(job, diagnosis)
+        modules, capability = self._select_modules(job, diagnosis, context, auto_deep=True)
+        if not modules:
+            return RepairCandidateBatch(
+                diagnosis=_with_capability_diagnosis(diagnosis.as_dict(), capability),
+                message=capability.message(),
+                warnings=[],
+            )
+        workspace = self._workspace_for(job)
+        workspace.mkdir(parents=True, exist_ok=True)
+        module_configs = enabled_module_configs(self.config)
+        repair_candidates, warnings, capability = self._run_modules(
+            job,
+            diagnosis,
+            modules,
+            capability,
+            workspace,
+            module_configs,
+            lazy=lazy,
+            auto_deep=True,
+        )
+        warnings.append("auto_deep: escalated to limited deep repair after primary stages produced no accepted candidates")
+        return RepairCandidateBatch(
+            candidates=[
+                replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability))
+                for candidate in repair_candidates
+            ],
+            warnings=_dedupe(warnings),
+            diagnosis=_with_capability_diagnosis(diagnosis.as_dict(), capability),
+            message="registered repair modules did not produce a candidate",
+        )
+
+    def _run_modules(
+        self,
+        job: RepairJob,
+        diagnosis: RepairDiagnosis,
+        modules,
+        capability: RepairCapabilityDecision,
+        workspace: Path,
+        module_configs: dict[str, dict[str, Any]],
+        *,
+        lazy: bool,
+        auto_deep: bool = False,
+    ) -> tuple[list[RepairCandidate], list[str], RepairCapabilityDecision]:
+        warnings: list[str] = []
         repair_candidates: list[RepairCandidate] = []
         for score, module, route_score in modules:
-            module_config = self._module_runtime_config(module.spec.name, module_configs)
+            module_config = self._module_runtime_config(module.spec.name, module_configs, auto_deep=auto_deep)
             if lazy:
                 repair_candidates.append(_lazy_module_candidate(
                     module,
@@ -144,24 +248,24 @@ class RepairScheduler:
                 execution_warnings=result.warnings,
             )
             warnings.extend(result.warnings)
-        repair_candidates = [
-            replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability))
-            for candidate in repair_candidates
-        ]
-        return RepairCandidateBatch(
-            candidates=repair_candidates,
-            warnings=_dedupe(warnings),
-            diagnosis=_with_capability_diagnosis(diagnosis.as_dict(), capability),
-            message="registered repair modules did not produce a candidate",
-        )
+        return repair_candidates, warnings, capability
 
-    def _select_modules(self, job: RepairJob, diagnosis: RepairDiagnosis, context: RepairContext):
+    def _select_modules(
+        self,
+        job: RepairJob,
+        diagnosis: RepairDiagnosis,
+        context: RepairContext,
+        *,
+        auto_deep: bool = False,
+    ):
         enabled = enabled_module_configs(self.config)
         registry = get_repair_module_registry()
         candidates = []
         decisions: list[ModuleCapabilityDecision] = []
         for name, module in registry.all().items():
             if name not in enabled:
+                continue
+            if auto_deep and module.spec.stage != "deep":
                 continue
             reasons: list[str] = []
             declarative_reasons: list[str] = []
@@ -182,12 +286,12 @@ class RepairScheduler:
                 decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
                 continue
             stages = self.config.get("stages", {}) if isinstance(self.config.get("stages"), dict) else {}
-            if not stages.get(module.spec.stage, True):
+            if not auto_deep and not stages.get(module.spec.stage, True):
                 reasons.append("stage_disabled")
                 policy_reasons.append("stage_disabled")
                 decisions.append(_module_decision(module, format_supported, reasons, declarative_reasons, policy_reasons, dynamic_reasons, route_score=route_score))
                 continue
-            module_config = self._module_runtime_config(name, enabled)
+            module_config = self._module_runtime_config(name, enabled, auto_deep=auto_deep)
             safety_reasons = self._safety_reasons(module, module_config)
             if safety_reasons:
                 reasons.extend(safety_reasons)
@@ -232,7 +336,7 @@ class RepairScheduler:
             ))
             candidates.append((score, module, route_score))
         candidates.sort(key=lambda item: self._module_sort_key(item[0], item[1], item[2]))
-        limit = max(1, int(self.config.get("max_modules_per_job", 4) or 4))
+        limit = self._module_limit(auto_deep=auto_deep)
         selected_names = {module.spec.name for _, module, _ in candidates[:limit]}
         if selected_names:
             decisions = [
@@ -358,7 +462,30 @@ class RepairScheduler:
             return True
         return size <= int(max_mb * 1024 * 1024)
 
-    def _module_runtime_config(self, name: str, module_configs: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    def _auto_deep_should_escalate(self, job: RepairJob) -> bool:
+        auto_deep = self.config.get("auto_deep") if isinstance(self.config.get("auto_deep"), dict) else {}
+        if not bool(auto_deep.get("enabled", True)):
+            return False
+        stages = self.config.get("stages") if isinstance(self.config.get("stages"), dict) else {}
+        if bool(stages.get("deep", True)):
+            return False
+        if bool(auto_deep.get("require_verification_repair", True)) and not _verification_requests_repair(job):
+            return False
+        return True
+
+    def _module_limit(self, *, auto_deep: bool = False) -> int:
+        if auto_deep:
+            auto_config = self.config.get("auto_deep") if isinstance(self.config.get("auto_deep"), dict) else {}
+            return max(1, int(auto_config.get("max_modules", 2) or 2))
+        return max(1, int(self.config.get("max_modules_per_job", 4) or 4))
+
+    def _module_runtime_config(
+        self,
+        name: str,
+        module_configs: dict[str, dict[str, Any]],
+        *,
+        auto_deep: bool = False,
+    ) -> dict[str, Any]:
         config = dict(module_configs.get(name, {}))
         safety = dict(self.config.get("safety") or {})
         if isinstance(config.get("safety"), dict):
@@ -366,6 +493,18 @@ class RepairScheduler:
         deep = dict(self.config.get("deep") or {})
         if isinstance(config.get("deep"), dict):
             deep.update(config["deep"])
+        if auto_deep:
+            auto_config = self.config.get("auto_deep") if isinstance(self.config.get("auto_deep"), dict) else {}
+            deep["auto_deep"] = True
+            deep["max_candidates_per_module"] = _min_positive_int(
+                deep.get("max_candidates_per_module"),
+                auto_config.get("max_candidates_per_module"),
+                default=1,
+            )
+            deep["max_input_size_mb"] = _min_positive_float(
+                deep.get("max_input_size_mb"),
+                auto_config.get("max_input_size_mb"),
+            )
         config["safety"] = safety
         config["deep"] = deep
         return config
@@ -437,6 +576,18 @@ def _with_capability_diagnosis(
     return payload
 
 
+def _batch_used_auto_deep(batch: RepairCandidateBatch) -> bool:
+    if any("auto_deep" in str(warning) for warning in batch.warnings):
+        return True
+    for candidate in batch.candidates:
+        deep = candidate.diagnosis.get("deep") if isinstance(candidate.diagnosis, dict) else {}
+        if isinstance(deep, dict) and deep.get("auto_deep"):
+            return True
+        if candidate.stage == "deep" and any("auto_deep" in str(action) for action in candidate.actions):
+            return True
+    return False
+
+
 def _record_module_feedback(
     capability: RepairCapabilityDecision,
     module_name: str,
@@ -497,6 +648,52 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _verification_requests_repair(job: RepairJob) -> bool:
+    payloads = []
+    if isinstance(job.extraction_failure, dict):
+        payloads.append(job.extraction_failure)
+        nested = job.extraction_failure.get("verification")
+        if isinstance(nested, dict):
+            payloads.append(nested)
+    if isinstance(job.extraction_diagnostics, dict):
+        payloads.append(job.extraction_diagnostics)
+        nested = job.extraction_diagnostics.get("verification")
+        if isinstance(nested, dict):
+            payloads.append(nested)
+    for payload in payloads:
+        if str(payload.get("decision_hint") or "").lower() == "repair":
+            return True
+    return False
+
+
+def _min_positive_int(left: Any, right: Any, *, default: int) -> int:
+    values = []
+    for value in (left, right):
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            values.append(number)
+    if not values:
+        return default
+    return min(values)
+
+
+def _min_positive_float(left: Any, right: Any) -> float:
+    values = []
+    for value in (left, right):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            values.append(number)
+    if not values:
+        return 0.0
+    return min(values)
 
 
 def _intersects(left, right) -> bool:

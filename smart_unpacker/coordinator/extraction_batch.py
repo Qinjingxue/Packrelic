@@ -75,6 +75,21 @@ class _IndexedStageTask:
         return self.task.all_parts
 
 
+@dataclass
+class _BeamRepairEvaluation:
+    candidate: RepairCandidate
+    result: ExtractionResult
+    verification: VerificationResult
+    temp_dir: str
+    repair_result: Any
+    outcome: BatchExtractionOutcome
+
+
+@dataclass
+class _BeamRepairTerminal:
+    repair_result: Any
+
+
 class ExtractionBatchRunner:
     def __init__(
         self,
@@ -326,29 +341,39 @@ class ExtractionBatchRunner:
             current_sequence = attempt_sequence
             attempt_sequence += 1
             if not result.success:
-                verification = self.verifier.verify(task, result) if result.partial_outputs else None
+                verification = self.verifier.verify(task, result)
                 current_outcome = BatchExtractionOutcome(
                     result=result,
                     verification=verification,
                     attempts=attempt_index + 1,
                 )
                 self._annotate_recovery_outcome(task, current_outcome, source="original", round_index=current_sequence)
-                if verification is not None:
-                    incumbent_outcome = self._select_better_recovery_outcome(
-                        incumbent_outcome,
-                        current_outcome,
-                    )
-                state = RepairLoopState(task, self.repair_loop_limits)
-                if state.can_attempt(trigger="extraction", failure=result):
-                    repair_result = self.repair_stage.repair_after_extraction_failure_result(task, result)
-                    can_continue = state.record_result(repair_result, trigger="extraction")
-                else:
-                    can_continue = False
-                if can_continue:
-                    self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
-                    shutil.rmtree(out_dir, ignore_errors=True)
-                    self.analysis_stage.analyze_task(task)
-                    continue
+                incumbent_outcome = self._select_better_recovery_outcome(
+                    incumbent_outcome,
+                    current_outcome,
+                )
+                if _verification_accepts(verification):
+                    selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir)
+                    if selected is not None:
+                        return selected
+                if verification.decision_hint == DECISION_REPAIR:
+                    state = RepairLoopState(task, self.repair_loop_limits)
+                    if state.can_attempt(trigger="verification", failure=result):
+                        handled = self._repair_after_verification_decision_with_beam(
+                            task,
+                            result,
+                            verification,
+                            out_dir,
+                            runtime_scheduler,
+                            state,
+                            incumbent_outcome,
+                            current_sequence,
+                        )
+                        if isinstance(handled, BatchExtractionOutcome):
+                            self._cleanup_shelved_outcome(incumbent_outcome, keep=handled)
+                            return handled
+                        if handled:
+                            continue
                 selected = self._selected_acceptable_outcome(incumbent_outcome, current_outcome, out_dir)
                 if selected is not None:
                     return selected
@@ -369,27 +394,27 @@ class ExtractionBatchRunner:
                 if state.can_attempt(trigger="verification"):
                     if self._beam_enabled():
                         self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
-                        beam_outcome = self._repair_after_verification_with_beam(
+                        beam_evaluation = self._repair_after_verification_with_beam(
                             task,
                             result,
                             verification,
                             out_dir,
                             runtime_scheduler,
-                            state,
                         )
-                        if beam_outcome is not None:
-                            self._annotate_recovery_outcome(task, beam_outcome, source="beam", round_index=current_sequence)
-                            selected = self._select_better_recovery_outcome(incumbent_outcome, beam_outcome)
-                            acceptable = self._selected_acceptable_outcome(selected, beam_outcome, out_dir)
-                            if acceptable is not None:
-                                self._cleanup_shelved_outcome(incumbent_outcome, keep=acceptable)
-                                return acceptable
-                    repair_result = self.repair_stage.repair_after_verification_assessment_result(task, result, verification)
-                    if state.record_result(repair_result, trigger="verification"):
-                        self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
-                        shutil.rmtree(out_dir, ignore_errors=True)
-                        self.analysis_stage.analyze_task(task)
-                        continue
+                        if beam_evaluation is not None:
+                            handled = self._handle_beam_evaluation(
+                                task,
+                                beam_evaluation,
+                                incumbent_outcome,
+                                out_dir,
+                                state,
+                                current_sequence,
+                            )
+                            if isinstance(handled, BatchExtractionOutcome):
+                                self._cleanup_shelved_outcome(incumbent_outcome, keep=handled)
+                                return handled
+                            if handled:
+                                continue
             selected = self._selected_acceptable_outcome(incumbent_outcome, outcome, out_dir)
             if selected is not None:
                 return selected
@@ -565,7 +590,7 @@ class ExtractionBatchRunner:
         beam = self.repair_stage.config.get("beam") if isinstance(self.repair_stage.config.get("beam"), dict) else {}
         return bool(beam.get("enabled", False)) and self.repair_stage.scheduler is not None
 
-    def _repair_after_verification_with_beam(
+    def _repair_after_verification_decision_with_beam(
         self,
         task: ArchiveTask,
         result: ExtractionResult,
@@ -573,7 +598,42 @@ class ExtractionBatchRunner:
         out_dir: str,
         runtime_scheduler: ConcurrencyScheduler,
         loop_state: RepairLoopState,
-    ) -> BatchExtractionOutcome | None:
+        incumbent_outcome: BatchExtractionOutcome | None,
+        round_index: int,
+    ) -> BatchExtractionOutcome | bool:
+        if not self._beam_enabled():
+            return False
+        self._shelve_outcome_if_needed(incumbent_outcome, out_dir)
+        beam_evaluation = self._repair_after_verification_with_beam(
+            task,
+            result,
+            verification,
+            out_dir,
+            runtime_scheduler,
+        )
+        if isinstance(beam_evaluation, _BeamRepairTerminal):
+            loop_state.record_result(beam_evaluation.repair_result, trigger="verification_beam")
+            return False
+        if beam_evaluation is None:
+            loop_state.stop("repair_no_patch_plan_candidates", trigger="verification_beam")
+            return False
+        return self._handle_beam_evaluation(
+            task,
+            beam_evaluation,
+            incumbent_outcome,
+            out_dir,
+            loop_state,
+            round_index,
+        )
+
+    def _repair_after_verification_with_beam(
+        self,
+        task: ArchiveTask,
+        result: ExtractionResult,
+        verification: VerificationResult,
+        out_dir: str,
+        runtime_scheduler: ConcurrencyScheduler,
+    ) -> _BeamRepairEvaluation | _BeamRepairTerminal | None:
         scheduler = self.repair_stage.scheduler
         if scheduler is None:
             return None
@@ -608,6 +668,10 @@ class ExtractionBatchRunner:
         run = beam.run([initial], max_rounds=max_rounds)
         best = run.best_state
         if best is None:
+            terminal_result = _first_terminal_repair_result(run.terminal_results)
+            if terminal_result is not None:
+                task.fact_bag.set("repair.last_result", self.repair_stage._result_payload(terminal_result))
+                return _BeamRepairTerminal(repair_result=terminal_result)
             self._cleanup_beam_evaluations(evaluated)
             return None
 
@@ -617,6 +681,11 @@ class ExtractionBatchRunner:
             self._cleanup_beam_evaluations(evaluated)
             return None
         candidate, extracted, assessed, temp_dir = selected
+        self._cleanup_beam_evaluations({
+            key: value
+            for key, value in evaluated.items()
+            if key != digest
+        })
         repair_result = candidate.to_result(selection={
             "strategy": "beam",
             "score": best.score,
@@ -624,21 +693,121 @@ class ExtractionBatchRunner:
             "decision_hint": assessed.decision_hint,
             "archive_coverage": _coverage_payload(assessed),
         })
-        if not loop_state.record_result(repair_result, trigger="verification_beam"):
-            self._cleanup_beam_evaluations(evaluated)
-            return None
+        outcome = BatchExtractionOutcome(
+            result=extracted,
+            verification=assessed,
+            attempts=1,
+            repair_module=candidate.module_name,
+            archive_state_payload=self._archive_state_payload_for_candidate(task, candidate),
+        )
+        if outcome.archive_state_payload:
+            outcome.patch_digest = str(outcome.archive_state_payload.get("patch_digest") or "")
+            outcome.patch_lineage = list(outcome.archive_state_payload.get("patches") or outcome.archive_state_payload.get("patch_stack") or [])
+        return _BeamRepairEvaluation(
+            candidate=candidate,
+            result=extracted,
+            verification=assessed,
+            temp_dir=temp_dir,
+            repair_result=repair_result,
+            outcome=outcome,
+        )
+
+    def _handle_beam_evaluation(
+        self,
+        task: ArchiveTask,
+        evaluation: _BeamRepairEvaluation,
+        incumbent_outcome: BatchExtractionOutcome | None,
+        out_dir: str,
+        loop_state: RepairLoopState,
+        round_index: int,
+    ) -> BatchExtractionOutcome | bool:
+        beam_outcome = evaluation.outcome
+        self._annotate_recovery_outcome(
+            task,
+            beam_outcome,
+            source="beam",
+            round_index=round_index,
+            repair_module=evaluation.candidate.module_name,
+        )
+        selected = self._select_better_recovery_outcome(incumbent_outcome, beam_outcome)
+        if selected is not beam_outcome:
+            loop_state.stop("no_repair_improvement", trigger="verification_beam", result=evaluation.repair_result)
+            self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+                evaluation.candidate,
+                evaluation.result,
+                evaluation.verification,
+                evaluation.temp_dir,
+            )})
+            return False
+        self._apply_beam_candidate_to_task(task, evaluation.candidate)
+        if not loop_state.record_result(evaluation.repair_result, trigger="verification_beam"):
+            self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+                evaluation.candidate,
+                evaluation.result,
+                evaluation.verification,
+                evaluation.temp_dir,
+            )})
+            return False
         self.analysis_stage.analyze_task(task)
 
-        if _verification_accepts(assessed):
-            final_result = self._promote_beam_output(extracted, temp_dir, out_dir)
-            self._cleanup_beam_evaluations(evaluated, keep=temp_dir)
-            if self._accept_partial_output(final_result, assessed):
-                self._filter_partial_outputs(final_result)
-            return BatchExtractionOutcome(result=final_result, verification=assessed, attempts=1)
+        if _verification_accepts(evaluation.verification):
+            if self._accept_partial_output(evaluation.result, evaluation.verification):
+                self._filter_partial_outputs(evaluation.result)
+            final_result = self._promote_beam_output(evaluation.result, evaluation.temp_dir, out_dir)
+            beam_outcome.result = final_result
+            self._promote_recovery_outcome(beam_outcome, out_dir)
+            return beam_outcome
 
-        self._cleanup_beam_evaluations(evaluated)
+        if not bool(beam_outcome.comparison.get("should_continue_repair", True)):
+            loop_state.stop("no_repair_improvement", trigger="verification_beam", result=evaluation.repair_result)
+            self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+                evaluation.candidate,
+                evaluation.result,
+                evaluation.verification,
+                evaluation.temp_dir,
+            )})
+            return False
+
+        self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
+            evaluation.candidate,
+            evaluation.result,
+            evaluation.verification,
+            evaluation.temp_dir,
+        )})
         shutil.rmtree(out_dir, ignore_errors=True)
-        return None
+        return True
+
+    def _apply_beam_candidate_to_task(self, task: ArchiveTask, candidate: RepairCandidate) -> None:
+        state = self._archive_state_for_candidate(task, candidate)
+        if state is not None:
+            task.set_archive_state(state)
+        else:
+            task.set_archive_input(candidate.repaired_input)
+        task.fact_bag.set("archive.repaired", True)
+        task.fact_bag.set("repair.module", candidate.module_name)
+
+    def _archive_state_payload_for_candidate(self, task: ArchiveTask, candidate: RepairCandidate) -> dict[str, Any]:
+        state = self._archive_state_for_candidate(task, candidate)
+        return state.to_dict() if state is not None else {}
+
+    def _archive_state_for_candidate(self, task: ArchiveTask, candidate: RepairCandidate) -> ArchiveState | None:
+        archive_state = candidate.plan.get("archive_state") if isinstance(candidate.plan, dict) else None
+        if isinstance(archive_state, dict):
+            try:
+                return ArchiveState.from_any(
+                    archive_state,
+                    archive_path=task.main_path,
+                    part_paths=list(task.all_parts or [task.main_path]),
+                    format_hint=str(candidate.format or task.detected_ext or ""),
+                    logical_name=str(task.logical_name or ""),
+                    archive_input=task.fact_bag.get("archive.input"),
+                )
+            except (TypeError, ValueError):
+                return None
+        descriptor = self.repair_stage._descriptor_from_repaired_input(task, candidate.repaired_input)
+        if descriptor is None:
+            return None
+        return ArchiveState.from_archive_input(descriptor)
 
     def _assess_beam_candidate(
         self,
@@ -877,6 +1046,13 @@ def _apply_recovery_comparison(comparison, outcomes: list[BatchExtractionOutcome
             "selected": _attempt_summary(comparison.best, comparison.ranks.get(selected_id)) if comparison.best is not None else {},
         }
         outcome.rejected_attempts = list(rejected)
+
+
+def _first_terminal_repair_result(results: list[Any]):
+    for result in results:
+        if result is not None and not getattr(result, "ok", False):
+            return result
+    return None
 
 
 def _ensure_recovery_rank(outcome: BatchExtractionOutcome) -> None:

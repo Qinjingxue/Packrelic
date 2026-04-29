@@ -170,7 +170,7 @@ def attach_pipeline_timing(runner: PipelineRunner) -> TimingRecorder:
     wrap_method(runner.batch_runner, "execute", recorder, "batch_execute")
     wrap_method(runner.batch_runner, "prepare_tasks", recorder, "prepare")
     wrap_method(runner.batch_runner.analysis_stage, "analyze_tasks", recorder, "analysis")
-    wrap_method(runner.batch_runner.repair_stage, "repair_after_extraction_failure", recorder, "repair_after_failure")
+    wrap_method(runner.batch_runner.repair_stage, "repair_after_verification_assessment_result", recorder, "repair_after_verification")
     wrap_method(runner.batch_runner, "_execute_ready_tasks", recorder, "execute_ready")
     wrap_method(runner.batch_runner, "collect_result", recorder, "collect_result")
     wrap_method(runner.output_scan_policy, "scan_roots_from_outputs", recorder, "output_scan")

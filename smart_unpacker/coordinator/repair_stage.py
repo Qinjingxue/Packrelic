@@ -28,27 +28,13 @@ class ArchiveRepairStage:
         round_limit = self.config.get("max_repair_rounds_per_task", self.config.get("max_attempts_per_task", 3))
         self.max_attempts_per_task = max(0, int(round_limit or 0))
 
-    def repair_after_extraction_failure(self, task: ArchiveTask, result: ExtractionResult) -> bool:
-        repair_result = self.repair_after_extraction_failure_result(task, result)
-        return bool(repair_result and repair_result.ok)
-
-    def repair_after_extraction_failure_result(self, task: ArchiveTask, result: ExtractionResult) -> RepairResult | None:
-        if not self.enabled or self.scheduler is None or not self.config.get("trigger_on_extraction_failure", True):
-            return None
-        if result.success or self._attempts(task) >= self.max_attempts_per_task:
-            return None
-        job = self._job_from_extraction_failure(task, result)
-        if job is None:
-            return None
-        return self._run_and_apply(task, job, trigger="extraction")
-
     def repair_after_verification_assessment_result(
         self,
         task: ArchiveTask,
         result: ExtractionResult,
         verification: VerificationResult,
     ) -> RepairResult | None:
-        if not self.enabled or self.scheduler is None or not self.config.get("trigger_on_extraction_failure", True):
+        if not self.enabled or self.scheduler is None:
             return None
         if self._attempts(task) >= self.max_attempts_per_task:
             return None
@@ -80,29 +66,6 @@ class ArchiveRepairStage:
             task.fact_bag.set("archive.password", job.password)
         task.fact_bag.set("archive.repaired", True)
         return result
-
-    def _job_from_extraction_failure(self, task: ArchiveTask, result: ExtractionResult) -> RepairJob | None:
-        source_input = self._source_input_from_task(task)
-        if source_input is None:
-            return None
-        failure = self._failure_payload(task, result)
-        return RepairJob(
-            source_input=source_input,
-            format=self._format_from_task(task),
-            confidence=float(self._analysis_confidence(task) or 0.0),
-            analysis_evidence=self._analysis_evidence_from_facts(task),
-            analysis_prepass=self._analysis_prepass(task),
-            fuzzy_profile=self._analysis_fuzzy_profile(task),
-            extraction_failure=failure,
-            extraction_diagnostics=dict(result.diagnostics or {}),
-            damage_flags=self._flags_from_failure_text(result.error),
-            password=result.password_used if result.password_used is not None else self._password_from_task(task),
-            archive_key=task.key,
-            workspace=str(self._workspace_root()),
-            attempts=self._attempts(task),
-            source_descriptor=task.archive_input(),
-            archive_state=task.archive_state(),
-        )
 
     def _job_from_verification_assessment(
         self,

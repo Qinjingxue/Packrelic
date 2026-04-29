@@ -5,9 +5,10 @@ from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.repair_stage import ArchiveRepairStage
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.repair.result import RepairResult
+from smart_unpacker.verification.result import ArchiveCoverageSummary, VerificationResult
 
 
-def test_repair_stage_repairs_after_extraction_failure(tmp_path):
+def test_repair_stage_builds_job_from_verification_decision(tmp_path):
     source = tmp_path / "broken.zip"
     repaired = tmp_path / "fixed.zip"
     source.write_bytes(b"broken")
@@ -40,16 +41,22 @@ def test_repair_stage_repairs_after_extraction_failure(tmp_path):
         },
     )
 
-    assert stage.repair_after_extraction_failure(task, result) is True
+    verification = _verification("repair", 0.0)
+
+    repair_result = stage.repair_after_verification_assessment_result(task, result, verification)
+
+    assert repair_result is not None and repair_result.ok is True
     assert scheduler.jobs[0].extraction_failure["damaged"] is True
-    assert scheduler.jobs[0].extraction_failure["failure_stage"] == "archive_open"
+    assert scheduler.jobs[0].extraction_failure["status"] == "verification_failed"
+    assert scheduler.jobs[0].extraction_failure["failure_stage"] == "verification"
+    assert scheduler.jobs[0].extraction_failure["decision_hint"] == "repair"
     assert scheduler.jobs[0].extraction_failure["failure_kind"] == "structure_recognition"
     assert scheduler.jobs[0].extraction_failure["native_diagnostics"]["input_trace"]["mode"] == "file"
     assert scheduler.jobs[0].extraction_diagnostics["result"]["native_status"] == "damaged"
     assert task.archive_state().source.entry_path == str(repaired)
 
 
-def test_repair_stage_passes_partial_output_progress_to_repair_job(tmp_path):
+def test_repair_stage_passes_verification_progress_to_repair_job(tmp_path):
     source = tmp_path / "payload_bad.zip"
     repaired = tmp_path / "partial.zip"
     source.write_bytes(b"broken")
@@ -92,12 +99,18 @@ def test_repair_stage_passes_partial_output_progress_to_repair_job(tmp_path):
         },
     )
 
-    assert stage.repair_after_extraction_failure(task, result) is True
+    verification = _verification("repair", 0.5)
+
+    repair_result = stage.repair_after_verification_assessment_result(task, result, verification)
+
+    assert repair_result is not None and repair_result.ok is True
     failure = scheduler.jobs[0].extraction_failure
     assert failure["partial_outputs"] is True
     assert failure["progress_manifest"] == str(manifest)
     assert failure["files_written"] == 1
     assert failure["bytes_written"] == 128
+    assert failure["decision_hint"] == "repair"
+    assert failure["completeness"] == 0.5
     assert len(failure["complete_items"]) == 1
     assert len(failure["failed_items"]) == 1
     assert failure["output_trace"]["items"][1]["archive_path"] == "bad.bin"
@@ -127,4 +140,24 @@ def _task(path: Path) -> ArchiveTask:
         all_parts=[str(path)],
         logical_name=path.stem,
         detected_ext=path.suffix.lstrip("."),
+    )
+
+
+def _verification(decision: str, completeness: float) -> VerificationResult:
+    return VerificationResult(
+        completeness=completeness,
+        recoverable_upper_bound=1.0,
+        assessment_status="partial",
+        source_integrity="damaged",
+        decision_hint=decision,
+        archive_coverage=ArchiveCoverageSummary(
+            completeness=completeness,
+            file_coverage=completeness,
+            byte_coverage=completeness,
+            expected_files=2,
+            matched_files=1,
+            complete_files=1 if completeness else 0,
+            failed_files=1,
+            confidence=0.9,
+        ),
     )

@@ -152,6 +152,99 @@ def test_repair_scheduler_gates_deep_modules_and_passes_budget_config(tmp_path):
     assert allowed.actions == ["deep_candidates=2"]
 
 
+def test_repair_scheduler_auto_deep_escalates_after_verification_repair(tmp_path):
+    source = tmp_path / "auto-deep.zip"
+    source.write_bytes(b"x" * 4096)
+    module = _DummyDeepModule()
+
+    result = _run_dummy_repair(
+        tmp_path,
+        module,
+        source=source,
+        extraction_failure={"failure_stage": "verification", "decision_hint": "repair"},
+    )
+
+    assert result.ok is True
+    assert result.module_name == module.spec.name
+    assert result.actions == ["deep_candidates=1"]
+    assert any("auto_deep" in warning for warning in result.warnings)
+
+
+def test_repair_scheduler_auto_deep_requires_verification_repair(tmp_path):
+    source = tmp_path / "auto-deep-fail.zip"
+    source.write_bytes(b"x" * 4096)
+    module = _DummyDeepModule()
+
+    result = _run_dummy_repair(
+        tmp_path,
+        module,
+        source=source,
+        extraction_failure={"failure_stage": "verification", "decision_hint": "fail"},
+    )
+
+    assert result.status == "unsupported"
+    decision = result.diagnosis["capability_decision"]
+    assert decision["modules"][0]["policy_reasons"] == ["stage_disabled"]
+
+
+def test_repair_scheduler_auto_deep_respects_limited_input_size(tmp_path):
+    source = tmp_path / "auto-deep-large.zip"
+    source.write_bytes(b"x" * 4096)
+    module = _DummyDeepModule()
+
+    result = _run_dummy_repair(
+        tmp_path,
+        module,
+        {"auto_deep": {"max_input_size_mb": 0.001}},
+        source=source,
+        extraction_failure={"failure_stage": "verification", "decision_hint": "repair"},
+    )
+
+    assert result.status == "unsupported"
+    decision = result.diagnosis["capability_decision"]
+    assert decision["modules"][0]["policy_reasons"] == ["deep_input_size_blocked"]
+
+
+def test_repair_scheduler_auto_deep_escalates_after_candidate_rejection(tmp_path):
+    source = tmp_path / "auto-deep-rejected.zip"
+    source.write_bytes(b"x" * 4096)
+    rejected = _DummyRejectedBoundaryModule()
+    deep = _DummyDeepModule()
+    registry = get_repair_module_registry()
+    previous_rejected = registry.get(rejected.spec.name)
+    previous_deep = registry.get(deep.spec.name)
+    registry.register(rejected)
+    registry.register(deep)
+    try:
+        scheduler = RepairScheduler({
+            "repair": {
+                "workspace": str(tmp_path / "repair"),
+                "modules": [
+                    {"name": rejected.spec.name, "enabled": True},
+                    {"name": deep.spec.name, "enabled": True},
+                ],
+            }
+        })
+        result = scheduler.repair(RepairJob(
+            source_input={"kind": "file", "path": str(source)},
+            format="zip",
+            confidence=0.8,
+            damage_flags=["boundary_unreliable"],
+            archive_key="sample",
+            extraction_failure={"failure_stage": "verification", "decision_hint": "repair"},
+        ))
+    finally:
+        if previous_rejected is not None:
+            registry.register(previous_rejected)
+        if previous_deep is not None:
+            registry.register(previous_deep)
+
+    assert result.ok is True
+    assert result.module_name == deep.spec.name
+    assert result.actions == ["deep_candidates=1"]
+    assert "candidate rejected" in result.warnings
+
+
 def test_repair_scheduler_selects_best_generated_candidate(tmp_path):
     module = _DummyGeneratedCandidatesModule()
     registry = get_repair_module_registry()
@@ -618,6 +711,13 @@ def test_repair_config_is_normalized_by_config_schema():
                 "max_entry_uncompressed_mb": "8",
                 "verify_candidates": "false",
             },
+            "auto_deep": {
+                "enabled": "true",
+                "require_verification_repair": "true",
+                "max_modules": "1",
+                "max_candidates_per_module": "1",
+                "max_input_size_mb": "32",
+            },
         },
     })
 
@@ -629,6 +729,9 @@ def test_repair_config_is_normalized_by_config_schema():
     assert config["repair"]["deep"]["max_output_size_mb"] == 64.0
     assert config["repair"]["deep"]["max_entry_uncompressed_mb"] == 8.0
     assert config["repair"]["deep"]["verify_candidates"] is False
+    assert config["repair"]["auto_deep"]["enabled"] is True
+    assert config["repair"]["auto_deep"]["max_modules"] == 1
+    assert config["repair"]["auto_deep"]["max_input_size_mb"] == 32.0
     assert config["repair"]["beam"]["enabled"] is True
 
 
@@ -637,6 +740,8 @@ def test_repair_config_rejects_removed_analysis_repair_settings():
         normalize_config({"repair": {"trigger_on_medium_confidence": True}})
     with pytest.raises(ValueError, match="repair.thresholds"):
         normalize_config({"repair": {"thresholds": {"medium_confidence_min": 0.1}}})
+    with pytest.raises(ValueError, match="trigger_on_extraction_failure"):
+        normalize_config({"repair": {"trigger_on_extraction_failure": True}})
 
 
 def test_zip_central_directory_rebuild_repairs_missing_eocd(tmp_path):
@@ -1357,6 +1462,37 @@ class _DummyPartialModule:
 
 
 @dataclass
+class _DummyRejectedBoundaryModule:
+    spec = RepairModuleSpec(
+        name="dummy_rejected_boundary",
+        formats=("zip",),
+        categories=("boundary_repair",),
+    )
+
+    def can_handle(self, job, diagnosis, config):
+        return 1.0 if "boundary_repair" in diagnosis.categories else 0.0
+
+    def generate_candidates(self, job, diagnosis, workspace, config):
+        return [
+            RepairCandidate(
+                module_name=self.spec.name,
+                format=diagnosis.format,
+                repaired_input={**job.source_input, "end": 100},
+                confidence=0.9,
+                actions=["rejected_boundary"],
+                validations=[
+                    CandidateValidation(
+                        name="dummy_rejection",
+                        accepted=False,
+                        score=0.0,
+                        warnings=["candidate rejected"],
+                    )
+                ],
+            )
+        ]
+
+
+@dataclass
 class _DummyDeepModule:
     spec = RepairModuleSpec(
         name="dummy_deep_boundary",
@@ -1563,7 +1699,7 @@ def _dummy_result(module_name, job, diagnosis, workspace, *, status="repaired", 
     )
 
 
-def _run_dummy_repair(tmp_path, module, config=None, *, source=None):
+def _run_dummy_repair(tmp_path, module, config=None, *, source=None, extraction_failure=None):
     registry = get_repair_module_registry()
     registry.register(module)
     repair_config = {
@@ -1584,6 +1720,7 @@ def _run_dummy_repair(tmp_path, module, config=None, *, source=None):
         confidence=0.8,
         damage_flags=["boundary_unreliable"],
         archive_key="sample",
+        extraction_failure=extraction_failure or {},
     ))
 
 

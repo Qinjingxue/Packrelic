@@ -12,7 +12,6 @@ DEFAULT_REPAIR_CONFIG = {
     "max_repair_seconds_per_task": 120.0,
     "max_repair_generated_files_per_task": 16,
     "max_repair_generated_mb_per_task": 2048.0,
-    "trigger_on_extraction_failure": True,
     "stages": {
         "targeted": True,
         "safe_repair": True,
@@ -31,6 +30,13 @@ DEFAULT_REPAIR_CONFIG = {
         "max_output_size_mb": 2048,
         "max_entry_uncompressed_mb": 512,
         "verify_candidates": True,
+    },
+    "auto_deep": {
+        "enabled": True,
+        "require_verification_repair": True,
+        "max_modules": 2,
+        "max_candidates_per_module": 1,
+        "max_input_size_mb": 128,
     },
     "beam": {
         "enabled": True,
@@ -110,6 +116,8 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
         raise ValueError("repair.trigger_on_medium_confidence was removed; repair now runs after extraction verification")
     if "thresholds" in value:
         raise ValueError("repair.thresholds was removed; analysis confidence no longer triggers repair directly")
+    if "trigger_on_extraction_failure" in value:
+        raise ValueError("repair.trigger_on_extraction_failure was removed; repair now runs from verification decisions")
     config = _merge(DEFAULT_REPAIR_CONFIG, value)
     config["enabled"] = _bool_value(config.get("enabled", True), "repair.enabled")
     config["workspace"] = str(config.get("workspace") or ".smart_unpacker_repair")
@@ -120,13 +128,10 @@ def normalize_repair_config(value: Any) -> dict[str, Any]:
     config["max_repair_seconds_per_task"] = _float_at_least(config, "max_repair_seconds_per_task", 0.0)
     config["max_repair_generated_files_per_task"] = _int_at_least(config, "max_repair_generated_files_per_task", 0)
     config["max_repair_generated_mb_per_task"] = _float_at_least(config, "max_repair_generated_mb_per_task", 0.0)
-    config["trigger_on_extraction_failure"] = _bool_value(
-        config.get("trigger_on_extraction_failure", True),
-        "repair.trigger_on_extraction_failure",
-    )
     config["stages"] = _normalize_bool_map(config.get("stages"), "repair.stages")
     config["safety"] = _normalize_safety(config.get("safety"))
     config["deep"] = _normalize_deep(config.get("deep"))
+    config["auto_deep"] = _normalize_auto_deep(config.get("auto_deep"))
     config["beam"] = _normalize_beam(config.get("beam"))
     config["modules"] = _normalize_modules(config.get("modules"))
     return config
@@ -192,6 +197,22 @@ def _normalize_deep(value: Any) -> dict[str, Any]:
         "max_output_size_mb": _float_at_least(value, "max_output_size_mb", 0.0),
         "max_entry_uncompressed_mb": _float_at_least(value, "max_entry_uncompressed_mb", 0.0),
         "verify_candidates": _bool_value(value.get("verify_candidates", True), "repair.deep.verify_candidates"),
+    }
+
+
+def _normalize_auto_deep(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("repair.auto_deep must be an object")
+    return {
+        **value,
+        "enabled": _bool_value(value.get("enabled", True), "repair.auto_deep.enabled"),
+        "require_verification_repair": _bool_value(
+            value.get("require_verification_repair", True),
+            "repair.auto_deep.require_verification_repair",
+        ),
+        "max_modules": _int_at_least(value, "max_modules", 1),
+        "max_candidates_per_module": _int_at_least(value, "max_candidates_per_module", 1),
+        "max_input_size_mb": _float_at_least(value, "max_input_size_mb", 0.0),
     }
 
 

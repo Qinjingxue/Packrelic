@@ -8,7 +8,6 @@ from smart_unpacker.contracts.tasks import ArchiveTask
 from smart_unpacker.coordinator.extraction_batch import ExtractionBatchRunner
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.repair.candidate import RepairCandidate, RepairCandidateBatch
-from smart_unpacker.repair.result import RepairResult
 from smart_unpacker.verification.result import ArchiveCoverageSummary, VerificationResult
 
 
@@ -17,52 +16,47 @@ def test_extraction_failure_repair_reanalysis_loop_runs_until_success(tmp_path):
     source.write_bytes(b"broken")
     fixed_1 = tmp_path / "fixed-1.zip"
     fixed_2 = tmp_path / "fixed-2.zip"
+    fixed_1.write_bytes(b"fixed:one")
+    fixed_2.write_bytes(b"fixed:two")
     out_dir = tmp_path / "out"
     task = _task(source)
-    extractor = _FakeExtractor([
-        _failed(source, out_dir),
-        _failed(fixed_1, out_dir),
-        ExtractionResult(success=True, archive=str(fixed_2), out_dir=str(out_dir), all_parts=[str(fixed_2)]),
-    ])
+    extractor = _PatchPlanExtractor(accept_name="fixed-2.zip")
     runner = _runner(tmp_path, extractor)
     runner.analysis_stage = _FakeAnalysisStage()
-    runner.repair_stage = _FakeRepairStage([fixed_1, fixed_2])
+    runner.repair_stage.scheduler = _SequencedBeamCandidateScheduler([fixed_1, fixed_2])
 
     outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
 
     assert outcome.success is True
     assert runner.analysis_stage.calls == 2
     archive_input = task.archive_input()
-    assert archive_input.entry_path.endswith("round_02_fake_repair.zip")
-    assert Path(archive_input.entry_path).read_bytes() == fixed_2.read_bytes()
+    assert archive_input.entry_path.endswith("fixed-2.zip")
     rounds = task.fact_bag.get("repair.loop.rounds")
     assert len(rounds) == 2
-    assert rounds[0]["output_path"].endswith("round_01_fake_repair.zip")
-    assert rounds[0]["module"] == "fake_repair"
-    assert rounds[0]["actions"] == ["fake_fix"]
-    assert rounds[1]["output_path"].endswith("round_02_fake_repair.zip")
+    assert rounds[0]["trigger"] == "verification_beam"
+    assert rounds[0]["module"] == "fixed-1"
+    assert rounds[1]["trigger"] == "verification_beam"
+    assert rounds[1]["module"] == "fixed-2"
     assert not task.fact_bag.get("repair.loop.terminal_reason")
 
 
-def test_repair_loop_stops_when_repaired_input_repeats(tmp_path):
+def test_repair_loop_stops_when_patch_plan_does_not_improve(tmp_path):
     source = tmp_path / "broken.zip"
     source.write_bytes(b"broken")
-    fixed = tmp_path / "fixed.zip"
+    worse = tmp_path / "worse.zip"
+    worse.write_bytes(b"worse")
     out_dir = tmp_path / "out"
     task = _task(source)
-    extractor = _FakeExtractor([
-        _failed(source, out_dir),
-        _failed(fixed, out_dir),
-    ])
+    extractor = _PatchPlanExtractor(accept_name="never.zip")
     runner = _runner(tmp_path, extractor)
     runner.analysis_stage = _FakeAnalysisStage()
-    runner.repair_stage = _FakeRepairStage([fixed, fixed])
+    runner.repair_stage.scheduler = _SequencedBeamCandidateScheduler([worse])
 
     outcome = runner._extract_verify_with_retries(task, str(out_dir), runtime_scheduler=None)
 
     assert outcome.success is False
-    assert task.fact_bag.get("repair.loop.terminal_reason") == "repeated_repair_input"
-    assert len(task.fact_bag.get("repair.loop.rounds")) == 2
+    assert task.fact_bag.get("repair.loop.terminal_reason") == "no_repair_improvement"
+    assert task.fact_bag.get("repair.loop.rounds") in (None, [])
 
 
 def test_analysis_scheduler_reanalyzes_repaired_archive_input_file(tmp_path):
@@ -187,12 +181,35 @@ class _ArchiveInputExtractor:
         return ExtractionResult(success=True, archive=archive, out_dir=str(out_dir), all_parts=[archive])
 
 
+class _PatchPlanExtractor:
+    password_session = None
+
+    def __init__(self, *, accept_name):
+        self.accept_name = accept_name
+
+    def default_output_dir_for_task(self, task):
+        return str(Path(task.main_path).with_suffix(""))
+
+    def inspect(self, task, out_dir):
+        return type("Preflight", (), {"skip_result": None})()
+
+    def extract(self, task, out_dir, runtime_scheduler=None):
+        archive = task.archive_input().entry_path or task.main_path
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        if Path(archive).name == self.accept_name:
+            (Path(out_dir) / "ok.txt").write_text("ok", encoding="utf-8")
+            return ExtractionResult(success=True, archive=archive, out_dir=str(out_dir), all_parts=[archive])
+        return _failed(Path(archive), Path(out_dir))
+
+
 class _PathAwareVerifier:
     config = {"max_retries": 0, "cleanup_failed_output": True}
 
     def verify(self, task, result):
-        if "good" in Path(result.archive).name:
+        if "good" in Path(result.archive).name or "fixed-2" in Path(result.archive).name:
             return _verification("accept", 1.0)
+        if "fixed-1" in Path(result.archive).name:
+            return _verification("repair", 0.5)
         return _verification("repair", 0.2)
 
 
@@ -210,6 +227,21 @@ class _BeamCandidateScheduler:
         ])
 
 
+class _SequencedBeamCandidateScheduler:
+    def __init__(self, paths):
+        self.paths = list(paths)
+        self.jobs = []
+
+    def generate_repair_candidates(self, job, *, lazy=False):
+        self.jobs.append(job)
+        if not self.paths:
+            return RepairCandidateBatch(candidates=[])
+        path = self.paths.pop(0)
+        return RepairCandidateBatch(candidates=[
+            _candidate(Path(path).stem, path, 0.8),
+        ])
+
+
 class _FakeAnalysisStage:
     def __init__(self):
         self.calls = 0
@@ -224,44 +256,27 @@ class _FakeAnalysisStage:
         return [task]
 
 
-class _FakeRepairStage:
-    def __init__(self, repaired_paths):
-        self.paths = list(repaired_paths)
-        self.config = {
-            "max_repair_rounds_per_task": 3,
-            "max_repair_seconds_per_task": 120.0,
-            "max_repair_generated_files_per_task": 16,
-            "max_repair_generated_mb_per_task": 2048.0,
-        }
-
-    def repair_after_extraction_failure_result(self, task, result):
-        path = self.paths.pop(0)
-        path.write_bytes(f"fixed:{path.name}".encode("ascii"))
-        task.set_archive_input({
-            "kind": "archive_input",
-            "entry_path": str(path),
-            "open_mode": "file",
-            "format_hint": "zip",
-        })
-        return RepairResult(
-            status="repaired",
-            confidence=0.9,
-            format="zip",
-            repaired_input={"kind": "file", "path": str(path), "format_hint": "zip"},
-            actions=["fake_fix"],
-            workspace_paths=[str(path)],
-            module_name="fake_repair",
-        )
-
-
 def _runner(tmp_path, extractor):
     runner = ExtractionBatchRunner(
         RunContext(),
         extractor,
         _FakeOutputScanPolicy(),
-        config={"repair": {"workspace": str(tmp_path / "repair"), "max_repair_rounds_per_task": 3}},
+        config={
+            "repair": {
+                "workspace": str(tmp_path / "repair"),
+                "max_repair_rounds_per_task": 3,
+                "beam": {
+                    "enabled": True,
+                    "beam_width": 1,
+                    "max_candidates_per_state": 1,
+                    "max_analyze_candidates": 1,
+                    "max_assess_candidates": 1,
+                    "max_rounds": 1,
+                },
+            },
+        },
     )
-    runner.verifier = _FakeVerifier()
+    runner.verifier = _PathAwareVerifier()
     return runner
 
 
