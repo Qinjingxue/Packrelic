@@ -233,10 +233,104 @@ def test_repair_pipeline_partial_acceptance_pressure(tmp_path, request, record_p
     assert elapsed < max_seconds
 
 
+def test_many_small_files_success_pressure(tmp_path, request, record_property):
+    file_count = max(1, request.config.getoption("--repair-performance-small-file-count"))
+    max_seconds = request.config.getoption("--repair-performance-max-seconds")
+    archive = tmp_path / "many-small-ok.zip"
+    _write_many_small_files_zip(archive, count=file_count, payload_size=32)
+
+    runner = PipelineRunner(repair_pressure_config(tmp_path))
+    timer = attach_timing(runner)
+    started = time.perf_counter()
+    try:
+        summary = runner.run(str(tmp_path))
+    finally:
+        timer.restore()
+    elapsed = time.perf_counter() - started
+
+    extracted_files = list((tmp_path / "many-small-ok").glob("dir_*/file_*.txt"))
+    record_property("file_count", file_count)
+    record_property("elapsed_seconds", round(elapsed, 3))
+    record_property("success_count", summary.success_count)
+    record_property("partial_success_count", summary.partial_success_count)
+    for label, payload in timer.snapshot().items():
+        record_property(f"{label}_ms", payload["ms"])
+        record_property(f"{label}_count", payload["count"])
+    print(
+        "many_small_files_success_pressure: "
+        f"files={file_count}, elapsed={elapsed:.3f}s, "
+        f"success={summary.success_count}, partial={summary.partial_success_count}, "
+        f"hotspots={timer.hottest()}"
+    )
+
+    assert summary.success_count == 1
+    assert summary.partial_success_count == 0
+    assert len(extracted_files) == file_count
+    assert elapsed < max_seconds
+
+
+def test_many_small_files_partial_report_pressure(tmp_path, request, record_property):
+    file_count = max(2, request.config.getoption("--repair-performance-small-file-count"))
+    max_seconds = request.config.getoption("--repair-performance-max-seconds")
+    archive = tmp_path / "many-small-partial.zip"
+    bad_name = f"dir_{(file_count - 1) // 100:03d}/file_{file_count - 1:05d}.txt"
+    _write_many_small_files_zip_with_bad_payload(archive, count=file_count, payload_size=32, bad_name=bad_name)
+
+    runner = PipelineRunner(repair_pressure_config(tmp_path))
+    timer = attach_timing(runner)
+    started = time.perf_counter()
+    try:
+        summary = runner.run(str(tmp_path))
+    finally:
+        timer.restore()
+    elapsed = time.perf_counter() - started
+
+    report = tmp_path / "many-small-partial" / ".sunpack" / "recovery_report.json"
+    record_property("file_count", file_count)
+    record_property("elapsed_seconds", round(elapsed, 3))
+    record_property("success_count", summary.success_count)
+    record_property("partial_success_count", summary.partial_success_count)
+    for label, payload in timer.snapshot().items():
+        record_property(f"{label}_ms", payload["ms"])
+        record_property(f"{label}_count", payload["count"])
+    print(
+        "many_small_files_partial_report_pressure: "
+        f"files={file_count}, elapsed={elapsed:.3f}s, "
+        f"success={summary.success_count}, partial={summary.partial_success_count}, "
+        f"hotspots={timer.hottest()}"
+    )
+
+    assert summary.success_count == 1
+    assert summary.partial_success_count == 1
+    assert report.exists()
+    assert elapsed < max_seconds
+
+
 def _write_zip(path: Path, entries: dict[str, bytes]) -> None:
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive:
         for name, payload in entries.items():
             archive.writestr(name, payload)
+
+
+def _write_many_small_files_zip(path: Path, *, count: int, payload_size: int) -> None:
+    payload = b"x" * max(1, payload_size)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+        for index in range(count):
+            archive.writestr(f"dir_{index // 100:03d}/file_{index:05d}.txt", payload)
+
+
+def _write_many_small_files_zip_with_bad_payload(
+    path: Path,
+    *,
+    count: int,
+    payload_size: int,
+    bad_name: str,
+) -> None:
+    _write_many_small_files_zip(path, count=count, payload_size=payload_size)
+    data = bytearray(path.read_bytes())
+    payload = _zip_payload_offset(data, bad_name)
+    data[payload] ^= 0xFF
+    path.write_bytes(data)
 
 
 def _write_zip_with_bad_cd_offset(path: Path) -> None:

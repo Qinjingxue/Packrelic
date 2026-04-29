@@ -8,7 +8,7 @@ from smart_unpacker.extraction.internal.workflow.errors import classify_extract_
 from smart_unpacker.extraction.internal.workflow.retry_policy import ExtractRetryPolicy
 from smart_unpacker.extraction.internal.sevenzip.sevenzip_runner import SevenZipRunner
 from smart_unpacker.extraction.internal.workflow.split_entry import SplitEntryResolver
-from smart_unpacker.extraction.progress import has_recoverable_partial_outputs, write_extraction_progress_manifest
+from smart_unpacker.extraction.progress import has_recoverable_partial_outputs, write_extraction_progress_manifest_payload
 from smart_unpacker.extraction.result import ExtractionResult
 from smart_unpacker.passwords.result import PasswordResolution
 
@@ -167,8 +167,9 @@ class SingleArchiveExtractor:
                             )
                         print(f"[EXTRACT] 成功: {archive}")
                         manifest_path = ""
+                        manifest_payload = None
                         if diagnostics.get("result"):
-                            manifest_path = write_extraction_progress_manifest(
+                            manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
                                 archive=archive,
                                 out_dir=out_dir,
                                 diagnostics=diagnostics,
@@ -184,6 +185,7 @@ class SingleArchiveExtractor:
                             selected_codepage=selected_codepage,
                             diagnostics=diagnostics,
                             progress_manifest=manifest_path,
+                            progress_manifest_payload=manifest_payload,
                         )
 
                     err = f"{run_result.stdout}\n{run_result.stderr}".lower()
@@ -211,7 +213,7 @@ class SingleArchiveExtractor:
             print(f"[EXTRACT] 失败: {archive} (错误: {error_msg})")
             diagnostics = self._diagnostics_from(run_result or test_result)
             if self.best_effort and has_recoverable_partial_outputs(diagnostics, out_dir):
-                manifest_path = write_extraction_progress_manifest(
+                manifest_path, manifest_payload = write_extraction_progress_manifest_payload(
                     archive=archive,
                     out_dir=out_dir,
                     diagnostics=diagnostics,
@@ -229,6 +231,7 @@ class SingleArchiveExtractor:
                     diagnostics=diagnostics,
                     partial_outputs=True,
                     progress_manifest=manifest_path,
+                    progress_manifest_payload=manifest_payload,
                 )
             shutil.rmtree(out_dir, ignore_errors=True)
             return self._failed(
@@ -317,6 +320,7 @@ class SingleArchiveExtractor:
         diagnostics: dict | None = None,
         partial_outputs: bool = False,
         progress_manifest: str = "",
+        progress_manifest_payload: dict | None = None,
     ) -> ExtractionResult:
         return ExtractionResult(
             success=False,
@@ -329,6 +333,7 @@ class SingleArchiveExtractor:
             diagnostics=dict(diagnostics or {}),
             partial_outputs=partial_outputs,
             progress_manifest=progress_manifest,
+            progress_manifest_payload=progress_manifest_payload,
         )
 
     @staticmethod

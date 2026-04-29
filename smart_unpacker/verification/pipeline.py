@@ -439,11 +439,23 @@ def _decision_hint(
     complete_accept_threshold: float,
     partial_accept_threshold: float,
 ) -> str:
-    for decision in (DECISION_FAIL, DECISION_REPAIR, DECISION_RETRY_EXTRACT, DECISION_ACCEPT_PARTIAL, DECISION_ACCEPT):
+    if DECISION_FAIL in decision_hints:
+        return DECISION_FAIL
+    if DECISION_ACCEPT_PARTIAL in decision_hints and source_integrity in {
+        SOURCE_INTEGRITY_TRUNCATED,
+        SOURCE_INTEGRITY_PAYLOAD_DAMAGED,
+        SOURCE_INTEGRITY_DAMAGED,
+    } and completeness >= partial_accept_threshold and completeness >= min(0.999, recoverable_upper_bound):
+        return DECISION_ACCEPT_PARTIAL
+    if (
+        assessment_status == ASSESSMENT_COMPLETE
+        and completeness >= complete_accept_threshold
+        and source_integrity in {SOURCE_INTEGRITY_COMPLETE, SOURCE_INTEGRITY_UNKNOWN}
+    ):
+        return DECISION_ACCEPT
+    for decision in (DECISION_REPAIR, DECISION_RETRY_EXTRACT, DECISION_ACCEPT_PARTIAL, DECISION_ACCEPT):
         if decision in decision_hints:
             return decision
-    if assessment_status == ASSESSMENT_COMPLETE and completeness >= complete_accept_threshold:
-        return DECISION_ACCEPT
     if assessment_status == ASSESSMENT_PARTIAL and source_integrity in {
         SOURCE_INTEGRITY_TRUNCATED,
         SOURCE_INTEGRITY_PAYLOAD_DAMAGED,

@@ -14,3 +14,4 @@ class ExtractionResult:
     diagnostics: dict[str, Any] = field(default_factory=dict)
     partial_outputs: bool = False
     progress_manifest: str = ""
+    progress_manifest_payload: dict[str, Any] | None = None

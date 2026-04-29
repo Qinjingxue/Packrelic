@@ -69,6 +69,28 @@ class UnitPasswordAssessmentMethod:
         )
 
 
+@register_verification_method("unit_repair_warning_complete")
+class UnitRepairWarningCompleteMethod:
+    def verify(self, evidence, config):
+        return VerificationStepResult(
+            method=config["name"],
+            status="warning",
+            completeness_hint=1.0,
+            source_integrity_hint="complete",
+            decision_hint="repair",
+            issues=[
+                VerificationIssue(
+                    method=config["name"],
+                    code="warning.unit_large_manifest_shape",
+                    message="non-fatal shape mismatch",
+                )
+            ],
+            file_observations=[
+                FileVerificationObservation(path="inside.txt", archive_path="inside.txt", state="complete", progress=1.0)
+            ],
+        )
+
+
 def test_verification_scheduler_disabled_returns_disabled_assessment(tmp_path):
     CALLS.clear()
     task, result = _task_and_result(tmp_path)
@@ -133,6 +155,24 @@ def test_verification_pipeline_aggregates_completeness_and_decision(tmp_path):
     assert verification.complete_files == 1
     assert verification.missing_files == 1
     assert CALLS == ["unit_complete_observation", "unit_missing_observation"]
+
+
+def test_complete_assessment_accepts_despite_repair_warning_hint(tmp_path):
+    task, result = _task_and_result(tmp_path)
+    scheduler = VerificationScheduler({
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "unit_repair_warning_complete", "enabled": True},
+            ],
+        }
+    })
+
+    verification = scheduler.verify(task, result)
+
+    assert verification.assessment_status == "complete"
+    assert verification.completeness == 1.0
+    assert verification.decision_hint == "accept"
 
 
 def test_verification_evidence_uses_password_session_when_result_has_no_password(tmp_path):

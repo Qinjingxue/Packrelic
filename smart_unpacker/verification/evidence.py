@@ -59,6 +59,9 @@ def build_verification_evidence(
 
 
 def _load_progress_manifest(extraction_result: ExtractionResult) -> dict[str, Any] | None:
+    cached = getattr(extraction_result, "progress_manifest_payload", None)
+    if isinstance(cached, dict):
+        return cached
     manifest_path = extraction_result.progress_manifest
     if not manifest_path and extraction_result.out_dir:
         candidate = Path(extraction_result.out_dir) / ".sunpack" / "extraction_manifest.json"

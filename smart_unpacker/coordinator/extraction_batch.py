@@ -133,6 +133,7 @@ class ExtractionBatchRunner:
             tasks,
             self.extractor.default_output_dir_for_task,
         )
+        output_dir_resolver = self._cached_output_dir_resolver(output_dir_resolver)
         tasks = self._skip_tasks_inside_batch_outputs(tasks, output_dir_resolver)
         results = self._execute_ready_tasks(tasks, output_dir_resolver)
 
@@ -184,6 +185,18 @@ class ExtractionBatchRunner:
                 self._extract_verify_with_retries(task, output_dir_resolver(task), runtime_scheduler),
             ),
         )
+
+    @staticmethod
+    def _cached_output_dir_resolver(output_dir_resolver):
+        cache: dict[int, str] = {}
+
+        def resolve(task: ArchiveTask) -> str:
+            key = id(task)
+            if key not in cache:
+                cache[key] = output_dir_resolver(task)
+            return cache[key]
+
+        return resolve
 
     def _resource_guard_results(self, tasks: list[ArchiveTask], output_dir_resolver) -> list[tuple[ArchiveTask, BatchExtractionOutcome]]:
         guard = self._resource_guard_config()
@@ -459,7 +472,7 @@ class ExtractionBatchRunner:
         if not result.progress_manifest:
             return
         try:
-            filter_extraction_outputs(result.progress_manifest)
+            result.progress_manifest_payload = filter_extraction_outputs(result.progress_manifest)
         except Exception:
             return
 
@@ -1003,7 +1016,7 @@ class ExtractionBatchRunner:
                 self.context.success_count += 1
                 if outcome.verification is not None and outcome.verification.decision_hint == DECISION_ACCEPT_PARTIAL:
                     _ensure_recovery_rank(outcome)
-                    recovery_report = _write_recovery_report(task, outcome, out_dir)
+                    recovery_report = _write_recovery_report(task, outcome, out_dir, config=self.config)
                     self.context.partial_success_count += 1
                     self.context.recovered_outputs.append({
                         "archive": task.main_path,
@@ -1307,10 +1320,17 @@ def _verification_payload(verification: VerificationResult) -> dict[str, Any]:
     }
 
 
-def _write_recovery_report(task: ArchiveTask, outcome: BatchExtractionOutcome, out_dir: str) -> str:
+def _write_recovery_report(
+    task: ArchiveTask,
+    outcome: BatchExtractionOutcome,
+    out_dir: str,
+    *,
+    config: dict[str, Any] | None = None,
+) -> str:
     verification = outcome.verification
     if verification is None:
         return ""
+    manifest = _result_progress_manifest(outcome.result)
     payload = {
         "version": 1,
         "archive": task.main_path,
@@ -1323,13 +1343,14 @@ def _write_recovery_report(task: ArchiveTask, outcome: BatchExtractionOutcome, o
         "selected_attempt": dict(outcome.recovery_rank),
         "comparison": dict(outcome.comparison),
         "rejected_attempts": list(outcome.rejected_attempts),
-        "files": _file_recovery_items(verification, manifest_path=outcome.result.progress_manifest),
+        "files": _file_recovery_items(verification, manifest=manifest),
     }
     target = Path(out_dir) / ".sunpack" / "recovery_report.json"
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        _annotate_progress_manifest(outcome.result.progress_manifest, payload)
+        pretty = _json_pretty_reports(config)
+        target.write_text(_json_text(payload, pretty=pretty), encoding="utf-8")
+        _annotate_progress_manifest(outcome.result.progress_manifest, payload, manifest=manifest, pretty=pretty)
         return str(target)
     except OSError:
         return ""
@@ -1360,16 +1381,20 @@ def _archive_state_payload_for_outcome(task: ArchiveTask, outcome: BatchExtracti
     return _archive_state_payload(task)
 
 
-def _annotate_progress_manifest(manifest_path: str, recovery_report: dict[str, Any]) -> None:
+def _annotate_progress_manifest(
+    manifest_path: str,
+    recovery_report: dict[str, Any],
+    *,
+    manifest: dict[str, Any] | None = None,
+    pretty: bool = False,
+) -> None:
     if not manifest_path:
         return
     path = Path(manifest_path)
     if not path.is_file():
         return
-    try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
+    if manifest is None:
+        manifest = _read_manifest(manifest_path)
     if not isinstance(manifest, dict):
         return
     manifest["recovery"] = {
@@ -1386,12 +1411,17 @@ def _annotate_progress_manifest(manifest_path: str, recovery_report: dict[str, A
             item["recovery_status"] = "kept_complete" if status == "complete" else "kept_partial_or_unverified"
             item["user_action"] = _user_action_for_file_status(status)
     try:
-        path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(_json_text(manifest, pretty=pretty), encoding="utf-8")
     except OSError:
         return
 
 
-def _file_recovery_items(verification: VerificationResult, *, manifest_path: str = "") -> list[dict[str, Any]]:
+def _file_recovery_items(
+    verification: VerificationResult,
+    *,
+    manifest_path: str = "",
+    manifest: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for observation in verification.file_observations:
@@ -1417,7 +1447,8 @@ def _file_recovery_items(verification: VerificationResult, *, manifest_path: str
         seen.add(key)
         items.append(payload)
 
-    manifest = _read_manifest(manifest_path)
+    if manifest is None:
+        manifest = _read_manifest(manifest_path)
     for raw in list(manifest.get("files") or []) + list(manifest.get("discarded_files") or []):
         if not isinstance(raw, dict):
             continue
@@ -1463,6 +1494,33 @@ def _read_manifest(manifest_path: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _result_progress_manifest(result: ExtractionResult) -> dict[str, Any]:
+    cached = getattr(result, "progress_manifest_payload", None)
+    if isinstance(cached, dict):
+        return cached
+    manifest = _read_manifest(result.progress_manifest)
+    if manifest:
+        result.progress_manifest_payload = manifest
+    return manifest
+
+
+def _json_pretty_reports(config: dict[str, Any] | None) -> bool:
+    payload = config or {}
+    reporting = payload.get("reporting") if isinstance(payload.get("reporting"), dict) else {}
+    if "pretty_json" in reporting:
+        return bool(reporting.get("pretty_json"))
+    if "compact_json" in reporting:
+        return not bool(reporting.get("compact_json"))
+    debug = payload.get("debug") if isinstance(payload.get("debug"), dict) else {}
+    return bool(debug.get("pretty_json_reports", False))
+
+
+def _json_text(payload: Any, *, pretty: bool = False) -> str:
+    if pretty:
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _merge_discarded_file_status(items: list[dict[str, Any]], key: tuple[str, str], discarded: dict[str, Any]) -> None:

@@ -13,8 +13,10 @@ from smart_unpacker.coordinator.analysis_stage import ArchiveAnalysisStage
 class _FakeAnalysisScheduler:
     def __init__(self, report):
         self.report = report
+        self.calls = 0
 
     def analyze_task(self, task):
+        self.calls += 1
         return self.report
 
 
@@ -131,6 +133,31 @@ def test_analysis_stage_expands_carrier_into_logical_archive_tasks(tmp_path):
     assert tasks[1].archive_input().format_hint == "7z"
     assert tasks[1].archive_input().parts[0].range.start == 35
     assert tasks[1].key.endswith("#segment2:7z")
+
+
+def test_analysis_stage_reuses_batch_report_for_equivalent_inputs(tmp_path):
+    archive = tmp_path / "same.zip"
+    archive.write_bytes(b"zip")
+    evidence = ArchiveFormatEvidence(
+        format="zip",
+        confidence=0.99,
+        status="extractable",
+        segments=[ArchiveSegment(start_offset=0, end_offset=3, confidence=0.99)],
+    )
+    first = _task(archive)
+    second = _task(archive)
+    second.logical_name = "case_copy"
+    stage = ArchiveAnalysisStage({"analysis": {"enabled": False, "task_parallel": False}})
+    stage.enabled = True
+    stage.scheduler = _FakeAnalysisScheduler(_report(archive, evidence))
+
+    tasks = stage.analyze_tasks([first, second])
+
+    assert tasks == [first, second]
+    assert stage.scheduler.calls == 1
+    assert first.fact_bag.get("analysis.selected_format") == "zip"
+    assert second.fact_bag.get("analysis.selected_format") == "zip"
+    assert second.fact_bag.get("analysis.cache_hits") == 2
 
 
 def test_analysis_stage_prefers_compressed_tar_over_stream_for_same_range(tmp_path):

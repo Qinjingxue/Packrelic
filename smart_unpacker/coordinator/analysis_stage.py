@@ -29,27 +29,27 @@ class ArchiveAnalysisStage:
     def analyze_tasks(self, tasks: list[ArchiveTask]) -> list[ArchiveTask]:
         if not self.enabled or self.scheduler is None:
             return tasks
-        max_workers = self._task_max_workers(len(tasks))
+        groups = self._analysis_task_groups(tasks)
+        max_workers = self._task_max_workers(len(groups))
         if max_workers > 1:
             grouped_results: list[list[ArchiveTask]] = [[] for _ in tasks]
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(self._analyze_task_to_tasks, task): index
-                    for index, task in enumerate(tasks)
+                    executor.submit(self._analyze_task_group, group): group
+                    for group in groups
                 }
                 for future in as_completed(futures):
-                    index = futures[future]
-                    _, task_results = future.result()
-                    grouped_results[index] = task_results
+                    for index, task_results in future.result():
+                        grouped_results[index] = task_results
             return [
                 task_result
                 for task_results in grouped_results
                 for task_result in task_results
             ]
         expanded_tasks: list[ArchiveTask] = []
-        for task in tasks:
-            _, task_results = self._analyze_task_to_tasks(task)
-            expanded_tasks.extend(task_results)
+        for group in groups:
+            for _index, task_results in self._analyze_task_group(group):
+                expanded_tasks.extend(task_results)
         return expanded_tasks
 
     def _task_max_workers(self, task_count: int) -> int:
@@ -93,6 +93,43 @@ class ArchiveAnalysisStage:
         except OSError:
             return (normalized, -1, -1)
 
+    def _analysis_task_groups(self, tasks: list[ArchiveTask]) -> list[list[tuple[int, ArchiveTask]]]:
+        grouped: dict[tuple, list[tuple[int, ArchiveTask]]] = {}
+        order: list[tuple] = []
+        for index, task in enumerate(tasks):
+            try:
+                task.ensure_archive_state()
+                cache_key = self._analysis_cache_key(task)
+            except Exception:
+                cache_key = ("task", id(task))
+            if cache_key not in grouped:
+                grouped[cache_key] = []
+                order.append(cache_key)
+            grouped[cache_key].append((index, task))
+        return [grouped[key] for key in order]
+
+    def _analyze_task_group(self, group: list[tuple[int, ArchiveTask]]) -> list[tuple[int, list[ArchiveTask]]]:
+        if not group:
+            return []
+        if len(group) == 1:
+            index, task = group[0]
+            _, task_results = self._analyze_task_to_tasks(task)
+            return [(index, task_results)]
+        first_index, first_task = group[0]
+        report, first_results = self._analyze_task_to_tasks(first_task)
+        results = [(first_index, first_results)]
+        if report is None:
+            for index, task in group[1:]:
+                task.fact_bag.set("analysis.status", first_task.fact_bag.get("analysis.status") or "error")
+                if first_task.fact_bag.get("analysis.error"):
+                    task.fact_bag.set("analysis.error", first_task.fact_bag.get("analysis.error"))
+                results.append((index, [task]))
+            return results
+        for index, task in group[1:]:
+            task_report = replace(report, cache_hits=report.cache_hits + 1)
+            results.append((index, self._tasks_from_report(task, task_report)))
+        return results
+
     def analyze_task(self, task: ArchiveTask) -> ArchiveAnalysisReport | None:
         report, _ = self._analyze_task_to_tasks(task)
         return report
@@ -106,19 +143,25 @@ class ArchiveAnalysisStage:
             return None, [task]
         task.ensure_archive_state()
         try:
-            cache_key = self._analysis_cache_key(task)
-            with self._report_cache_lock:
-                report = self._report_cache.get(cache_key)
-            if report is None:
-                report = self.scheduler.analyze_task(task)
-                self._remember_report(cache_key, report)
-            else:
-                report = replace(report, cache_hits=report.cache_hits + 1)
+            report = self._get_or_analyze_report(task)
         except Exception as exc:
             task.fact_bag.set("analysis.status", "error")
             task.fact_bag.set("analysis.error", str(exc))
             return None, [task]
 
+        return report, self._tasks_from_report(task, report)
+
+    def _get_or_analyze_report(self, task: ArchiveTask) -> ArchiveAnalysisReport:
+        cache_key = self._analysis_cache_key(task)
+        with self._report_cache_lock:
+            report = self._report_cache.get(cache_key)
+        if report is None:
+            report = self.scheduler.analyze_task(task)
+            self._remember_report(cache_key, report)
+            return report
+        return replace(report, cache_hits=report.cache_hits + 1)
+
+    def _tasks_from_report(self, task: ArchiveTask, report: ArchiveAnalysisReport) -> list[ArchiveTask]:
         self._record_report(task, report)
         task.fact_bag.set("analysis.report_path", report.path)
         candidates = self._extractable_segments(report)
@@ -128,13 +171,13 @@ class ArchiveAnalysisStage:
                 evidence, segment, index = password_candidate
                 self._apply_selected_segment(task, evidence, segment, index=index)
                 self._record_state_analysis(task, report)
-            return report, [task]
+            return [task]
         if len(candidates) == 1:
             evidence, segment, _ = candidates[0]
             self._apply_selected_segment(task, evidence, segment, index=0)
             self._record_state_analysis(task, report)
-            return report, [task]
-        return report, [
+            return [task]
+        return [
             self._child_task_for_segment(task, report, evidence, segment, index=index)
             for evidence, segment, index in candidates
         ]

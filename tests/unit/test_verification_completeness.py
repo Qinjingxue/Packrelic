@@ -161,7 +161,9 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     assert runner.context.partial_success_count == 1
     recovered = runner.context.recovered_outputs[0]
     assert recovered["archive_coverage"]["expected_files"] == 3
-    report = json.loads((out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8"))
+    report_text = (out_dir / ".sunpack" / "recovery_report.json").read_text(encoding="utf-8")
+    assert "\n" not in report_text
+    report = json.loads(report_text)
     assert report["success_kind"] == "partial"
     assert report["archive_coverage"]["expected_files"] == 3
     file_statuses = {item["archive_path"]: item["status"] for item in report["files"]}
@@ -169,7 +171,9 @@ def test_main_flow_accepts_recoverable_partial_after_repair_has_no_candidate(tmp
     assert file_statuses["partial.bin"] == "discarded"
     assert file_statuses["failed.bin"] == "failed"
     assert {item["user_action"] for item in report["files"]} >= {"safe_to_use", "discarded_low_quality", "not_recovered"}
-    manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_text = manifest.read_text(encoding="utf-8")
+    assert "\n" not in manifest_text
+    manifest_payload = json.loads(manifest_text)
     assert manifest_payload["recovery"]["verification"]["decision_hint"] == "accept_partial"
 
 

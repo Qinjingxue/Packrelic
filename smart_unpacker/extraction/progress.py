@@ -60,7 +60,26 @@ def write_extraction_progress_manifest(
     out_dir: str,
     diagnostics: dict[str, Any],
     round_index: int = 1,
+    pretty: bool = False,
 ) -> str:
+    path, _manifest = write_extraction_progress_manifest_payload(
+        archive=archive,
+        out_dir=out_dir,
+        diagnostics=diagnostics,
+        round_index=round_index,
+        pretty=pretty,
+    )
+    return path
+
+
+def write_extraction_progress_manifest_payload(
+    *,
+    archive: str,
+    out_dir: str,
+    diagnostics: dict[str, Any],
+    round_index: int = 1,
+    pretty: bool = False,
+) -> tuple[str, dict[str, Any]]:
     manifest = build_extraction_progress_manifest(
         archive=archive,
         out_dir=out_dir,
@@ -69,8 +88,8 @@ def write_extraction_progress_manifest(
     )
     target = Path(out_dir) / ".sunpack" / "extraction_manifest.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    return str(target)
+    target.write_text(_json_text(manifest, pretty=pretty), encoding="utf-8")
+    return str(target), manifest
 
 
 def filter_extraction_outputs(manifest_path: str, *, partial_keep_ratio: float = 0.2) -> dict[str, Any]:
@@ -120,7 +139,7 @@ def filter_extraction_outputs(manifest_path: str, *, partial_keep_ratio: float =
         "kept": len(kept),
         "discarded": len(discarded),
     }
-    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(_json_text(manifest), encoding="utf-8")
     return manifest
 
 
@@ -268,6 +287,12 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _json_text(payload: Any, *, pretty: bool = False) -> str:
+    if pretty:
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def _relative_path(path: Path, root: Path) -> str:
