@@ -1,26 +1,15 @@
 from __future__ import annotations
 
-from pathlib import Path
-import struct
-
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import (
-    load_job_source_bytes,
-    patch_diagnosis,
-    patch_file,
-    patch_plan_for_byte_patches,
-    patched_state_for_job,
-    should_materialize_candidate,
-    virtual_patch_repaired_input,
-    write_candidate,
-)
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
+from smart_unpacker.repair.pipeline.modules.zip._rebuild import rebuild_zip_from_source
+from smart_unpacker_native import zip_directory_field_repair as _native_zip_directory_field_repair
 
-from ._directory import walk_central_directory
-from ._rebuild import EOCD_SIG
+from ._native_field_result import repair_result_from_native_zip_field
 
 
 class ZipCommentLengthFix:
@@ -35,6 +24,7 @@ class ZipCommentLengthFix:
                 require_any_categories=("directory_rebuild", "boundary_repair"),
                 require_any_flags=("zip_comment_length_bad", "comment_length_bad", "eocd_bad", "trailing_junk"),
                 require_any_fuzzy_hints=("trailing_text_junk_likely", "tail_printable_region"),
+                reject_any_flags=("wrong_password", "carrier_archive", "sfx", "embedded_archive", "carrier_prefix"),
                 base_score=0.78,
             ),
         ),
@@ -42,6 +32,8 @@ class ZipCommentLengthFix:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+            return 0.0
         if flags & {"zip_comment_length_bad", "comment_length_bad", "eocd_bad"}:
             return 0.9
         if "directory_rebuild" in diagnosis.categories:
@@ -49,63 +41,33 @@ class ZipCommentLengthFix:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_job_source_bytes(job)
-        offset = data.rfind(EOCD_SIG)
-        if offset < 0 or offset + 22 > len(data):
-            return _failed(self.spec.name, diagnosis, "EOCD fixed header was not found")
-        try:
-            cd_size = struct.unpack_from("<I", data, offset + 12)[0]
-            cd_offset = struct.unpack_from("<I", data, offset + 16)[0]
-            stored_comment_len = struct.unpack_from("<H", data, offset + 20)[0]
-        except struct.error:
-            return _failed(self.spec.name, diagnosis, "EOCD fixed fields are incomplete")
-        cd = walk_central_directory(data, cd_offset, expected_end=cd_offset + cd_size)
-        if not cd.valid:
-            return _failed(self.spec.name, diagnosis, "central directory range is not trusted")
-        actual_comment_len = len(data) - offset - 22
-        if actual_comment_len < 0 or actual_comment_len > 0xFFFF:
-            return _failed(self.spec.name, diagnosis, "actual ZIP comment length is out of range")
-        if stored_comment_len == actual_comment_len:
-            return _failed(self.spec.name, diagnosis, "ZIP comment length already matches file length")
-        output_path = str(Path(workspace) / "zip_comment_length_fix.zip")
-        patch = {"offset": offset + 20, "data": struct.pack("<H", actual_comment_len)}
-        actions = ["patch_zip_eocd_comment_length"]
-        patch_plan = patch_plan_for_byte_patches(job, self.spec.name, [patch], confidence=0.86, actions=actions)
-        repaired_state = patched_state_for_job(job, patch_plan)
-        if not should_materialize_candidate(config):
-            path = ""
-            repaired_input = virtual_patch_repaired_input(repaired_state)
-        elif str(job.source_input.get("kind") or "file") == "file" and not (job.archive_state and job.archive_state.patches):
-            path = patch_file(str(job.source_input["path"]), [patch], output_path)
-            repaired_input = {"kind": "file", "path": path, "format_hint": "zip"}
-        else:
-            repaired = bytearray(data)
-            repaired[offset + 20:offset + 22] = patch["data"]
-            path = write_candidate(bytes(repaired), workspace, "zip_comment_length_fix.zip")
-            repaired_input = {"kind": "file", "path": path, "format_hint": "zip"}
-        return RepairResult(
-            status="repaired",
-            confidence=0.86,
-            format="zip",
-            repaired_input=repaired_input,
-            actions=actions,
-            damage_flags=list(job.damage_flags),
-            workspace_paths=[path] if path else [],
-            module_name=self.spec.name,
-            diagnosis=patch_diagnosis(diagnosis.as_dict(), patch_plan, repaired_state),
-            repaired_state=repaired_state,
+        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        result = _native_zip_directory_field_repair(
+            source_input_for_job(job),
+            workspace,
+            self.spec.name,
+            float(deep.get("max_input_size_mb", 512) or 0),
         )
+        if str(dict(result).get("status") or "") != "repaired":
+            from pathlib import Path
 
-
-def _failed(module_name, diagnosis, message):
-    return RepairResult(
-        status="unrepairable",
-        confidence=0.0,
-        format="zip",
-        module_name=module_name,
-        diagnosis=diagnosis.as_dict(),
-        message=message,
-    )
+            output = Path(workspace) / "zip_comment_length_fix.zip"
+            scan = rebuild_zip_from_source(source_input_for_job(job), output, config=config)
+            if scan.entries and scan.complete:
+                return RepairResult(
+                    status="repaired",
+                    confidence=0.82,
+                    format="zip",
+                    repaired_input={"kind": "file", "path": str(output), "format_hint": "zip"},
+                    actions=["native_rebuild_zip_from_local_headers"],
+                    damage_flags=list(job.damage_flags),
+                    warnings=scan.warnings,
+                    workspace_paths=[str(output)],
+                    module_name=self.spec.name,
+                    diagnosis={**diagnosis.as_dict(), "native_zip_rebuild": scan.__dict__},
+                    message="ZIP was rebuilt natively from local headers after EOCD comment repair could not trust the directory",
+                )
+        return repair_result_from_native_zip_field(self.spec.name, dict(result), job, diagnosis, config)
 
 
 register_repair_module(ZipCommentLengthFix())

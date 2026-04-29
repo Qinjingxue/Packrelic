@@ -1,10 +1,12 @@
 import struct
 import zlib
 
-from smart_unpacker.repair.pipeline.modules.seven_zip.next_header_fields import _find_next_header_candidate
+from pathlib import Path
+
+from smart_unpacker_native import seven_zip_next_header_field_repair
 
 
-def test_next_header_field_repair_rejects_nonterminated_crc_collision_candidate():
+def test_next_header_field_repair_rejects_nonterminated_crc_collision_candidate(tmp_path):
     fake = bytearray(b"\x01" + bytes((index * 37) % 255 or 1 for index in range(1, 5000)))
     fake[-1] = 0x41
     stored_crc = zlib.crc32(fake) & 0xFFFFFFFF
@@ -21,10 +23,12 @@ def test_next_header_field_repair_rejects_nonterminated_crc_collision_candidate(
         + real_next_header
     )
 
-    assert _find_next_header_candidate(data, {}) is None
+    result = seven_zip_next_header_field_repair({"kind": "bytes", "data": bytes(data)}, str(tmp_path), 512, 1024 * 1024)
+
+    assert result["status"] == "unrepairable"
 
 
-def test_next_header_field_repair_keeps_compact_fixture_candidate():
+def test_next_header_field_repair_keeps_compact_fixture_candidate(tmp_path):
     gap = b"abcdefgh"
     next_header = b"\x01\x02\x03"
     start_header = struct.pack("<QQI", 0, len(next_header), zlib.crc32(next_header) & 0xFFFFFFFF)
@@ -37,4 +41,9 @@ def test_next_header_field_repair_keeps_compact_fixture_candidate():
         + next_header
     )
 
-    assert _find_next_header_candidate(bytes(data), {}) == (len(gap), len(next_header))
+    result = seven_zip_next_header_field_repair({"kind": "bytes", "data": bytes(data)}, str(tmp_path), 512, 1024 * 1024)
+
+    assert result["status"] == "repaired"
+    repaired = Path(result["selected_path"]).read_bytes()
+    assert struct.unpack_from("<Q", repaired, 12)[0] == len(gap)
+    assert struct.unpack_from("<Q", repaired, 20)[0] == len(next_header)

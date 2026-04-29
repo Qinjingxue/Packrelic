@@ -308,6 +308,119 @@ pub(crate) fn seven_zip_crc_field_repair(
     source_input,
     workspace,
     max_input_size_mb=512.0,
+    max_scan_bytes=1048576
+))]
+pub(crate) fn seven_zip_next_header_field_repair(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_scan_bytes: usize,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => {
+            return status_dict(py, "skipped", "", "7z", &message, &[], 0, 0, 0, 0.0, &[])
+        }
+    };
+    let Some((next_offset, next_size)) = find_next_header_candidate(&data, max_scan_bytes.max(1)) else {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "7z",
+            "7z next header offset/size could not be inferred from the stored next-header CRC",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
+    };
+    let current_offset = u64_le(&data, 12);
+    let current_size = u64_le(&data, 20);
+    let next_crc = u32_le(&data, 28);
+    let mut start_header = [0u8; 20];
+    start_header[0..8].copy_from_slice(&next_offset.to_le_bytes());
+    start_header[8..16].copy_from_slice(&next_size.to_le_bytes());
+    start_header[16..20].copy_from_slice(&next_crc.to_le_bytes());
+    let start_crc = crc32(&start_header);
+    let current_start_crc = u32_le(&data, 8);
+    if current_offset == next_offset && current_size == next_size && current_start_crc == start_crc {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "7z",
+            "7z next header offset and size already match the inferred segment",
+            &[],
+            0,
+            data.len() as u64,
+            0,
+            0.0,
+            &[],
+        );
+    }
+    let mut candidate = data.clone();
+    candidate[8..12].copy_from_slice(&start_crc.to_le_bytes());
+    candidate[12..20].copy_from_slice(&next_offset.to_le_bytes());
+    candidate[20..28].copy_from_slice(&next_size.to_le_bytes());
+    let output_path = Path::new(workspace).join("seven_zip_next_header_field_repair.7z");
+    let output_bytes = match write_slice_candidate(&candidate, &output_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return status_dict(
+                py,
+                "unrepairable",
+                "",
+                "7z",
+                &format!("7z next header candidate could not be written: {err}"),
+                &[],
+                0,
+                data.len() as u64,
+                0,
+                0.0,
+                &[],
+            )
+        }
+    };
+    let selected = WrittenArchiveCandidate {
+        name: "seven_zip_next_header_field_repair".to_string(),
+        path: output_path.to_string_lossy().to_string(),
+        format: "7z".to_string(),
+        status: "repaired".to_string(),
+        offset: 0,
+        end_offset: candidate.len() as u64,
+        output_bytes,
+        confidence: 0.9,
+        actions: vec![
+            "repair_7z_next_header_offset_size".to_string(),
+            "recompute_7z_start_header_crc".to_string(),
+        ],
+        warnings: Vec::new(),
+    };
+    status_dict_with_candidates(
+        py,
+        "repaired",
+        &selected.path,
+        "7z",
+        "7z next header offset/size fields were inferred and rewritten by native repair",
+        &[],
+        0,
+        candidate.len() as u64,
+        output_bytes,
+        0.9,
+        &["repair_7z_next_header_offset_size", "recompute_7z_start_header_crc"],
+        &[selected.clone()],
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
     max_candidates=8
 ))]
 pub(crate) fn rar_block_chain_trim_recovery(
@@ -617,6 +730,7 @@ struct RarWalk {
     warnings: Vec<String>,
 }
 
+#[derive(Clone)]
 struct WrittenArchiveCandidate {
     name: String,
     path: String,
@@ -865,6 +979,81 @@ fn repair_seven_zip_crc_candidate(data: &[u8], offset: usize) -> Option<SevenZip
         actions,
         warnings,
     })
+}
+
+fn find_next_header_candidate(data: &[u8], max_scan: usize) -> Option<(u64, u64)> {
+    if data.len() < 33 || !data.starts_with(SEVEN_Z_MAGIC) {
+        return None;
+    }
+    let stored_offset = u64_le(data, 12);
+    let stored_size = u64_le(data, 20);
+    let stored_crc = u32_le(data, 28);
+    let scan_end = data.len().min(SEVEN_Z_HEADER_SIZE + max_scan);
+    let preferred_start = SEVEN_Z_HEADER_SIZE.checked_add(usize::try_from(stored_offset).ok()?)?;
+    let mut starts = Vec::new();
+    if preferred_start >= SEVEN_Z_HEADER_SIZE && preferred_start < scan_end {
+        starts.push(preferred_start);
+    }
+    for index in SEVEN_Z_HEADER_SIZE..scan_end {
+        if matches!(data[index], 0x01 | 0x17) && !starts.contains(&index) {
+            starts.push(index);
+        }
+    }
+    let mut best: Option<(u64, u64)> = None;
+    let mut best_score: Option<(u8, u64)> = None;
+    for start in starts {
+        let max_end = data.len().min(start.saturating_add(max_scan));
+        for end in start + 1..=max_end {
+            if crc32(&data[start..end]) != stored_crc {
+                continue;
+            }
+            let next_offset = (start - SEVEN_Z_HEADER_SIZE) as u64;
+            let next_size = (end - start) as u64;
+            if !next_header_semantically_plausible(
+                &data[start..end],
+                stored_offset,
+                stored_size,
+                next_offset,
+                next_size,
+            ) {
+                continue;
+            }
+            let score = (
+                if next_offset == stored_offset { 0 } else { 1 },
+                next_size.abs_diff(stored_size),
+            );
+            if best_score.is_none_or(|current| score < current) {
+                best = Some((next_offset, next_size));
+                best_score = Some(score);
+            }
+        }
+    }
+    best
+}
+
+fn next_header_semantically_plausible(
+    candidate: &[u8],
+    stored_offset: u64,
+    stored_size: u64,
+    next_offset: u64,
+    next_size: u64,
+) -> bool {
+    if candidate.is_empty() || !matches!(candidate[0], 0x01 | 0x17) {
+        return false;
+    }
+    if candidate.len() <= 16 && candidate.iter().all(|item| *item <= 0x19) {
+        return true;
+    }
+    if *candidate.last().unwrap_or(&0xff) != 0 {
+        return false;
+    }
+    if next_offset != stored_offset {
+        let max_reasonable_growth = 4096u64.max(stored_size.saturating_mul(16));
+        if next_size > max_reasonable_growth {
+            return false;
+        }
+    }
+    true
 }
 
 fn rar_walks(data: &[u8], max_candidates: usize) -> Vec<RarWalk> {

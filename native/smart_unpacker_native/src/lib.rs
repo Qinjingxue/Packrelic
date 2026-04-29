@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 mod analysis;
+mod archive_state_ops;
 mod archive_deep_repair;
 mod binary_profile;
 mod carrier;
@@ -167,6 +168,22 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(repair_io::repair_patch_file, m)?)?;
     m.add_function(wrap_pyfunction!(
+        archive_state_ops::archive_state_to_bytes_native,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_state_ops::archive_state_size_native,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_state_ops::archive_state_write_to_file_native,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_state_ops::archive_state_zip_manifest_native,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         zip_deep_repair::zip_deep_partial_recovery,
         m
     )?)?;
@@ -175,11 +192,23 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        zip_deep_repair::zip_directory_field_repair,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         compression_stream_repair::compression_stream_partial_recovery,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        compression_stream_repair::compression_stream_trailing_junk_trim,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         compression_stream_repair::tar_compressed_partial_recovery,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        compression_stream_repair::tar_metadata_downgrade_recovery,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
@@ -192,6 +221,10 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         archive_deep_repair::seven_zip_crc_field_repair,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::seven_zip_next_header_field_repair,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

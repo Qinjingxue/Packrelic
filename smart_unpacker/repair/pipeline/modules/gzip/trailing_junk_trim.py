@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import zlib
-
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_truncate, patch_repair_result
+from smart_unpacker.repair.pipeline.modules._native_stream_trim import native_stream_trailing_trim_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -36,29 +34,13 @@ class GzipTrailingJunkTrim:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_job_source_bytes(job)
-        decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
-        try:
-            decompressor.decompress(data)
-        except zlib.error as exc:
-            return RepairResult(status="unrepairable", confidence=0.0, format="gzip", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message=f"gzip stream could not be decoded: {exc}")
-        if not decompressor.eof or not decompressor.unused_data:
-            return RepairResult(status="unrepairable", confidence=0.0, format="gzip", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="no trailing junk after complete gzip stream")
-        stream_end = len(data) - len(decompressor.unused_data)
-        actions = ["trim_after_gzip_stream"]
-        patch_plan = patch_plan_for_truncate(job, self.spec.name, stream_end, confidence=0.86, actions=actions)
-        return patch_repair_result(
-            job=job,
-            diagnosis=diagnosis,
+        return native_stream_trailing_trim_result(
             module_name=self.spec.name,
             fmt="gzip",
-            patch_plan=patch_plan,
-            confidence=0.86,
-            actions=actions,
+            job=job,
+            diagnosis=diagnosis,
             workspace=workspace,
-            filename="gzip_trailing_junk_trim.gz",
             config=config,
-            materialized_data=data[:stream_end],
         )
 
 

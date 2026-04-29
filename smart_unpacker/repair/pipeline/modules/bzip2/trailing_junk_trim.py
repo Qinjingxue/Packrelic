@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import bz2
-
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_truncate, patch_repair_result
+from smart_unpacker.repair.pipeline.modules._native_stream_trim import native_stream_trailing_trim_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
@@ -36,29 +34,13 @@ class Bzip2TrailingJunkTrim:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_job_source_bytes(job)
-        decompressor = bz2.BZ2Decompressor()
-        try:
-            decompressor.decompress(data)
-        except OSError as exc:
-            return RepairResult(status="unrepairable", confidence=0.0, format="bzip2", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message=f"bzip2 stream could not be decoded: {exc}")
-        if not decompressor.eof or not decompressor.unused_data:
-            return RepairResult(status="unrepairable", confidence=0.0, format="bzip2", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="no trailing junk after complete bzip2 stream")
-        stream_end = len(data) - len(decompressor.unused_data)
-        actions = ["trim_after_bzip2_stream"]
-        patch_plan = patch_plan_for_truncate(job, self.spec.name, stream_end, confidence=0.84, actions=actions)
-        return patch_repair_result(
-            job=job,
-            diagnosis=diagnosis,
+        return native_stream_trailing_trim_result(
             module_name=self.spec.name,
             fmt="bzip2",
-            patch_plan=patch_plan,
-            confidence=0.84,
-            actions=actions,
+            job=job,
+            diagnosis=diagnosis,
             workspace=workspace,
-            filename="bzip2_trailing_junk_trim.bz2",
             config=config,
-            materialized_data=data[:stream_end],
         )
 
 

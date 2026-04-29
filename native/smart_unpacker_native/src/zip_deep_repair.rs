@@ -292,6 +292,63 @@ pub(crate) fn zip_rebuild_from_local_headers(
     }
 }
 
+#[pyfunction]
+#[pyo3(signature = (source_input, workspace, repair_name, max_input_size_mb=512.0))]
+pub(crate) fn zip_directory_field_repair(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    repair_name: &str,
+    max_input_size_mb: f64,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => return simple_repair_status(py, "skipped", "zip", "", &message, &[], 0.0),
+    };
+    let result = match repair_name {
+        "zip_comment_length_fix" => repair_zip_comment_length(&data),
+        "zip_central_directory_count_fix" => repair_zip_cd_count(&data),
+        "zip_central_directory_offset_fix" => repair_zip_cd_offset(&data),
+        _ => Err(format!("unsupported ZIP directory field repair: {repair_name}")),
+    };
+    let repair = match result {
+        Ok(repair) => repair,
+        Err(message) => return simple_repair_status(py, "unrepairable", "zip", "", &message, &[], 0.0),
+    };
+    let output_path = Path::new(workspace).join(format!("{repair_name}.zip"));
+    if let Err(message) = write_bytes_atomic(&repair.bytes, &output_path) {
+        return simple_repair_status(
+            py,
+            "unrepairable",
+            "zip",
+            "",
+            &format!("ZIP repaired candidate could not be written: {message}"),
+            &[],
+            0.0,
+        );
+    }
+    let result = PyDict::new(py);
+    result.set_item("status", "repaired")?;
+    result.set_item("format", "zip")?;
+    result.set_item("selected_path", output_path.to_string_lossy().to_string())?;
+    result.set_item("confidence", repair.confidence)?;
+    result.set_item("message", repair.message)?;
+    result.set_item("actions", PyList::new(py, &repair.actions)?)?;
+    result.set_item("workspace_paths", PyList::new(py, &[output_path.to_string_lossy().to_string()])?)?;
+    if let Some(truncate_at) = repair.truncate_at {
+        result.set_item("truncate_at", truncate_at)?;
+    }
+    let patches = PyList::empty(py);
+    for patch in &repair.patches {
+        let item = PyDict::new(py);
+        item.set_item("offset", patch.offset)?;
+        item.set_item("data", PyBytes::new(py, &patch.data))?;
+        patches.append(item)?;
+    }
+    result.set_item("patches", patches)?;
+    Ok(result.unbind())
+}
+
 #[derive(Debug, Clone)]
 struct DeepZipOptions {
     max_candidates: usize,
@@ -1374,6 +1431,255 @@ impl Crc32 {
     fn finish(self) -> u32 {
         !self.value
     }
+}
+
+struct DirectoryFieldRepair {
+    bytes: Vec<u8>,
+    patches: Vec<BytePatch>,
+    truncate_at: Option<u64>,
+    confidence: f64,
+    actions: Vec<String>,
+    message: String,
+}
+
+struct BytePatch {
+    offset: u64,
+    data: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct EocdInfo {
+    offset: usize,
+    end: usize,
+    disk_entries: u16,
+    total_entries: u16,
+    cd_size: u32,
+    cd_offset: u32,
+}
+
+#[derive(Clone, Copy)]
+struct CdWalk {
+    offset: usize,
+    end: usize,
+    count: usize,
+    valid: bool,
+}
+
+fn repair_zip_comment_length(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    let eocd = find_eocd_record(data, true).ok_or_else(|| "EOCD fixed header was not found".to_string())?;
+    let cd = walk_central_directory_range(data, eocd.cd_offset as usize, Some(eocd.cd_offset as usize + eocd.cd_size as usize));
+    if !cd.valid {
+        return Err("central directory range is not trusted".to_string());
+    }
+    let actual_comment_len = data.len().saturating_sub(eocd.offset + 22);
+    if actual_comment_len > u16::MAX as usize {
+        return Err("actual ZIP comment length is out of range".to_string());
+    }
+    let stored_comment_len = u16_le(data, eocd.offset + 20) as usize;
+    if stored_comment_len == actual_comment_len {
+        return Err("ZIP comment length already matches file length".to_string());
+    }
+    let patch = BytePatch {
+        offset: (eocd.offset + 20) as u64,
+        data: (actual_comment_len as u16).to_le_bytes().to_vec(),
+    };
+    let mut bytes = data.to_vec();
+    bytes[eocd.offset + 20..eocd.offset + 22].copy_from_slice(&patch.data);
+    Ok(DirectoryFieldRepair {
+        bytes,
+        patches: vec![patch],
+        truncate_at: None,
+        confidence: 0.86,
+        actions: vec!["patch_zip_eocd_comment_length".to_string()],
+        message: "ZIP EOCD comment length was patched by native repair".to_string(),
+    })
+}
+
+fn repair_zip_cd_count(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    let eocd = find_eocd_record(data, false).ok_or_else(|| "trusted EOCD was not found".to_string())?;
+    let cd = walk_central_directory_range(data, eocd.cd_offset as usize, Some(eocd.cd_offset as usize + eocd.cd_size as usize));
+    if !cd.valid {
+        return Err("central directory range is not trusted".to_string());
+    }
+    if eocd.disk_entries as usize == cd.count && eocd.total_entries as usize == cd.count {
+        return Err("central directory count already matches walked entries".to_string());
+    }
+    if cd.count > u16::MAX as usize {
+        return Err("ZIP64 central directory count patch is not supported here".to_string());
+    }
+    let value = (cd.count as u16).to_le_bytes().to_vec();
+    let patches = vec![
+        BytePatch { offset: (eocd.offset + 8) as u64, data: value.clone() },
+        BytePatch { offset: (eocd.offset + 10) as u64, data: value },
+    ];
+    let mut bytes = data.to_vec();
+    for patch in &patches {
+        let offset = patch.offset as usize;
+        bytes[offset..offset + patch.data.len()].copy_from_slice(&patch.data);
+    }
+    Ok(DirectoryFieldRepair {
+        bytes,
+        patches,
+        truncate_at: None,
+        confidence: 0.88,
+        actions: vec!["patch_zip_eocd_entry_counts".to_string()],
+        message: "ZIP EOCD central directory counts were patched by native repair".to_string(),
+    })
+}
+
+fn repair_zip_cd_offset(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    let eocd = find_eocd_record(data, true).ok_or_else(|| "EOCD or central directory is missing".to_string())?;
+    let cd = find_valid_central_directory(data).ok_or_else(|| "EOCD or central directory is missing".to_string())?;
+    if eocd.cd_offset as usize == cd.offset && eocd.cd_size as usize == cd.end - cd.offset && eocd.total_entries as usize == cd.count {
+        return Err("central directory offset already matches parsed central directory".to_string());
+    }
+    if cd.count > u16::MAX as usize || cd.end - cd.offset > u32::MAX as usize || cd.offset > u32::MAX as usize {
+        return Err("ZIP64 central directory rewrite is not supported here".to_string());
+    }
+    let mut tail = Vec::new();
+    tail.extend_from_slice(EOCD_SIG);
+    tail.extend_from_slice(&0u16.to_le_bytes());
+    tail.extend_from_slice(&0u16.to_le_bytes());
+    tail.extend_from_slice(&(cd.count as u16).to_le_bytes());
+    tail.extend_from_slice(&(cd.count as u16).to_le_bytes());
+    tail.extend_from_slice(&((cd.end - cd.offset) as u32).to_le_bytes());
+    tail.extend_from_slice(&(cd.offset as u32).to_le_bytes());
+    let comment_len = eocd.end.saturating_sub(eocd.offset + 22);
+    tail.extend_from_slice(&(comment_len as u16).to_le_bytes());
+    if comment_len > 0 && eocd.offset + 22 + comment_len <= data.len() {
+        tail.extend_from_slice(&data[eocd.offset + 22..eocd.offset + 22 + comment_len]);
+    }
+    let mut bytes = data[..cd.end].to_vec();
+    bytes.extend_from_slice(&tail);
+    Ok(DirectoryFieldRepair {
+        bytes,
+        patches: vec![BytePatch { offset: cd.end as u64, data: tail }],
+        truncate_at: Some(cd.end as u64),
+        confidence: 0.9,
+        actions: vec!["scan_central_directory".to_string(), "rewrite_eocd_cd_offset_size_count".to_string()],
+        message: "ZIP EOCD central directory offset/size/count were rewritten by native repair".to_string(),
+    })
+}
+
+fn find_eocd_record(data: &[u8], allow_trailing_junk: bool) -> Option<EocdInfo> {
+    let mut pos = data.windows(EOCD_SIG.len()).rposition(|window| window == EOCD_SIG)?;
+    loop {
+        if pos + 22 <= data.len() {
+            let comment_len = u16_le(data, pos + 20) as usize;
+            let end = pos + 22 + comment_len;
+            if end <= data.len() && (allow_trailing_junk || end == data.len()) {
+                return Some(EocdInfo {
+                    offset: pos,
+                    end,
+                    disk_entries: u16_le(data, pos + 8),
+                    total_entries: u16_le(data, pos + 10),
+                    cd_size: u32_le(data, pos + 12),
+                    cd_offset: u32_le(data, pos + 16),
+                });
+            }
+        }
+        if pos == 0 {
+            return None;
+        }
+        pos = data[..pos].windows(EOCD_SIG.len()).rposition(|window| window == EOCD_SIG)?;
+    }
+}
+
+fn find_valid_central_directory(data: &[u8]) -> Option<CdWalk> {
+    let mut pos = memmem::find(data, CD_SIG)?;
+    let mut best: Option<CdWalk> = None;
+    loop {
+        let walk = walk_central_directory_range(data, pos, None);
+        if walk.valid && best.is_none_or(|current| walk.count > current.count) {
+            best = Some(walk);
+        }
+        let next_start = pos + 4;
+        if next_start >= data.len() {
+            break;
+        }
+        let Some(next) = memmem::find(&data[next_start..], CD_SIG) else {
+            break;
+        };
+        pos = next_start + next;
+    }
+    best
+}
+
+fn walk_central_directory_range(data: &[u8], offset: usize, expected_end: Option<usize>) -> CdWalk {
+    let mut pos = offset;
+    let mut count = 0usize;
+    while pos + 46 <= data.len() && &data[pos..pos + 4] == CD_SIG {
+        let name_len = u16_le(data, pos + 28) as usize;
+        let extra_len = u16_le(data, pos + 30) as usize;
+        let comment_len = u16_le(data, pos + 32) as usize;
+        let record_len = 46usize.saturating_add(name_len).saturating_add(extra_len).saturating_add(comment_len);
+        if record_len < 46 || pos + record_len > data.len() {
+            break;
+        }
+        pos += record_len;
+        count += 1;
+        if expected_end.is_some_and(|end| pos >= end) {
+            break;
+        }
+    }
+    CdWalk {
+        offset,
+        end: pos,
+        count,
+        valid: count > 0 && expected_end.is_none_or(|end| pos == end),
+    }
+}
+
+fn find_last(data: &[u8], needle: &[u8], before: usize) -> Option<usize> {
+    if needle.is_empty() || before < needle.len() || data.len() < needle.len() {
+        return None;
+    }
+    memmem::rfind(&data[..before.min(data.len())], needle)
+}
+
+fn write_bytes_atomic(data: &[u8], output: &Path) -> Result<u64, String> {
+    ensure_parent(output).map_err(|err| err.to_string())?;
+    let temp = temp_path(output);
+    let result = (|| -> Result<(), String> {
+        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        file.write_all(data).map_err(|err| err.to_string())?;
+        file.flush().map_err(|err| err.to_string())?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            if output.exists() {
+                fs::remove_file(output).map_err(|err| err.to_string())?;
+            }
+            fs::rename(&temp, output).map_err(|err| err.to_string())?;
+            Ok(data.len() as u64)
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+fn simple_repair_status(
+    py: Python<'_>,
+    status: &str,
+    format: &str,
+    selected_path: &str,
+    message: &str,
+    actions: &[&str],
+    confidence: f64,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("status", status)?;
+    result.set_item("format", format)?;
+    result.set_item("selected_path", selected_path)?;
+    result.set_item("message", message)?;
+    result.set_item("confidence", confidence)?;
+    result.set_item("actions", PyList::new(py, actions)?)?;
+    result.set_item("warnings", PyList::empty(py))?;
+    result.set_item("workspace_paths", PyList::empty(py))?;
+    Ok(result.unbind())
 }
 
 fn u16_le(bytes: &[u8], offset: usize) -> u16 {

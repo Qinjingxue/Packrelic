@@ -308,6 +308,158 @@ pub(crate) fn tar_compressed_partial_recovery(
     )
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    format,
+    workspace,
+    max_input_size_mb=512.0,
+    max_probe_junk_bytes=1048576
+))]
+pub(crate) fn compression_stream_trailing_junk_trim(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    format: &str,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_probe_junk_bytes: usize,
+) -> PyResult<Py<PyDict>> {
+    let Some(format) = StreamFormat::from_name(format) else {
+        return stream_trim_status(py, "unsupported", format, "", "unsupported compression stream format", 0, 0, 0.0);
+    };
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => return stream_trim_status(py, "skipped", format.name(), "", &message, 0, 0, 0.0),
+    };
+    let Some(stream_end) = find_complete_stream_prefix(&data, format, max_probe_junk_bytes.max(1)) else {
+        return stream_trim_status(
+            py,
+            "unrepairable",
+            format.name(),
+            "",
+            &format!("no trailing junk after complete {} stream", format.name()),
+            0,
+            data.len() as u64,
+            0.0,
+        );
+    };
+    if stream_end >= data.len() {
+        return stream_trim_status(
+            py,
+            "unrepairable",
+            format.name(),
+            "",
+            &format!("no trailing junk after complete {} stream", format.name()),
+            0,
+            data.len() as u64,
+            0.0,
+        );
+    }
+    let output_path = Path::new(workspace).join(format!("{}_trailing_junk_trim{}", format.name(), format.ext()));
+    let output_bytes = match write_prefix_atomic(&data, stream_end, &output_path) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            return stream_trim_status(
+                py,
+                "unrepairable",
+                format.name(),
+                "",
+                &format!("trimmed stream candidate could not be written: {message}"),
+                0,
+                data.len() as u64,
+                0.0,
+            )
+        }
+    };
+    let result = PyDict::new(py);
+    result.set_item("status", "repaired")?;
+    result.set_item("format", format.name())?;
+    result.set_item("selected_path", output_path.to_string_lossy().to_string())?;
+    result.set_item("confidence", match format { StreamFormat::Zstd => 0.78, StreamFormat::Bzip2 => 0.84, _ => 0.86 })?;
+    result.set_item("message", format!("{} stream trailing junk was trimmed by native repair", format.name()))?;
+    let action = format!("trim_after_{}_stream", format.name());
+    result.set_item("actions", PyList::new(py, &[action])?)?;
+    result.set_item("warnings", PyList::empty(py))?;
+    result.set_item("workspace_paths", PyList::new(py, &[output_path.to_string_lossy().to_string()])?)?;
+    result.set_item("truncate_at", stream_end as u64)?;
+    result.set_item("input_bytes", data.len() as u64)?;
+    result.set_item("output_bytes", output_bytes)?;
+    Ok(result.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_entries=20000
+))]
+pub(crate) fn tar_metadata_downgrade_recovery(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    let options = StreamRepairOptions {
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_duration: None,
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => return stream_trim_status(py, "skipped", "tar", "", &message, 0, 0, 0.0),
+    };
+    let repaired = match downgrade_tar_metadata(&data, &options, max_entries) {
+        Ok(repaired) => repaired,
+        Err(message) => return stream_trim_status(py, "unrepairable", "tar", "", &message, 0, data.len() as u64, 0.0),
+    };
+    if !repaired.changed {
+        return stream_trim_status(
+            py,
+            "unrepairable",
+            "tar",
+            "",
+            "TAR metadata already looks canonical",
+            0,
+            data.len() as u64,
+            0.0,
+        );
+    }
+    let output_path = Path::new(workspace).join("tar_metadata_downgrade_recovery.tar");
+    let output_bytes = match write_prefix_atomic(&repaired.bytes, repaired.bytes.len(), &output_path) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            return stream_trim_status(
+                py,
+                "unrepairable",
+                "tar",
+                "",
+                &format!("TAR metadata candidate could not be written: {message}"),
+                0,
+                data.len() as u64,
+                0.0,
+            )
+        }
+    };
+    let result = PyDict::new(py);
+    result.set_item("status", "partial")?;
+    result.set_item("format", "tar")?;
+    result.set_item("selected_path", output_path.to_string_lossy().to_string())?;
+    result.set_item("confidence", 0.72)?;
+    result.set_item("message", "TAR metadata was downgraded by native recovery")?;
+    result.set_item("actions", PyList::new(py, &["walk_tar_members", "rewrite_tar_headers_with_canonical_metadata"])? )?;
+    result.set_item("warnings", PyList::new(py, &repaired.warnings)? )?;
+    result.set_item("workspace_paths", PyList::new(py, &[output_path.to_string_lossy().to_string()])?)?;
+    result.set_item("members", repaired.members)?;
+    result.set_item("checksum_fixes", repaired.checksum_fixes)?;
+    result.set_item("truncated_members", repaired.truncated_members)?;
+    result.set_item("output_bytes", output_bytes)?;
+    Ok(result.unbind())
+}
+
 #[derive(Clone, Copy, Debug)]
 enum StreamFormat {
     Gzip,
@@ -672,6 +824,139 @@ fn write_recompressed_stream(
     }
 }
 
+fn downgrade_tar_metadata(
+    data: &[u8],
+    options: &StreamRepairOptions,
+    max_entries: usize,
+) -> Result<TarPrefixRepair, String> {
+    let mut output = Vec::with_capacity(data.len().saturating_add(1024));
+    let mut offset = 0usize;
+    let mut members = 0u64;
+    let mut skipped_metadata = 0u64;
+    let mut checksum_fixes = 0u64;
+    let mut warnings = Vec::new();
+    while offset + 512 <= data.len() {
+        if max_entries > 0 && members as usize >= max_entries {
+            warnings.push("TAR metadata downgrade reached repair.deep.max_entries".to_string());
+            break;
+        }
+        let header = &data[offset..offset + 512];
+        if is_zero_block(header) {
+            break;
+        }
+        let Some(size) = parse_tar_number(&header[124..136]) else {
+            if members == 0 {
+                return Err("no plausible TAR header was found".to_string());
+            }
+            warnings.push("stopped before a TAR header with an invalid size field".to_string());
+            break;
+        };
+        if !plausible_tar_header(header) {
+            if members == 0 {
+                return Err("input does not begin with a plausible TAR header".to_string());
+            }
+            warnings.push("stopped before an implausible TAR header".to_string());
+            break;
+        }
+        let Some(payload_span) = padded_tar_payload_span(size) else {
+            break;
+        };
+        let Some(member_end) = offset.checked_add(512).and_then(|value| value.checked_add(payload_span)) else {
+            break;
+        };
+        if member_end > data.len() {
+            break;
+        }
+        let typeflag = header[156];
+        if matches!(typeflag, b'x' | b'g' | b'L' | b'K' | b'S') {
+            skipped_metadata += 1;
+            offset = member_end;
+            continue;
+        }
+        if matches!(typeflag, b'0' | 0) {
+            let mut fixed_header = header.to_vec();
+            let computed = tar_checksum(&fixed_header);
+            if parse_tar_number(&fixed_header[148..156]) != Some(computed) {
+                fixed_header[148..156].copy_from_slice(&format_tar_checksum(computed));
+                checksum_fixes += 1;
+            }
+            output.extend_from_slice(&fixed_header);
+            output.extend_from_slice(&data[offset + 512..member_end]);
+            members += 1;
+        }
+        offset = member_end;
+    }
+    if members == 0 || skipped_metadata == 0 {
+        return Err("no TAR metadata member could be downgraded while preserving regular payloads".to_string());
+    }
+    output.extend_from_slice(&[0u8; 1024]);
+    if options.max_output_bytes.is_some_and(|limit| output.len() as u64 > limit) {
+        return Err("repaired TAR exceeds repair.deep.max_output_size_mb".to_string());
+    }
+    warnings.push(format!("downgraded or skipped {skipped_metadata} TAR metadata headers"));
+    Ok(TarPrefixRepair {
+        tar_bytes: output.len() as u64,
+        bytes: output,
+        members,
+        checksum_fixes,
+        truncated_members: 0,
+        changed: true,
+        warnings,
+    })
+}
+
+fn find_complete_stream_prefix(data: &[u8], format: StreamFormat, max_probe_junk_bytes: usize) -> Option<usize> {
+    if data.is_empty() {
+        return None;
+    }
+    let min_end = data.len().saturating_sub(max_probe_junk_bytes);
+    for end in min_end..=data.len() {
+        if decode_stream_exact(&data[..end], format).is_ok() {
+            return Some(end);
+        }
+    }
+    None
+}
+
+fn decode_stream_exact(data: &[u8], format: StreamFormat) -> Result<u64, String> {
+    let cursor = Cursor::new(data.to_vec());
+    let mut decoder = decoder_for(format, cursor)?;
+    let mut buffer = vec![0u8; DECODE_CHUNK_SIZE];
+    let mut decoded = 0u64;
+    loop {
+        match decoder.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => decoded += read as u64,
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+    Ok(decoded)
+}
+
+fn write_prefix_atomic(data: &[u8], end: usize, output: &Path) -> Result<u64, String> {
+    ensure_parent(output).map_err(|err| err.to_string())?;
+    let temp = temp_path(output);
+    let result = (|| -> Result<(), String> {
+        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        file.write_all(&data[..end]).map_err(|err| err.to_string())?;
+        file.flush().map_err(|err| err.to_string())?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            if output.exists() {
+                fs::remove_file(output).map_err(|err| err.to_string())?;
+            }
+            fs::rename(&temp, output).map_err(|err| err.to_string())?;
+            Ok(end as u64)
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
 fn repair_tar_prefix(
     data: &[u8],
     options: &StreamRepairOptions,
@@ -904,6 +1189,30 @@ fn status_dict(
             PyList::new(py, [selected_path])?
         },
     )?;
+    Ok(result.unbind())
+}
+
+fn stream_trim_status(
+    py: Python<'_>,
+    status: &str,
+    format: &str,
+    selected_path: &str,
+    message: &str,
+    output_bytes: u64,
+    input_bytes: u64,
+    confidence: f64,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("status", status)?;
+    result.set_item("format", format)?;
+    result.set_item("selected_path", selected_path)?;
+    result.set_item("message", message)?;
+    result.set_item("output_bytes", output_bytes)?;
+    result.set_item("input_bytes", input_bytes)?;
+    result.set_item("confidence", confidence)?;
+    result.set_item("actions", PyList::empty(py))?;
+    result.set_item("warnings", PyList::empty(py))?;
+    result.set_item("workspace_paths", PyList::empty(py))?;
     Ok(result.unbind())
 }
 
