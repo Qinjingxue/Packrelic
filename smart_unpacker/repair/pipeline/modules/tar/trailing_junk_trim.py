@@ -3,11 +3,11 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_truncate, patch_repair_result
+from smart_unpacker.repair.pipeline.modules._native_patch_result import native_patch_repair_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
 
-from .trailing_zero_repair import _canonical_tar_end, _walk_payload_end
+from .checksum_fix import _run_native_tar_boundary
 
 
 class TarTrailingJunkTrim:
@@ -36,29 +36,15 @@ class TarTrailingJunkTrim:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_job_source_bytes(job)
-        payload_end = _walk_payload_end(data)
-        if payload_end is None:
-            return RepairResult(status="unrepairable", confidence=0.0, format="tar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="TAR entries could not be walked safely")
-        end = _canonical_tar_end(data, payload_end)
-        if end - payload_end < 1024:
-            return RepairResult(status="unrepairable", confidence=0.0, format="tar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="TAR does not have two trusted trailing zero blocks")
-        if end == len(data):
-            return RepairResult(status="unrepairable", confidence=0.0, format="tar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="no trailing bytes after TAR zero blocks")
-        actions = ["trim_after_tar_zero_blocks"]
-        patch_plan = patch_plan_for_truncate(job, self.spec.name, end, confidence=0.86, actions=actions)
-        return patch_repair_result(
-            job=job,
-            diagnosis=diagnosis,
+        result = _run_native_tar_boundary(job, workspace, config, self.spec.name)
+        return native_patch_repair_result(
             module_name=self.spec.name,
             fmt="tar",
-            patch_plan=patch_plan,
-            confidence=0.86,
-            actions=actions,
-            workspace=workspace,
-            filename="tar_trailing_junk_trim.tar",
+            native_key="native_tar_boundary_repair",
+            result=result,
+            job=job,
+            diagnosis=diagnosis,
             config=config,
-            materialized_data=data[:end],
         )
 
 

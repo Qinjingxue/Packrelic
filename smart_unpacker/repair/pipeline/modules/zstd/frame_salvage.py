@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
-
-
-ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+from smart_unpacker_native import zstd_frame_salvage_repair as _native_zstd_frame_salvage
 
 
 class ZstdFrameSalvage:
@@ -41,67 +37,44 @@ class ZstdFrameSalvage:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        try:
-            import zstandard as zstd
-        except ImportError as exc:
-            return RepairResult(status="unsupported", confidence=0.0, format="zstd", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message=f"zstandard backend is not available: {exc}")
-
-        data = load_job_source_bytes(job)
-        offsets = _frame_offsets(data)
-        if len(offsets) < 2:
-            return RepairResult(status="unrepairable", confidence=0.0, format="zstd", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="zstd frame salvage requires multiple frame candidates")
-
-        recovered_payloads: list[bytes] = []
-        recovered_offsets: list[int] = []
-        skipped_offsets: list[int] = []
-        for index, start in enumerate(offsets):
-            end = offsets[index + 1] if index + 1 < len(offsets) else len(data)
-            segment = data[start:end]
-            try:
-                payload = zstd.ZstdDecompressor().decompress(segment)
-            except zstd.ZstdError:
-                skipped_offsets.append(start)
-                continue
-            recovered_payloads.append(payload)
-            recovered_offsets.append(start)
-
-        if not recovered_payloads or not skipped_offsets:
-            return RepairResult(status="unrepairable", confidence=0.0, format="zstd", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="no damaged zstd frame could be skipped while preserving a good frame")
-
-        output = Path(workspace) / "zstd_frame_salvage.zst"
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(zstd.ZstdCompressor(level=0).compress(b"".join(recovered_payloads)))
-        confidence = min(0.94, 0.68 + 0.12 * len(recovered_payloads))
-        return RepairResult(
-            status="partial",
-            confidence=confidence,
-            format="zstd",
-            repaired_input={"kind": "file", "path": str(output), "format_hint": "zstd"},
-            actions=["scan_zstd_frames", "skip_bad_frames", "recompress_recovered_payload"],
-            damage_flags=list(job.damage_flags),
-            warnings=[f"skipped damaged zstd frame offsets: {skipped_offsets[:8]}"],
-            workspace_paths=[str(output)],
-            partial=True,
-            module_name=self.spec.name,
-            diagnosis={
-                **diagnosis.as_dict(),
-                "zstd_frame_salvage": {
-                    "frame_candidates": offsets,
-                    "recovered_offsets": recovered_offsets,
-                    "skipped_offsets": skipped_offsets,
-                    "recovered_bytes": sum(len(item) for item in recovered_payloads),
-                },
-            },
+        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        result = dict(
+            _native_zstd_frame_salvage(
+                source_input_for_job(job),
+                workspace,
+                float(deep.get("max_input_size_mb", 512) or 0),
+                float(deep.get("max_output_size_mb", 2048) or 0),
+            )
         )
-
-
-def _frame_offsets(data: bytes) -> list[int]:
-    offsets = []
-    pos = data.find(ZSTD_MAGIC)
-    while pos >= 0:
-        offsets.append(pos)
-        pos = data.find(ZSTD_MAGIC, pos + 1)
-    return offsets
+        status = str(result.get("status") or "unrepairable")
+        selected_path = str(result.get("selected_path") or "")
+        if status == "partial" and selected_path:
+            return RepairResult(
+                status="partial",
+                confidence=float(result.get("confidence") or 0.0),
+                format="zstd",
+                repaired_input={"kind": "file", "path": selected_path, "format_hint": "zstd"},
+                actions=list(result.get("actions") or []),
+                damage_flags=list(job.damage_flags),
+                warnings=list(result.get("warnings") or []),
+                workspace_paths=list(result.get("workspace_paths") or [selected_path]),
+                partial=True,
+                module_name=self.spec.name,
+                diagnosis={**diagnosis.as_dict(), "native_zstd_frame_salvage": result},
+                message=str(result.get("message") or "native zstd frame salvage produced a candidate"),
+            )
+        return RepairResult(
+            status="unrepairable" if status in {"skipped", "unsupported"} else status,
+            confidence=float(result.get("confidence") or 0.0),
+            format="zstd",
+            actions=list(result.get("actions") or []),
+            damage_flags=list(job.damage_flags),
+            warnings=list(result.get("warnings") or []),
+            workspace_paths=list(result.get("workspace_paths") or []),
+            module_name=self.spec.name,
+            diagnosis={**diagnosis.as_dict(), "native_zstd_frame_salvage": result},
+            message=str(result.get("message") or "native zstd frame salvage did not produce a candidate"),
+        )
 
 
 register_repair_module(ZstdFrameSalvage())

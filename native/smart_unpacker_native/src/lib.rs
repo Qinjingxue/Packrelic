@@ -196,6 +196,22 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        compression_stream_repair::gzip_footer_fix_repair,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        compression_stream_repair::gzip_deflate_member_resync_repair,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        compression_stream_repair::zstd_frame_salvage_repair,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        compression_stream_repair::tar_boundary_repair,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         compression_stream_repair::compression_stream_partial_recovery,
         m
     )?)?;

@@ -3,22 +3,12 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from pathlib import Path
-
-from smart_unpacker.repair.pipeline.modules._common import (
-    copy_source_prefix_to_file,
-    load_job_source_bytes,
-    patch_diagnosis,
-    patch_plan_for_truncate,
-    patched_state_for_job,
-    should_materialize_candidate,
-    virtual_patch_repaired_input,
-    write_candidate,
-)
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
+from smart_unpacker_native import zip_directory_field_repair as _native_zip_directory_field_repair
 
-from ._directory import find_eocd
+from ._native_field_result import repair_result_from_native_zip_field
 
 
 class ZipTrailingJunkTrim:
@@ -50,54 +40,14 @@ class ZipTrailingJunkTrim:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_job_source_bytes(job)
-        eocd = find_eocd(data, allow_trailing_junk=True)
-        if eocd is None:
-            return RepairResult(
-                status="unrepairable",
-                confidence=0.0,
-                format="zip",
-                module_name=self.spec.name,
-                diagnosis=diagnosis.as_dict(),
-                message="EOCD was not found",
-            )
-        if eocd.end == len(data):
-            return RepairResult(
-                status="unrepairable",
-                confidence=0.0,
-                format="zip",
-                module_name=self.spec.name,
-                diagnosis=diagnosis.as_dict(),
-                message="no trailing bytes after EOCD",
-            )
-        actions = ["trim_after_eocd"]
-        patch_plan = patch_plan_for_truncate(job, self.spec.name, eocd.end, confidence=0.88, actions=actions)
-        repaired_state = patched_state_for_job(job, patch_plan)
-        if not should_materialize_candidate(config):
-            path = ""
-            repaired_input = virtual_patch_repaired_input(repaired_state)
-        elif job.archive_state and job.archive_state.patches:
-            path = write_candidate(data[:eocd.end], workspace, "zip_trailing_junk_trim.zip")
-            repaired_input = {"kind": "file", "path": path, "format_hint": "zip"}
-        else:
-            path = copy_source_prefix_to_file(
-                job.source_input,
-                eocd.end,
-                str(Path(workspace) / "zip_trailing_junk_trim.zip"),
-            )
-            repaired_input = {"kind": "file", "path": path, "format_hint": "zip"}
-        return RepairResult(
-            status="repaired",
-            confidence=0.88,
-            format="zip",
-            repaired_input=repaired_input,
-            actions=actions,
-            damage_flags=list(job.damage_flags),
-            workspace_paths=[path] if path else [],
-            module_name=self.spec.name,
-            diagnosis=patch_diagnosis(diagnosis.as_dict(), patch_plan, repaired_state),
-            repaired_state=repaired_state,
+        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        result = _native_zip_directory_field_repair(
+            source_input_for_job(job),
+            workspace,
+            self.spec.name,
+            float(deep.get("max_input_size_mb", 512) or 0),
         )
+        return repair_result_from_native_zip_field(self.spec.name, dict(result), job, diagnosis, config)
 
 
 register_repair_module(ZipTrailingJunkTrim())

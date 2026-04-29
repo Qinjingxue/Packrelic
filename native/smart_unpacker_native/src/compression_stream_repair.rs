@@ -1,9 +1,9 @@
 use bzip2::read::BzDecoder;
 use bzip2::write::BzEncoder;
 use bzip2::Compression as Bzip2Compression;
-use flate2::read::GzDecoder;
+use flate2::read::{DeflateDecoder, GzDecoder};
 use flate2::write::GzEncoder;
-use flate2::Compression as GzipCompression;
+use flate2::{Compression as GzipCompression, Decompress, FlushDecompress, Status};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use std::fs::{self, File};
@@ -458,6 +458,207 @@ pub(crate) fn tar_metadata_downgrade_recovery(
     result.set_item("truncated_members", repaired.truncated_members)?;
     result.set_item("output_bytes", output_bytes)?;
     Ok(result.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (source_input, workspace, max_input_size_mb=512.0))]
+pub(crate) fn gzip_footer_fix_repair(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => return stream_trim_status(py, "skipped", "gzip", "", &message, 0, 0, 0.0),
+    };
+    let repair = match repair_gzip_footer(&data) {
+        Ok(repair) => repair,
+        Err(message) => return stream_trim_status(py, "unrepairable", "gzip", "", &message, 0, data.len() as u64, 0.0),
+    };
+    let output_path = Path::new(workspace).join("gzip_footer_fix.gz");
+    let output_bytes = match write_prefix_and_suffix_atomic(&data, repair.stream_end, &repair.footer, &output_path) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            return stream_trim_status(
+                py,
+                "unrepairable",
+                "gzip",
+                "",
+                &format!("gzip footer candidate could not be written: {message}"),
+                0,
+                data.len() as u64,
+                0.0,
+            )
+        }
+    };
+    let result = PyDict::new(py);
+    result.set_item("status", "repaired")?;
+    result.set_item("format", "gzip")?;
+    result.set_item("selected_path", output_path.to_string_lossy().to_string())?;
+    result.set_item("confidence", 0.88)?;
+    result.set_item("message", "gzip footer was recomputed by native repair")?;
+    result.set_item("actions", PyList::new(py, &["decode_deflate_payload", "rewrite_gzip_footer"])?)?;
+    result.set_item("warnings", PyList::empty(py))?;
+    result.set_item("workspace_paths", PyList::new(py, &[output_path.to_string_lossy().to_string()])?)?;
+    result.set_item("truncate_at", repair.stream_end as u64)?;
+    result.set_item("append_data", PyBytes::new(py, &repair.footer))?;
+    result.set_item("decoded_bytes", repair.decoded_bytes)?;
+    result.set_item("output_bytes", output_bytes)?;
+    Ok(result.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (source_input, workspace, max_input_size_mb=512.0, max_output_size_mb=2048.0))]
+pub(crate) fn gzip_deflate_member_resync_repair(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => return stream_salvage_status(py, "skipped", "gzip", "", &message, &[], &[], 0, 0.0),
+    };
+    let repair = match salvage_gzip_members(&data) {
+        Ok(repair) => repair,
+        Err(message) => return stream_salvage_status(py, "unrepairable", "gzip", "", &message, &[], &[], 0, 0.0),
+    };
+    let options = StreamRepairOptions {
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_duration: None,
+    };
+    let output_path = Path::new(workspace).join("gzip_deflate_member_resync.gz");
+    let output_bytes = match write_recompressed_stream(StreamFormat::Gzip, &repair.payload, &output_path, &options) {
+        Ok(bytes) => bytes,
+        Err(message) => return stream_salvage_status(py, "unrepairable", "gzip", "", &message, &repair.recovered_offsets, &repair.skipped_offsets, 0, 0.0),
+    };
+    let confidence = (0.64 + 0.1 * repair.recovered_offsets.len() as f64).min(0.9);
+    stream_salvage_status(
+        py,
+        "partial",
+        "gzip",
+        &output_path.to_string_lossy(),
+        "damaged gzip members were skipped by native repair",
+        &repair.recovered_offsets,
+        &repair.skipped_offsets,
+        output_bytes,
+        confidence,
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (source_input, workspace, max_input_size_mb=512.0, max_output_size_mb=2048.0))]
+pub(crate) fn zstd_frame_salvage_repair(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => return stream_salvage_status(py, "skipped", "zstd", "", &message, &[], &[], 0, 0.0),
+    };
+    let repair = match salvage_zstd_frames(&data) {
+        Ok(repair) => repair,
+        Err(message) => return stream_salvage_status(py, "unrepairable", "zstd", "", &message, &[], &[], 0, 0.0),
+    };
+    let options = StreamRepairOptions {
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_duration: None,
+    };
+    let output_path = Path::new(workspace).join("zstd_frame_salvage.zst");
+    let output_bytes = match write_recompressed_stream(StreamFormat::Zstd, &repair.payload, &output_path, &options) {
+        Ok(bytes) => bytes,
+        Err(message) => return stream_salvage_status(py, "unrepairable", "zstd", "", &message, &repair.recovered_offsets, &repair.skipped_offsets, 0, 0.0),
+    };
+    let confidence = (0.68 + 0.12 * repair.recovered_offsets.len() as f64).min(0.94);
+    stream_salvage_status(
+        py,
+        "partial",
+        "zstd",
+        &output_path.to_string_lossy(),
+        "damaged zstd frames were skipped by native repair",
+        &repair.recovered_offsets,
+        &repair.skipped_offsets,
+        output_bytes,
+        confidence,
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    repair_name,
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_entries=20000
+))]
+pub(crate) fn tar_boundary_repair(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    repair_name: &str,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    let options = StreamRepairOptions {
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_duration: None,
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => return tar_repair_status(py, "skipped", "", &message, &[], None, &[], 0.0),
+    };
+    let repair = match repair_name {
+        "tar_header_checksum_fix" => repair_tar_checksums(&data, &options, max_entries),
+        "tar_trailing_junk_trim" => repair_tar_trailing_junk(&data),
+        "tar_trailing_zero_block_repair" => repair_tar_trailing_zero_blocks(&data),
+        _ => Err(format!("unsupported TAR boundary repair: {repair_name}")),
+    };
+    let repair = match repair {
+        Ok(repair) => repair,
+        Err(message) => return tar_repair_status(py, "unrepairable", "", &message, &[], None, &[], 0.0),
+    };
+    let output_path = Path::new(workspace).join(format!("{repair_name}.tar"));
+    let output_bytes = match write_tar_repair_candidate(&data, &repair, &output_path) {
+        Ok(bytes) => bytes,
+        Err(message) => {
+            return tar_repair_status(
+                py,
+                "unrepairable",
+                "",
+                &format!("TAR candidate could not be written: {message}"),
+                &[],
+                None,
+                &[],
+                0.0,
+            )
+        }
+    };
+    let result = tar_repair_status(
+        py,
+        "repaired",
+        &output_path.to_string_lossy(),
+        &repair.message,
+        &repair.actions,
+        repair.truncate_at,
+        &repair.patches,
+        repair.confidence,
+    )?;
+    let dict = result.bind(py);
+    dict.set_item("output_bytes", output_bytes)?;
+    if let Some(append_data) = &repair.append_data {
+        dict.set_item("append_data", PyBytes::new(py, append_data))?;
+    }
+    Ok(result)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -957,6 +1158,441 @@ fn write_prefix_atomic(data: &[u8], end: usize, output: &Path) -> Result<u64, St
     }
 }
 
+fn write_prefix_and_suffix_atomic(
+    data: &[u8],
+    end: usize,
+    suffix: &[u8],
+    output: &Path,
+) -> Result<u64, String> {
+    ensure_parent(output).map_err(|err| err.to_string())?;
+    let temp = temp_path(output);
+    let result = (|| -> Result<u64, String> {
+        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        file.write_all(&data[..end]).map_err(|err| err.to_string())?;
+        file.write_all(suffix).map_err(|err| err.to_string())?;
+        file.flush().map_err(|err| err.to_string())?;
+        Ok((end + suffix.len()) as u64)
+    })();
+    match result {
+        Ok(written) => {
+            if output.exists() {
+                fs::remove_file(output).map_err(|err| err.to_string())?;
+            }
+            fs::rename(&temp, output).map_err(|err| err.to_string())?;
+            Ok(written)
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+struct GzipFooterRepair {
+    stream_end: usize,
+    footer: [u8; 8],
+    decoded_bytes: u64,
+}
+
+struct StreamSalvage {
+    payload: Vec<u8>,
+    recovered_offsets: Vec<u64>,
+    skipped_offsets: Vec<u64>,
+}
+
+struct TarBytePatch {
+    offset: u64,
+    data: Vec<u8>,
+}
+
+struct TarRepair {
+    patches: Vec<TarBytePatch>,
+    truncate_at: Option<u64>,
+    append_data: Option<Vec<u8>>,
+    confidence: f64,
+    actions: Vec<&'static str>,
+    message: String,
+}
+
+fn repair_gzip_footer(data: &[u8]) -> Result<GzipFooterRepair, String> {
+    let header_end = gzip_header_end(data).ok_or_else(|| "invalid gzip header".to_string())?;
+    if data.len() < header_end + 8 {
+        return Err("invalid gzip header".to_string());
+    }
+    let (payload, consumed) = find_gzip_deflate_payload(data, header_end)?;
+    let stream_end = header_end + consumed;
+    let mut footer = [0u8; 8];
+    footer[0..4].copy_from_slice(&crc32(&payload).to_le_bytes());
+    footer[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    if stream_end + 8 == data.len() && data[stream_end..].starts_with(&footer) {
+        return Err("gzip footer already matches decoded payload".to_string());
+    }
+    Ok(GzipFooterRepair {
+        stream_end,
+        footer,
+        decoded_bytes: payload.len() as u64,
+    })
+}
+
+fn gzip_header_end(data: &[u8]) -> Option<usize> {
+    if data.len() < 10 || data[0] != 0x1f || data[1] != 0x8b || data[2] != 8 {
+        return None;
+    }
+    let flags = data[3];
+    let mut offset = 10usize;
+    if flags & 0x04 != 0 {
+        if offset + 2 > data.len() {
+            return None;
+        }
+        let extra_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+        offset = offset.checked_add(2)?.checked_add(extra_len)?;
+    }
+    if flags & 0x08 != 0 {
+        offset = skip_c_string(data, offset)?;
+    }
+    if flags & 0x10 != 0 {
+        offset = skip_c_string(data, offset)?;
+    }
+    if flags & 0x02 != 0 {
+        offset = offset.checked_add(2)?;
+    }
+    (offset <= data.len()).then_some(offset)
+}
+
+fn skip_c_string(data: &[u8], offset: usize) -> Option<usize> {
+    data.get(offset..)?
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|index| offset + index + 1)
+}
+
+fn decode_raw_deflate_prefix(data: &[u8], accept_exact_eof: bool) -> Result<(Vec<u8>, usize), String> {
+    let mut decompressor = Decompress::new(false);
+    let mut output = Vec::new();
+    loop {
+        let before_in = decompressor.total_in();
+        let before_out = decompressor.total_out();
+        let consumed = usize::try_from(before_in).map_err(|_| "deflate input offset overflowed".to_string())?;
+        let flush = if consumed >= data.len() {
+            FlushDecompress::Finish
+        } else {
+            FlushDecompress::None
+        };
+        let status = decompressor
+            .decompress_vec(&data[consumed..], &mut output, flush)
+            .map_err(|err| err.to_string())?;
+        if status == Status::StreamEnd {
+            return Ok((output, decompressor.total_in() as usize));
+        }
+        if decompressor.total_in() == before_in && decompressor.total_out() == before_out {
+            if accept_exact_eof && decompressor.total_in() as usize >= data.len() && !output.is_empty() {
+                return Ok((output, data.len()));
+            }
+            return Err("deflate stream could not be decoded".to_string());
+        }
+        if decompressor.total_in() as usize >= data.len() {
+            if accept_exact_eof && !output.is_empty() {
+                return Ok((output, data.len()));
+            }
+            return Err("deflate stream ended before a complete payload".to_string());
+        }
+    }
+}
+
+fn find_gzip_deflate_payload(data: &[u8], header_end: usize) -> Result<(Vec<u8>, usize), String> {
+    if data.len() < header_end + 8 {
+        return Err("invalid gzip header".to_string());
+    }
+    if let Ok((decoded, consumed)) = decode_raw_deflate_prefix(&data[header_end..], false) {
+        if gzip_candidate_valid(data, header_end + consumed, &decoded) {
+            return Ok((decoded, consumed));
+        }
+    }
+    if let Ok(decoded) = decode_raw_deflate_exact(&data[header_end..data.len() - 8]) {
+        let consumed = data.len() - header_end - 8;
+        if gzip_candidate_valid(data, header_end + consumed, &decoded) {
+            return Ok((decoded, consumed));
+        }
+    }
+    let scan_limit = data.len().saturating_sub(8);
+    for end in (header_end + 1..=scan_limit).rev() {
+        if let Ok(decoded) = decode_raw_deflate_exact(&data[header_end..end]) {
+            if gzip_candidate_valid(data, end, &decoded) {
+                return Ok((decoded, end - header_end));
+            }
+        }
+    }
+    Err("deflate stream could not be decoded".to_string())
+}
+
+fn gzip_candidate_valid(data: &[u8], stream_end: usize, payload: &[u8]) -> bool {
+    if stream_end > data.len() {
+        return false;
+    }
+    let mut footer = [0u8; 8];
+    footer[0..4].copy_from_slice(&crc32(payload).to_le_bytes());
+    footer[4..8].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+    let mut candidate = Vec::with_capacity(stream_end + 8);
+    candidate.extend_from_slice(&data[..stream_end]);
+    candidate.extend_from_slice(&footer);
+    let mut decoder = GzDecoder::new(Cursor::new(candidate));
+    let mut decoded = Vec::new();
+    if decoder.read_to_end(&mut decoded).is_err() {
+        return false;
+    }
+    decoded == payload
+}
+
+fn decode_raw_deflate_exact(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut decoder = DeflateDecoder::new(Cursor::new(data.to_vec()));
+    let mut output = Vec::new();
+    decoder.read_to_end(&mut output).map_err(|err| err.to_string())?;
+    if output.is_empty() {
+        return Err("deflate stream decoded no bytes".to_string());
+    }
+    Ok(output)
+}
+
+fn salvage_gzip_members(data: &[u8]) -> Result<StreamSalvage, String> {
+    let offsets = find_magic_offsets(data, b"\x1f\x8b\x08");
+    if offsets.len() < 2 {
+        return Err("gzip deflate resync requires multiple member headers".to_string());
+    }
+    let mut payload = Vec::new();
+    let mut recovered_offsets = Vec::new();
+    let mut skipped_offsets = Vec::new();
+    for (index, start) in offsets.iter().copied().enumerate() {
+        let end = offsets.get(index + 1).copied().unwrap_or(data.len());
+        let mut decoder = GzDecoder::new(Cursor::new(data[start..end].to_vec()));
+        let before = payload.len();
+        match decoder.read_to_end(&mut payload) {
+            Ok(_) => recovered_offsets.push(start as u64),
+            Err(_) => {
+                payload.truncate(before);
+                skipped_offsets.push(start as u64);
+            }
+        }
+    }
+    if payload.is_empty() || skipped_offsets.is_empty() {
+        return Err("no damaged gzip member could be skipped while preserving a later member".to_string());
+    }
+    Ok(StreamSalvage {
+        payload,
+        recovered_offsets,
+        skipped_offsets,
+    })
+}
+
+fn salvage_zstd_frames(data: &[u8]) -> Result<StreamSalvage, String> {
+    let offsets = find_magic_offsets(data, b"\x28\xb5\x2f\xfd");
+    if offsets.len() < 2 {
+        return Err("zstd frame salvage requires multiple frame candidates".to_string());
+    }
+    let mut payload = Vec::new();
+    let mut recovered_offsets = Vec::new();
+    let mut skipped_offsets = Vec::new();
+    for (index, start) in offsets.iter().copied().enumerate() {
+        let end = offsets.get(index + 1).copied().unwrap_or(data.len());
+        match zstd::stream::decode_all(Cursor::new(data[start..end].to_vec())) {
+            Ok(decoded) => {
+                payload.extend_from_slice(&decoded);
+                recovered_offsets.push(start as u64);
+            }
+            Err(_) => skipped_offsets.push(start as u64),
+        }
+    }
+    if payload.is_empty() || skipped_offsets.is_empty() {
+        return Err("no damaged zstd frame could be skipped while preserving a good frame".to_string());
+    }
+    Ok(StreamSalvage {
+        payload,
+        recovered_offsets,
+        skipped_offsets,
+    })
+}
+
+fn find_magic_offsets(data: &[u8], magic: &[u8]) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    if magic.is_empty() || data.len() < magic.len() {
+        return offsets;
+    }
+    let mut start = 0usize;
+    while start + magic.len() <= data.len() {
+        let Some(pos) = data[start..].windows(magic.len()).position(|window| window == magic) else {
+            break;
+        };
+        let absolute = start + pos;
+        offsets.push(absolute);
+        start = absolute + 1;
+    }
+    offsets
+}
+
+fn repair_tar_checksums(
+    data: &[u8],
+    options: &StreamRepairOptions,
+    max_entries: usize,
+) -> Result<TarRepair, String> {
+    let mut offset = 0usize;
+    let mut patches = Vec::new();
+    let mut entries = 0usize;
+    while offset + 512 <= data.len() {
+        if max_entries > 0 && entries >= max_entries {
+            break;
+        }
+        let header = &data[offset..offset + 512];
+        if is_zero_block(header) {
+            break;
+        }
+        let Some(size) = parse_tar_number(&header[124..136]) else {
+            break;
+        };
+        let computed = tar_checksum(header);
+        if parse_tar_number(&header[148..156]) != Some(computed) {
+            patches.push(TarBytePatch {
+                offset: (offset + 148) as u64,
+                data: format_tar_checksum(computed).to_vec(),
+            });
+        }
+        let Some(payload_span) = padded_tar_payload_span(size) else {
+            break;
+        };
+        offset = offset
+            .checked_add(512)
+            .and_then(|value| value.checked_add(payload_span))
+            .ok_or_else(|| "TAR member size overflowed".to_string())?;
+        entries += 1;
+    }
+    if patches.is_empty() {
+        return Err("no TAR header checksum mismatch was found".to_string());
+    }
+    if options.max_output_bytes.is_some_and(|limit| data.len() as u64 > limit) {
+        return Err("repaired TAR exceeds repair.deep.max_output_size_mb".to_string());
+    }
+    Ok(TarRepair {
+        patches,
+        truncate_at: None,
+        append_data: None,
+        confidence: 0.88,
+        actions: vec!["recompute_tar_header_checksum"],
+        message: "TAR header checksums were recomputed by native repair".to_string(),
+    })
+}
+
+fn repair_tar_trailing_junk(data: &[u8]) -> Result<TarRepair, String> {
+    let payload_end = walk_tar_payload_end(data).ok_or_else(|| "TAR entries could not be walked safely".to_string())?;
+    let end = canonical_tar_end(data, payload_end);
+    if end.saturating_sub(payload_end) < 1024 {
+        return Err("TAR does not have two trusted trailing zero blocks".to_string());
+    }
+    if end == data.len() {
+        return Err("no trailing bytes after TAR zero blocks".to_string());
+    }
+    Ok(TarRepair {
+        patches: Vec::new(),
+        truncate_at: Some(end as u64),
+        append_data: None,
+        confidence: 0.86,
+        actions: vec!["trim_after_tar_zero_blocks"],
+        message: "TAR trailing junk was trimmed by native repair".to_string(),
+    })
+}
+
+fn repair_tar_trailing_zero_blocks(data: &[u8]) -> Result<TarRepair, String> {
+    let payload_end = walk_tar_payload_end(data).ok_or_else(|| "TAR entries could not be walked safely".to_string())?;
+    let end = canonical_tar_end(data, payload_end);
+    let zero_bytes_present = end.saturating_sub(payload_end);
+    let missing_zeros = 1024usize.saturating_sub(zero_bytes_present.min(1024));
+    if end == data.len() && missing_zeros == 0 {
+        return Err("TAR already has canonical zero block ending".to_string());
+    }
+    Ok(TarRepair {
+        patches: Vec::new(),
+        truncate_at: Some(end as u64),
+        append_data: (missing_zeros > 0).then(|| vec![0u8; missing_zeros]),
+        confidence: 0.84,
+        actions: vec!["trim_or_append_tar_zero_blocks"],
+        message: "TAR trailing zero blocks were normalized by native repair".to_string(),
+    })
+}
+
+fn walk_tar_payload_end(data: &[u8]) -> Option<usize> {
+    let mut offset = 0usize;
+    while offset + 512 <= data.len() {
+        let header = &data[offset..offset + 512];
+        if is_zero_block(header) {
+            return Some(offset);
+        }
+        let size = parse_tar_number(&header[124..136])?;
+        let payload_span = padded_tar_payload_span(size)?;
+        offset = offset.checked_add(512)?.checked_add(payload_span)?;
+    }
+    (offset == data.len()).then_some(offset)
+}
+
+fn canonical_tar_end(data: &[u8], payload_end: usize) -> usize {
+    let mut end = payload_end;
+    while end + 512 <= data.len() && is_zero_block(&data[end..end + 512]) {
+        end += 512;
+        if end >= payload_end + 1024 {
+            break;
+        }
+    }
+    end
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for byte in bytes {
+        crc ^= *byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+fn write_tar_repair_candidate(data: &[u8], repair: &TarRepair, output: &Path) -> Result<u64, String> {
+    ensure_parent(output).map_err(|err| err.to_string())?;
+    let temp = temp_path(output);
+    let result = (|| -> Result<u64, String> {
+        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        let end = repair.truncate_at.map(|value| value as usize).unwrap_or(data.len()).min(data.len());
+        let mut cursor = 0usize;
+        let mut patches = repair.patches.iter().collect::<Vec<_>>();
+        patches.sort_by_key(|patch| patch.offset);
+        for patch in patches {
+            let offset = patch.offset as usize;
+            if offset < cursor || offset + patch.data.len() > end {
+                return Err("TAR patch is out of range".to_string());
+            }
+            file.write_all(&data[cursor..offset]).map_err(|err| err.to_string())?;
+            file.write_all(&patch.data).map_err(|err| err.to_string())?;
+            cursor = offset + patch.data.len();
+        }
+        file.write_all(&data[cursor..end]).map_err(|err| err.to_string())?;
+        if let Some(append_data) = &repair.append_data {
+            file.write_all(append_data).map_err(|err| err.to_string())?;
+        }
+        file.flush().map_err(|err| err.to_string())?;
+        Ok((end + repair.append_data.as_ref().map_or(0, Vec::len)) as u64)
+    })();
+    match result {
+        Ok(written) => {
+            if output.exists() {
+                fs::remove_file(output).map_err(|err| err.to_string())?;
+            }
+            fs::rename(&temp, output).map_err(|err| err.to_string())?;
+            Ok(written)
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
 fn repair_tar_prefix(
     data: &[u8],
     options: &StreamRepairOptions,
@@ -1213,6 +1849,92 @@ fn stream_trim_status(
     result.set_item("actions", PyList::empty(py))?;
     result.set_item("warnings", PyList::empty(py))?;
     result.set_item("workspace_paths", PyList::empty(py))?;
+    Ok(result.unbind())
+}
+
+fn stream_salvage_status(
+    py: Python<'_>,
+    status: &str,
+    format: &str,
+    selected_path: &str,
+    message: &str,
+    recovered_offsets: &[u64],
+    skipped_offsets: &[u64],
+    output_bytes: u64,
+    confidence: f64,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("status", status)?;
+    result.set_item("format", format)?;
+    result.set_item("selected_path", selected_path)?;
+    result.set_item("message", message)?;
+    result.set_item("confidence", confidence)?;
+    result.set_item("recovered_offsets", PyList::new(py, recovered_offsets)?)?;
+    result.set_item("skipped_offsets", PyList::new(py, skipped_offsets)?)?;
+    result.set_item("recovered_bytes", 0u64)?;
+    result.set_item("output_bytes", output_bytes)?;
+    result.set_item(
+        "actions",
+        if format == "zstd" {
+            PyList::new(py, &["scan_zstd_frames", "skip_bad_frames", "recompress_recovered_payload"])?
+        } else {
+            PyList::new(py, &["scan_gzip_members", "skip_bad_deflate_members", "recompress_recovered_payload"])?
+        },
+    )?;
+    let warnings = if skipped_offsets.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!("skipped damaged {format} offsets: {:?}", &skipped_offsets[..skipped_offsets.len().min(8)])]
+    };
+    result.set_item("warnings", PyList::new(py, &warnings)?)?;
+    result.set_item(
+        "workspace_paths",
+        if selected_path.is_empty() {
+            PyList::empty(py)
+        } else {
+            PyList::new(py, [selected_path])?
+        },
+    )?;
+    Ok(result.unbind())
+}
+
+fn tar_repair_status(
+    py: Python<'_>,
+    status: &str,
+    selected_path: &str,
+    message: &str,
+    actions: &[&str],
+    truncate_at: Option<u64>,
+    patches: &[TarBytePatch],
+    confidence: f64,
+) -> PyResult<Py<PyDict>> {
+    let result = PyDict::new(py);
+    result.set_item("status", status)?;
+    result.set_item("format", "tar")?;
+    result.set_item("selected_path", selected_path)?;
+    result.set_item("message", message)?;
+    result.set_item("confidence", confidence)?;
+    result.set_item("actions", PyList::new(py, actions)?)?;
+    result.set_item("warnings", PyList::empty(py))?;
+    result.set_item(
+        "workspace_paths",
+        if selected_path.is_empty() {
+            PyList::empty(py)
+        } else {
+            PyList::new(py, [selected_path])?
+        },
+    )?;
+    if let Some(value) = truncate_at {
+        result.set_item("truncate_at", value)?;
+    }
+    let patch_list = PyList::empty(py);
+    for patch in patches {
+        let item = PyDict::new(py);
+        item.set_item("offset", patch.offset)?;
+        item.set_item("data", PyBytes::new(py, &patch.data))?;
+        patch_list.append(item)?;
+    }
+    result.set_item("patches", patch_list)?;
     Ok(result.unbind())
 }
 

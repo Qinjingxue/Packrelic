@@ -42,12 +42,6 @@ def load_source_bytes(source_input: dict[str, Any]) -> bytes:
     raise ValueError(f"unsupported repair input kind: {kind}")
 
 
-def load_job_source_bytes(job: RepairJob) -> bytes:
-    if job.archive_state is not None and job.archive_state.patches:
-        return archive_state_to_bytes(job.archive_state)
-    return load_source_bytes(job.source_input)
-
-
 def source_input_for_job(job: RepairJob) -> dict[str, Any]:
     if job.archive_state is None or not job.archive_state.patches:
         return dict(job.source_input)
@@ -316,13 +310,6 @@ def copy_source_prefix_to_file(source_input: dict[str, Any], length: int, output
         ranges = _take_concat_prefix(list(source_input.get("ranges") or []), length)
         return concat_ranges_to_file(ranges, output_path)
     raise ValueError(f"unsupported repair input kind: {kind}")
-
-
-def copy_job_source_prefix_to_file(job: RepairJob, length: int, output_path: str) -> str:
-    if job.archive_state is not None and job.archive_state.patches:
-        data = load_job_source_bytes(job)[: max(0, int(length))]
-        return write_candidate(data, str(Path(output_path).parent), Path(output_path).name)
-    return copy_source_prefix_to_file(job.source_input, length, output_path)
 
 
 def source_input_size(source_input: dict[str, Any]) -> int | None:

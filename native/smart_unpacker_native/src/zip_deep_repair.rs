@@ -309,6 +309,10 @@ pub(crate) fn zip_directory_field_repair(
         "zip_comment_length_fix" => repair_zip_comment_length(&data),
         "zip_central_directory_count_fix" => repair_zip_cd_count(&data),
         "zip_central_directory_offset_fix" => repair_zip_cd_offset(&data),
+        "zip_trailing_junk_trim" => repair_zip_trailing_junk(&data),
+        "zip_eocd_repair" => repair_zip_eocd(&data),
+        "zip_local_header_field_repair" => repair_zip_local_header_fields(&data),
+        "zip64_field_repair" => repair_zip64_fields(&data),
         _ => Err(format!("unsupported ZIP directory field repair: {repair_name}")),
     };
     let repair = match result {
@@ -1465,6 +1469,55 @@ struct CdWalk {
     valid: bool,
 }
 
+struct CentralEntry {
+    flags: u16,
+    method: u16,
+    crc32: u32,
+    compressed_size: u32,
+    uncompressed_size: u32,
+    name_len: u16,
+    extra_len: u16,
+    name: Vec<u8>,
+    extra: Vec<u8>,
+    extra_offset: usize,
+    local_header_offset: u32,
+}
+
+struct LocalHeader {
+    offset: usize,
+    flags: u16,
+    method: u16,
+    crc32: u32,
+    compressed_size: u32,
+    uncompressed_size: u32,
+    name: Vec<u8>,
+    extra: Vec<u8>,
+    extra_offset: usize,
+    name_len: u16,
+    extra_len: u16,
+}
+
+struct Zip64Extra {
+    values: Vec<u64>,
+    values_offset: usize,
+}
+
+#[derive(Clone, Copy)]
+struct Zip64Eocd {
+    offset: usize,
+    end: usize,
+    cd_size: u64,
+    cd_offset: u64,
+}
+
+#[derive(Clone, Copy)]
+struct Zip64Locator {
+    offset: usize,
+    end: usize,
+    zip64_eocd_offset: u64,
+    total_disks: u32,
+}
+
 fn repair_zip_comment_length(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
     let eocd = find_eocd_record(data, true).ok_or_else(|| "EOCD fixed header was not found".to_string())?;
     let cd = walk_central_directory_range(data, eocd.cd_offset as usize, Some(eocd.cd_offset as usize + eocd.cd_size as usize));
@@ -1561,6 +1614,257 @@ fn repair_zip_cd_offset(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
     })
 }
 
+fn repair_zip_trailing_junk(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    let eocd = find_eocd_record(data, true).ok_or_else(|| "EOCD was not found".to_string())?;
+    if eocd.end == data.len() {
+        return Err("no trailing bytes after EOCD".to_string());
+    }
+    Ok(DirectoryFieldRepair {
+        bytes: data[..eocd.end].to_vec(),
+        patches: Vec::new(),
+        truncate_at: Some(eocd.end as u64),
+        confidence: 0.88,
+        actions: vec!["trim_after_eocd".to_string()],
+        message: "ZIP trailing junk was trimmed by native repair".to_string(),
+    })
+}
+
+fn repair_zip_eocd(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    if let Some(eocd) = find_eocd_record(data, true) {
+        let cd = walk_central_directory_range(
+            data,
+            eocd.cd_offset as usize,
+            Some(eocd.cd_offset as usize + eocd.cd_size as usize),
+        );
+        if cd.valid && eocd.end < data.len() {
+            return Ok(DirectoryFieldRepair {
+                bytes: data[..eocd.end].to_vec(),
+                patches: Vec::new(),
+                truncate_at: Some(eocd.end as u64),
+                confidence: 0.9,
+                actions: vec!["trim_after_eocd".to_string()],
+                message: "ZIP EOCD boundary was repaired by native trim".to_string(),
+            });
+        }
+    }
+    let cd = find_valid_central_directory(data)
+        .ok_or_else(|| "no valid central directory was found for EOCD rebuild".to_string())?;
+    let tail = eocd_tail_for_cd(data, &cd, None)?;
+    let mut bytes = data[..cd.end].to_vec();
+    bytes.extend_from_slice(&tail);
+    Ok(DirectoryFieldRepair {
+        bytes,
+        patches: vec![BytePatch {
+            offset: cd.end as u64,
+            data: tail,
+        }],
+        truncate_at: Some(cd.end as u64),
+        confidence: 0.94,
+        actions: vec!["scan_central_directory".to_string(), "rebuild_eocd".to_string()],
+        message: "ZIP EOCD was rebuilt by native repair".to_string(),
+    })
+}
+
+fn repair_zip_local_header_fields(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    let eocd = find_eocd_record(data, false).ok_or_else(|| "trusted EOCD was not found".to_string())?;
+    let entries = parse_central_directory_entries(
+        data,
+        eocd.cd_offset as usize,
+        eocd.cd_offset as usize + eocd.cd_size as usize,
+    );
+    if entries.is_empty() {
+        return Err("no central directory entries were parseable".to_string());
+    }
+    let mut bytes = data.to_vec();
+    let mut patches = Vec::new();
+    for entry in entries {
+        if entry.local_header_offset == 0xFFFF_FFFF {
+            continue;
+        }
+        let Some(mut local) = parse_local_header(&bytes, entry.local_header_offset as usize) else {
+            continue;
+        };
+        if local.name_len != entry.name_len {
+            let local_name_start = local.offset + LOCAL_HEADER_LEN;
+            let local_entry_name = bytes.get(local_name_start..local_name_start + entry.name_len as usize);
+            if local_entry_name == Some(entry.name.as_slice()) {
+                add_zip_patch(&mut bytes, &mut patches, local.offset + 26, &(entry.name_len).to_le_bytes());
+                if let Some(updated) = parse_local_header(&bytes, entry.local_header_offset as usize) {
+                    local = updated;
+                }
+            }
+        }
+        if local.extra_len != entry.extra_len {
+            let expected_start = local.offset + LOCAL_HEADER_LEN + entry.name_len as usize;
+            let expected = bytes.get(expected_start..expected_start + entry.extra_len as usize);
+            if expected == Some(entry.extra.as_slice()) {
+                add_zip_patch(&mut bytes, &mut patches, local.offset + 28, &(entry.extra_len).to_le_bytes());
+                if let Some(updated) = parse_local_header(&bytes, entry.local_header_offset as usize) {
+                    local = updated;
+                }
+            }
+        }
+        if local.flags != entry.flags {
+            add_zip_patch(&mut bytes, &mut patches, local.offset + 6, &entry.flags.to_le_bytes());
+        }
+        if local.method != entry.method {
+            add_zip_patch(&mut bytes, &mut patches, local.offset + 8, &entry.method.to_le_bytes());
+        }
+        if entry.flags & 0x08 == 0 {
+            if local.crc32 != entry.crc32 {
+                add_zip_patch(&mut bytes, &mut patches, local.offset + 14, &entry.crc32.to_le_bytes());
+            }
+            if entry.compressed_size != 0xFFFF_FFFF && local.compressed_size != entry.compressed_size {
+                add_zip_patch(&mut bytes, &mut patches, local.offset + 18, &entry.compressed_size.to_le_bytes());
+            }
+            if entry.uncompressed_size != 0xFFFF_FFFF && local.uncompressed_size != entry.uncompressed_size {
+                add_zip_patch(&mut bytes, &mut patches, local.offset + 22, &entry.uncompressed_size.to_le_bytes());
+            }
+        }
+    }
+    if patches.is_empty() {
+        return Err("no ZIP local header field mismatch was safely repairable".to_string());
+    }
+    Ok(DirectoryFieldRepair {
+        bytes,
+        patches,
+        truncate_at: None,
+        confidence: 0.9,
+        actions: vec!["reconcile_zip_local_header_fields_with_central_directory".to_string()],
+        message: "ZIP local header fields were reconciled by native repair".to_string(),
+    })
+}
+
+fn repair_zip64_fields(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    if let Some(repair) = repair_zip64_tail(data)? {
+        return Ok(repair);
+    }
+    repair_zip64_central_extra(data)
+}
+
+fn repair_zip64_tail(data: &[u8]) -> Result<Option<DirectoryFieldRepair>, String> {
+    let Some(eocd) = find_eocd_record(data, true) else {
+        return Ok(None);
+    };
+    let Some(zip64) = find_zip64_eocd(data, eocd.offset) else {
+        return Ok(None);
+    };
+    let mut cd = walk_central_directory_range(
+        data,
+        zip64.cd_offset as usize,
+        Some(zip64.cd_offset as usize + zip64.cd_size as usize),
+    );
+    if !cd.valid {
+        cd = match find_valid_central_directory(data) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+    }
+    if !cd.valid {
+        return Ok(None);
+    }
+    let mut record = data[zip64.offset..zip64.end].to_vec();
+    let expected_record_size = (zip64.end - zip64.offset - 12) as u64;
+    let mut actions = Vec::new();
+    for (offset, value) in [
+        (4usize, expected_record_size),
+        (24, cd.count as u64),
+        (32, cd.count as u64),
+        (40, (cd.end - cd.offset) as u64),
+        (48, cd.offset as u64),
+    ] {
+        let encoded = value.to_le_bytes();
+        if record.get(offset..offset + 8) != Some(encoded.as_slice()) {
+            record[offset..offset + 8].copy_from_slice(&encoded);
+            actions.push("rewrite_zip64_eocd_fields".to_string());
+        }
+    }
+    let expected_locator = zip64_locator_bytes(zip64.offset as u64);
+    let locator = find_zip64_locator(data, eocd.offset);
+    let locator_bytes = if locator.is_some_and(|item| item.zip64_eocd_offset == zip64.offset as u64 && item.total_disks >= 1) {
+        if data[locator.unwrap().offset..locator.unwrap().end] != expected_locator {
+            actions.push("normalize_zip64_eocd_locator".to_string());
+            expected_locator
+        } else {
+            data[locator.unwrap().offset..locator.unwrap().end].to_vec()
+        }
+    } else {
+        actions.push("rewrite_zip64_eocd_locator".to_string());
+        expected_locator
+    };
+    dedupe(&mut actions);
+    if actions.is_empty() {
+        return Ok(None);
+    }
+    let tail_start = zip64.offset;
+    let mut tail = record;
+    tail.extend_from_slice(&locator_bytes);
+    tail.extend_from_slice(&data[eocd.offset..eocd.end]);
+    let mut bytes = data[..tail_start].to_vec();
+    bytes.extend_from_slice(&tail);
+    Ok(Some(DirectoryFieldRepair {
+        bytes,
+        patches: vec![BytePatch {
+            offset: tail_start as u64,
+            data: tail,
+        }],
+        truncate_at: Some(tail_start as u64),
+        confidence: 0.98,
+        actions,
+        message: "ZIP64 tail fields were rewritten by native repair".to_string(),
+    }))
+}
+
+fn repair_zip64_central_extra(data: &[u8]) -> Result<DirectoryFieldRepair, String> {
+    let eocd = find_eocd_record(data, true).ok_or_else(|| "trusted EOCD was not found".to_string())?;
+    let (cd_offset, cd_end) = if let Some(zip64) = find_zip64_eocd(data, eocd.offset) {
+        (zip64.cd_offset as usize, (zip64.cd_offset + zip64.cd_size) as usize)
+    } else {
+        (eocd.cd_offset as usize, eocd.cd_offset as usize + eocd.cd_size as usize)
+    };
+    let entries = parse_central_directory_entries(data, cd_offset, cd_end);
+    if entries.is_empty() {
+        return Err("no ZIP64 central directory entries were parseable".to_string());
+    }
+    let mut bytes = data.to_vec();
+    let mut patches = Vec::new();
+    for entry in entries {
+        let Some(local) = find_local_for_central(data, &entry) else {
+            continue;
+        };
+        let Some(central_zip64) = parse_zip64_extra(&entry.extra, entry.extra_offset) else {
+            continue;
+        };
+        let Some(local_zip64) = parse_zip64_extra(&local.extra, local.extra_offset) else {
+            continue;
+        };
+        let Some(expected) = expected_zip64_values(&entry, &local, &local_zip64) else {
+            continue;
+        };
+        if central_zip64.values.len() < expected.len() {
+            continue;
+        }
+        for (index, value) in expected.into_iter().enumerate() {
+            if central_zip64.values[index] == value {
+                continue;
+            }
+            let offset = central_zip64.values_offset + index * 8;
+            add_zip_patch(&mut bytes, &mut patches, offset, &value.to_le_bytes());
+        }
+    }
+    if patches.is_empty() {
+        return Err("no ZIP64 tail or extra field mismatch was safely repairable".to_string());
+    }
+    Ok(DirectoryFieldRepair {
+        bytes,
+        patches,
+        truncate_at: None,
+        confidence: 0.96,
+        actions: vec!["reconcile_zip64_central_extra_fields".to_string()],
+        message: "ZIP64 central extra fields were reconciled by native repair".to_string(),
+    })
+}
+
 fn find_eocd_record(data: &[u8], allow_trailing_junk: bool) -> Option<EocdInfo> {
     let mut pos = data.windows(EOCD_SIG.len()).rposition(|window| window == EOCD_SIG)?;
     loop {
@@ -1630,11 +1934,224 @@ fn walk_central_directory_range(data: &[u8], offset: usize, expected_end: Option
     }
 }
 
-fn find_last(data: &[u8], needle: &[u8], before: usize) -> Option<usize> {
-    if needle.is_empty() || before < needle.len() || data.len() < needle.len() {
+fn parse_central_directory_entries(data: &[u8], offset: usize, expected_end: usize) -> Vec<CentralEntry> {
+    let mut entries = Vec::new();
+    let mut pos = offset;
+    while pos + 46 <= data.len() && pos < expected_end && &data[pos..pos + 4] == CD_SIG {
+        let name_len = u16_le(data, pos + 28);
+        let extra_len = u16_le(data, pos + 30);
+        let comment_len = u16_le(data, pos + 32) as usize;
+        let name_start = pos + 46;
+        let extra_start = name_start + name_len as usize;
+        let comment_start = extra_start + extra_len as usize;
+        let record_end = comment_start + comment_len;
+        if record_end > data.len() || record_end > expected_end {
+            break;
+        }
+        entries.push(CentralEntry {
+            flags: u16_le(data, pos + 8),
+            method: u16_le(data, pos + 10),
+            crc32: u32_le(data, pos + 16),
+            compressed_size: u32_le(data, pos + 20),
+            uncompressed_size: u32_le(data, pos + 24),
+            name_len,
+            extra_len,
+            name: data[name_start..extra_start].to_vec(),
+            extra: data[extra_start..comment_start].to_vec(),
+            extra_offset: extra_start,
+            local_header_offset: u32_le(data, pos + 42),
+        });
+        pos = record_end;
+    }
+    entries
+}
+
+fn parse_local_header(data: &[u8], offset: usize) -> Option<LocalHeader> {
+    if offset + LOCAL_HEADER_LEN > data.len() || &data[offset..offset + 4] != LFH_SIG {
         return None;
     }
-    memmem::rfind(&data[..before.min(data.len())], needle)
+    let name_len = u16_le(data, offset + 26);
+    let extra_len = u16_le(data, offset + 28);
+    let name_start = offset + LOCAL_HEADER_LEN;
+    let extra_start = name_start.checked_add(name_len as usize)?;
+    let data_start = extra_start.checked_add(extra_len as usize)?;
+    if data_start > data.len() {
+        return None;
+    }
+    Some(LocalHeader {
+        offset,
+        flags: u16_le(data, offset + 6),
+        method: u16_le(data, offset + 8),
+        crc32: u32_le(data, offset + 14),
+        compressed_size: u32_le(data, offset + 18),
+        uncompressed_size: u32_le(data, offset + 22),
+        name: data[name_start..extra_start].to_vec(),
+        extra: data[extra_start..data_start].to_vec(),
+        extra_offset: extra_start,
+        name_len,
+        extra_len,
+    })
+}
+
+fn parse_zip64_extra(extra: &[u8], absolute_extra_offset: usize) -> Option<Zip64Extra> {
+    let mut pos = 0usize;
+    while pos + 4 <= extra.len() {
+        let header_id = u16_le(extra, pos);
+        let size = u16_le(extra, pos + 2) as usize;
+        let value_start = pos + 4;
+        let value_end = value_start.checked_add(size)?;
+        if value_end > extra.len() {
+            return None;
+        }
+        if header_id == 0x0001 {
+            let mut values = Vec::new();
+            let mut cursor = value_start;
+            while cursor + 8 <= value_end {
+                values.push(u64_le(extra, cursor));
+                cursor += 8;
+            }
+            return Some(Zip64Extra {
+                values,
+                values_offset: absolute_extra_offset + value_start,
+            });
+        }
+        pos = value_end;
+    }
+    None
+}
+
+fn find_zip64_eocd(data: &[u8], before: usize) -> Option<Zip64Eocd> {
+    let pos = memmem::rfind(&data[..before.min(data.len())], ZIP64_EOCD_SIG)?;
+    if pos + 56 > data.len() {
+        return None;
+    }
+    let record_size = u64_le(data, pos + 4);
+    let end = pos.checked_add(12)?.checked_add(usize::try_from(record_size).ok()?)?;
+    if end > data.len() || end < pos + 56 {
+        return None;
+    }
+    Some(Zip64Eocd {
+        offset: pos,
+        end,
+        cd_size: u64_le(data, pos + 40),
+        cd_offset: u64_le(data, pos + 48),
+    })
+}
+
+fn find_zip64_locator(data: &[u8], eocd_offset: usize) -> Option<Zip64Locator> {
+    let pos = memmem::rfind(&data[..eocd_offset.min(data.len())], ZIP64_LOCATOR_SIG)?;
+    if pos + 20 > data.len() {
+        return None;
+    }
+    Some(Zip64Locator {
+        offset: pos,
+        end: pos + 20,
+        zip64_eocd_offset: u64_le(data, pos + 8),
+        total_disks: u32_le(data, pos + 16),
+    })
+}
+
+fn zip64_locator_bytes(zip64_offset: u64) -> Vec<u8> {
+    let mut output = Vec::with_capacity(20);
+    output.extend_from_slice(ZIP64_LOCATOR_SIG);
+    output.extend_from_slice(&0u32.to_le_bytes());
+    output.extend_from_slice(&zip64_offset.to_le_bytes());
+    output.extend_from_slice(&1u32.to_le_bytes());
+    output
+}
+
+fn find_local_for_central(data: &[u8], entry: &CentralEntry) -> Option<LocalHeader> {
+    let mut candidates = Vec::new();
+    if entry.local_header_offset != 0xFFFF_FFFF {
+        candidates.push(entry.local_header_offset as usize);
+    }
+    if let Some(zip64) = parse_zip64_extra(&entry.extra, entry.extra_offset) {
+        if zip64.values.len() >= 3 {
+            candidates.push(zip64.values[2] as usize);
+        }
+    }
+    for offset in candidates {
+        if let Some(local) = parse_local_header(data, offset) {
+            if local.name == entry.name {
+                return Some(local);
+            }
+        }
+    }
+    let mut pos = memmem::find(data, LFH_SIG)?;
+    loop {
+        if let Some(local) = parse_local_header(data, pos) {
+            if local.name == entry.name {
+                return Some(local);
+            }
+        }
+        let next_start = pos + 4;
+        if next_start >= data.len() {
+            return None;
+        }
+        let Some(next) = memmem::find(&data[next_start..], LFH_SIG) else {
+            return None;
+        };
+        pos = next_start + next;
+    }
+}
+
+fn expected_zip64_values(
+    entry: &CentralEntry,
+    local: &LocalHeader,
+    local_zip64: &Zip64Extra,
+) -> Option<Vec<u64>> {
+    let mut local_values = local_zip64.values.clone();
+    let mut expected = Vec::new();
+    if entry.uncompressed_size == 0xFFFF_FFFF {
+        if local_values.is_empty() {
+            return None;
+        }
+        expected.push(local_values.remove(0));
+    }
+    if entry.compressed_size == 0xFFFF_FFFF {
+        if local_values.is_empty() {
+            return None;
+        }
+        expected.push(local_values.remove(0));
+    }
+    if entry.local_header_offset == 0xFFFF_FFFF {
+        expected.push(local.offset as u64);
+    }
+    Some(expected)
+}
+
+fn eocd_tail_for_cd(data: &[u8], cd: &CdWalk, source_eocd: Option<EocdInfo>) -> Result<Vec<u8>, String> {
+    if cd.count > u16::MAX as usize || cd.end - cd.offset > u32::MAX as usize || cd.offset > u32::MAX as usize {
+        return Err("ZIP64 central directory rewrite is not supported here".to_string());
+    }
+    let mut tail = Vec::new();
+    tail.extend_from_slice(EOCD_SIG);
+    tail.extend_from_slice(&0u16.to_le_bytes());
+    tail.extend_from_slice(&0u16.to_le_bytes());
+    tail.extend_from_slice(&(cd.count as u16).to_le_bytes());
+    tail.extend_from_slice(&(cd.count as u16).to_le_bytes());
+    tail.extend_from_slice(&((cd.end - cd.offset) as u32).to_le_bytes());
+    tail.extend_from_slice(&(cd.offset as u32).to_le_bytes());
+    let comment = source_eocd
+        .and_then(|eocd| data.get(eocd.offset + 22..eocd.end))
+        .unwrap_or(&[]);
+    if comment.len() > u16::MAX as usize {
+        return Err("ZIP comment length is out of range".to_string());
+    }
+    tail.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+    tail.extend_from_slice(comment);
+    Ok(tail)
+}
+
+fn add_zip_patch(bytes: &mut [u8], patches: &mut Vec<BytePatch>, offset: usize, payload: &[u8]) {
+    if bytes.get(offset..offset + payload.len()) == Some(payload) {
+        return;
+    }
+    bytes[offset..offset + payload.len()].copy_from_slice(payload);
+    patches.push(BytePatch {
+        offset: offset as u64,
+        data: payload.to_vec(),
+    });
 }
 
 fn write_bytes_atomic(data: &[u8], output: &Path) -> Result<u64, String> {

@@ -326,23 +326,6 @@ def parse_zip64_extra(extra: bytes, *, absolute_extra_offset: int) -> Zip64Extra
     return None
 
 
-def rewrite_eocd(data: bytes, cd: CentralDirectoryWalk, *, comment: bytes = b"") -> bytes:
-    output = bytearray(data[:cd.end])
-    output.extend(struct.pack(
-        "<IHHHHIIH",
-        0x06054B50,
-        0,
-        0,
-        min(cd.count, 0xFFFF),
-        min(cd.count, 0xFFFF),
-        cd.end - cd.offset,
-        cd.offset,
-        len(comment),
-    ))
-    output.extend(comment)
-    return bytes(output)
-
-
 def trim_to_eocd(data: bytes, eocd: EocdRecord) -> bytes:
     zip64_tail = _zip64_tail_start(data, eocd.offset)
     if zip64_tail is None:

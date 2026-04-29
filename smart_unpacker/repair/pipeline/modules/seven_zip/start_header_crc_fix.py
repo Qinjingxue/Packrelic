@@ -3,13 +3,10 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-import struct
-
-from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_byte_patches, patch_repair_result
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
-
-from ._structure import parse_start_header, rewrite_start_crc
+from smart_unpacker_native import seven_zip_crc_field_repair as _native_seven_zip_crc_field_repair
 
 
 class SevenZipStartHeaderCrcFix:
@@ -38,30 +35,42 @@ class SevenZipStartHeaderCrcFix:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_job_source_bytes(job)
-        header = parse_start_header(data)
-        if header is None:
-            return RepairResult(status="unrepairable", confidence=0.0, format="7z", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="7z start header fields are not safely parseable")
-        if header.start_crc_ok:
-            return RepairResult(status="unrepairable", confidence=0.0, format="7z", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="7z start header CRC is already valid")
-        warnings = [] if header.next_header_crc_ok else ["next header CRC is still invalid after start header CRC repair"]
-        confidence = 0.86 if header.next_header_crc_ok else 0.62
-        actions = ["recompute_7z_start_header_crc"]
-        patch = {"offset": 8, "data": struct.pack("<I", header.computed_start_crc)}
-        patch_plan = patch_plan_for_byte_patches(job, self.spec.name, [patch], confidence=confidence, actions=actions)
-        return patch_repair_result(
-            job=job,
-            diagnosis=diagnosis,
+        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        result = dict(
+            _native_seven_zip_crc_field_repair(
+                source_input_for_job(job),
+                workspace,
+                float(deep.get("max_input_size_mb", 512) or 0),
+                int(deep.get("max_candidates_per_module", 8) or 1),
+            )
+        )
+        status = str(result.get("status") or "unrepairable")
+        selected_path = str(result.get("selected_path") or "")
+        if status == "repaired" and selected_path:
+            return RepairResult(
+                status="repaired",
+                confidence=float(result.get("confidence") or 0.86),
+                format="7z",
+                repaired_input={"kind": "file", "path": selected_path, "format_hint": "7z"},
+                actions=list(result.get("actions") or []),
+                damage_flags=list(job.damage_flags),
+                warnings=list(result.get("warnings") or []),
+                workspace_paths=list(result.get("workspace_paths") or [selected_path]),
+                module_name=self.spec.name,
+                diagnosis={**diagnosis.as_dict(), "native_seven_zip_crc_field_repair": result},
+                message=str(result.get("message") or "native 7z start header CRC repair produced a candidate"),
+            )
+        return RepairResult(
+            status="unrepairable" if status in {"skipped", "unsupported"} else status,
+            confidence=float(result.get("confidence") or 0.0),
+            format="7z",
+            actions=list(result.get("actions") or []),
+            damage_flags=list(job.damage_flags),
+            warnings=list(result.get("warnings") or []),
+            workspace_paths=list(result.get("workspace_paths") or []),
             module_name=self.spec.name,
-            fmt="7z",
-            patch_plan=patch_plan,
-            confidence=confidence,
-            actions=actions,
-            warnings=warnings,
-            workspace=workspace,
-            filename="seven_zip_start_header_crc_fix.7z",
-            config=config,
-            materialized_data=rewrite_start_crc(data, header),
+            diagnosis={**diagnosis.as_dict(), "native_seven_zip_crc_field_repair": result},
+            message=str(result.get("message") or "native 7z start header CRC repair did not produce a candidate"),
         )
 
 

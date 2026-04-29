@@ -46,8 +46,3 @@ def parse_start_header(data: bytes) -> SevenZipStartHeader | None:
         next_header_crc_ok=(zlib.crc32(next_header) & 0xFFFFFFFF) == next_header_crc,
     )
 
-
-def rewrite_start_crc(data: bytes, header: SevenZipStartHeader) -> bytes:
-    output = bytearray(data)
-    struct.pack_into("<I", output, 8, header.computed_start_crc)
-    return bytes(output)

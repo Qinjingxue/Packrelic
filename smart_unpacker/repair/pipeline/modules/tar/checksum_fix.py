@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import math
-
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_byte_patches, patch_repair_result
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
+from smart_unpacker.repair.pipeline.modules._native_patch_result import native_patch_repair_result
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
+from smart_unpacker_native import tar_boundary_repair as _native_tar_boundary_repair
 
 
 class TarHeaderChecksumFix:
@@ -36,67 +36,30 @@ class TarHeaderChecksumFix:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = bytearray(load_job_source_bytes(job))
-        fixed = 0
-        patches = []
-        for offset in _tar_header_offsets(data):
-            stored = _parse_octal(data[offset + 148:offset + 156])
-            computed = _tar_checksum(data[offset:offset + 512])
-            if stored != computed:
-                checksum = _format_checksum(computed)
-                data[offset + 148:offset + 156] = checksum
-                patches.append({"offset": offset + 148, "data": checksum})
-                fixed += 1
-        if fixed <= 0:
-            return RepairResult(status="unrepairable", confidence=0.0, format="tar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="no TAR header checksum mismatch was found")
-        actions = ["recompute_tar_header_checksum"]
-        patch_plan = patch_plan_for_byte_patches(job, self.spec.name, patches, confidence=0.88, actions=actions)
-        return patch_repair_result(
-            job=job,
-            diagnosis=diagnosis,
+        result = _run_native_tar_boundary(job, workspace, config, self.spec.name)
+        return native_patch_repair_result(
             module_name=self.spec.name,
             fmt="tar",
-            patch_plan=patch_plan,
-            confidence=0.88,
-            actions=actions,
-            workspace=workspace,
-            filename="tar_header_checksum_fix.tar",
+            native_key="native_tar_boundary_repair",
+            result=result,
+            job=job,
+            diagnosis=diagnosis,
             config=config,
-            materialized_data=bytes(data),
         )
 
 
-def _tar_header_offsets(data: bytearray | bytes):
-    offset = 0
-    while offset + 512 <= len(data):
-        header = data[offset:offset + 512]
-        if header == b"\0" * 512:
-            break
-        size = _parse_octal(header[124:136])
-        if size is None:
-            break
-        yield offset
-        offset += 512 + int(math.ceil(size / 512) * 512)
-
-
-def _tar_checksum(header: bytearray | bytes) -> int:
-    block = bytearray(header)
-    block[148:156] = b"        "
-    return sum(block)
-
-
-def _parse_octal(value: bytes | bytearray) -> int | None:
-    text = bytes(value).strip(b"\0 ").decode("ascii", errors="ignore")
-    if not text:
-        return 0
-    try:
-        return int(text, 8)
-    except ValueError:
-        return None
-
-
-def _format_checksum(value: int) -> bytes:
-    return f"{value:06o}\0 ".encode("ascii")
+def _run_native_tar_boundary(job: RepairJob, workspace: str, config: dict, repair_name: str) -> dict:
+    deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+    return dict(
+        _native_tar_boundary_repair(
+            source_input_for_job(job),
+            workspace,
+            repair_name,
+            float(deep.get("max_input_size_mb", 512) or 0),
+            float(deep.get("max_output_size_mb", 2048) or 0),
+            int(deep.get("max_entries", 20000) or 20000),
+        )
+    )
 
 
 register_repair_module(TarHeaderChecksumFix())

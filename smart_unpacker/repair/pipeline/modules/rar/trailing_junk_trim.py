@@ -3,12 +3,10 @@ from __future__ import annotations
 from smart_unpacker.repair.diagnosis import RepairDiagnosis
 from smart_unpacker.repair.job import RepairJob
 from smart_unpacker.repair.pipeline.module import RepairModuleSpec, RepairRoute
-
-from smart_unpacker.repair.pipeline.modules._common import load_job_source_bytes, patch_plan_for_truncate, patch_repair_result
+from smart_unpacker.repair.pipeline.modules._common import source_input_for_job
 from smart_unpacker.repair.pipeline.registry import register_repair_module
 from smart_unpacker.repair.result import RepairResult
-
-from ._structure import walk_rar_blocks
+from smart_unpacker_native import rar_block_chain_trim_recovery as _native_rar_block_chain_trim
 
 
 class RarTrailingJunkTrim:
@@ -23,6 +21,14 @@ class RarTrailingJunkTrim:
                 require_any_categories=("boundary_repair",),
                 require_any_flags=("trailing_junk", "boundary_unreliable", "trailing_padding"),
                 require_any_fuzzy_hints=("trailing_text_junk_likely", "trailing_padding_likely"),
+                reject_any_flags=(
+                    "carrier_archive",
+                    "sfx",
+                    "embedded_archive",
+                    "carrier_prefix",
+                    "missing_end_block",
+                    "probably_truncated",
+                ),
                 base_score=0.76,
             ),
         ),
@@ -30,6 +36,8 @@ class RarTrailingJunkTrim:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix", "missing_end_block", "probably_truncated"}:
+            return 0.0
         if flags & {"trailing_junk", "boundary_unreliable"}:
             return 0.84
         if "boundary_repair" in diagnosis.categories:
@@ -37,29 +45,43 @@ class RarTrailingJunkTrim:
         return 0.0
 
     def repair(self, job: RepairJob, diagnosis: RepairDiagnosis, workspace: str, config: dict) -> RepairResult:
-        data = load_job_source_bytes(job)
-        walk = walk_rar_blocks(data)
-        if walk is None:
-            return RepairResult(status="unrepairable", confidence=0.0, format="rar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="RAR signature was not found at input start")
-        if not walk.end_block_found or walk.end_offset is None:
-            return RepairResult(status="unrepairable", confidence=0.0, format="rar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), warnings=walk.warnings, message="RAR end block was not found")
-        if walk.end_offset == len(data):
-            return RepairResult(status="unrepairable", confidence=0.0, format="rar", module_name=self.spec.name, diagnosis=diagnosis.as_dict(), message="no trailing bytes after RAR end block")
-        actions = [f"walk_rar{walk.version}_blocks", "trim_after_rar_end_block"]
-        patch_plan = patch_plan_for_truncate(job, self.spec.name, walk.end_offset, confidence=0.86, actions=actions)
-        return patch_repair_result(
-            job=job,
-            diagnosis=diagnosis,
+        deep = config.get("deep") if isinstance(config.get("deep"), dict) else {}
+        result = dict(
+            _native_rar_block_chain_trim(
+                source_input_for_job(job),
+                workspace,
+                float(deep.get("max_input_size_mb", 512) or 0),
+                int(deep.get("max_candidates_per_module", 8) or 1),
+            )
+        )
+        status = str(result.get("status") or "unrepairable")
+        selected_path = str(result.get("selected_path") or "")
+        if status in {"repaired", "partial"} and selected_path:
+            return RepairResult(
+                status=status,
+                confidence=float(result.get("confidence") or 0.86),
+                format="rar",
+                repaired_input={"kind": "file", "path": selected_path, "format_hint": "rar"},
+                actions=list(result.get("actions") or []),
+                damage_flags=list(job.damage_flags),
+                warnings=list(result.get("warnings") or []),
+                workspace_paths=list(result.get("workspace_paths") or [selected_path]),
+                partial=status == "partial",
+                module_name=self.spec.name,
+                diagnosis={**diagnosis.as_dict(), "native_rar_block_chain_trim": result},
+                message=str(result.get("message") or "native RAR trailing trim produced a candidate"),
+            )
+        return RepairResult(
+            status="unrepairable" if status in {"skipped", "unsupported"} else status,
+            confidence=float(result.get("confidence") or 0.0),
+            format="rar",
+            actions=list(result.get("actions") or []),
+            damage_flags=list(job.damage_flags),
+            warnings=list(result.get("warnings") or []),
+            workspace_paths=list(result.get("workspace_paths") or []),
             module_name=self.spec.name,
-            fmt="rar",
-            patch_plan=patch_plan,
-            confidence=0.86,
-            warnings=walk.warnings,
-            actions=actions,
-            workspace=workspace,
-            filename="rar_trailing_junk_trim.rar",
-            config=config,
-            materialized_data=data[:walk.end_offset],
+            diagnosis={**diagnosis.as_dict(), "native_rar_block_chain_trim": result},
+            message=str(result.get("message") or "native RAR trailing trim did not produce a candidate"),
         )
 
 
