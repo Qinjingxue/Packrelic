@@ -35,6 +35,39 @@ function Remove-IfExists {
     }
 }
 
+function ConvertTo-NormalizedFullPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return ([System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/') -replace '/', '\').ToLowerInvariant()
+}
+
+function Reset-StaleCMakeBuildDir {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SourceDir,
+        [Parameter(Mandatory = $true)]
+        [string]$BuildDir
+    )
+
+    $cachePath = Join-Path $BuildDir "CMakeCache.txt"
+    if (-not (Test-Path -LiteralPath $cachePath)) {
+        return
+    }
+
+    $expectedSource = ConvertTo-NormalizedFullPath -Path $SourceDir
+    $actualSource = ""
+    foreach ($line in Get-Content -LiteralPath $cachePath) {
+        if ($line -like "CMAKE_HOME_DIRECTORY:INTERNAL=*") {
+            $actualSource = ConvertTo-NormalizedFullPath -Path ($line.Substring("CMAKE_HOME_DIRECTORY:INTERNAL=".Length))
+            break
+        }
+    }
+
+    if ($actualSource -and $actualSource -ne $expectedSource) {
+        Write-Host "CMake build cache points at a different source tree; recreating $BuildDir" -ForegroundColor Yellow
+        Remove-IfExists -LiteralPath $BuildDir
+    }
+}
+
 function Assert-PathExists {
     param(
         [string]$LiteralPath,
@@ -334,6 +367,7 @@ function Build-SevenZipWrapper {
     Assert-PathExists -LiteralPath (Join-Path $WrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
     Assert-PathExists -LiteralPath $SevenZipDllPath -Description "Bundled 7z.dll"
     $cmakePlatform = Get-CMakePlatform -BuildArch $BuildArch
+    Reset-StaleCMakeBuildDir -SourceDir $WrapperRoot -BuildDir $BuildDir
     Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $WrapperRoot, "-B", $BuildDir, "-A", $cmakePlatform, "-DCMAKE_BUILD_TYPE=Release")
     Invoke-Native -FilePath $CMakeCommand -Arguments @("--build", $BuildDir, "--config", "Release")
     if ((Get-ProcessBuildArch) -eq $BuildArch) {
