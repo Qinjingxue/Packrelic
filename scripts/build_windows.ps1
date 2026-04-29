@@ -361,6 +361,7 @@ $venvScripts = Join-Path $venvPath "Scripts"
 $specPath = Join-Path $repoRoot "PackRelic.spec"
 $requirementsPath = Join-Path $repoRoot "requirements.txt"
 $buildRequirementsPath = Join-Path $repoRoot "requirements-build.txt"
+$iconPath = Join-Path $repoRoot "packrelic.ico"
 $nativeCrateRoot = Join-Path $repoRoot "native\packrelic_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_password_tester"
@@ -392,6 +393,7 @@ if ($promptForAcceptanceTests) {
 Assert-PathExists -LiteralPath $requirementsPath -Description "requirements.txt"
 Assert-PathExists -LiteralPath $buildRequirementsPath -Description "requirements-build.txt"
 Assert-PathExists -LiteralPath $specPath -Description "PyInstaller spec"
+Assert-PathExists -LiteralPath $iconPath -Description "PackRelic icon"
 Assert-PathExists -LiteralPath $nativeCargoToml -Description "packrelic_native Cargo manifest"
 Assert-PathExists -LiteralPath (Join-Path $sevenZipWrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
 Assert-PathExists -LiteralPath $sevenZipPath -Description "Bundled 7-Zip executable"
@@ -468,8 +470,10 @@ Write-Step "Adding release metadata and helper scripts"
 $distPasswordPath = Join-Path $distAppRoot "builtin_passwords.txt"
 $distConfigPath = Join-Path $distAppRoot "packrelic_config.json"
 $distAdvancedConfigPath = Join-Path $distAppRoot "packrelic_advanced_config.json"
+$distIconPath = Join-Path $distAppRoot "packrelic.ico"
 Copy-Item -LiteralPath (Join-Path $repoRoot "builtin_passwords.txt") -Destination $distPasswordPath -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot "packrelic_config.json") -Destination $distConfigPath -Force
+Copy-Item -LiteralPath $iconPath -Destination $distIconPath -Force
 Copy-IfExists -Source (Join-Path $repoRoot "packrelic_advanced_config.json") -Destination $distAdvancedConfigPath
 Copy-Item -LiteralPath $toolsRoot -Destination $distToolsRoot -Recurse -Force
 
@@ -483,6 +487,7 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "scripts\unregister_context_menu.ps1
 
 Assert-PathExists -LiteralPath $distPasswordPath -Description "External password file"
 Assert-PathExists -LiteralPath $distConfigPath -Description "External config file"
+Assert-PathExists -LiteralPath $distIconPath -Description "External icon file"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "7z.exe") -Description "External tools/7z.exe"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "7z.dll") -Description "External tools/7z.dll"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sevenzip_password_tester_capi.dll") -Description "External tools/sevenzip_password_tester_capi.dll"

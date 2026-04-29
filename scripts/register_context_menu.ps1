@@ -17,10 +17,11 @@ function Resolve-Launcher {
 
     if ($PreferredAppPath) {
         $resolvedApp = (Resolve-Path -LiteralPath $PreferredAppPath).Path
+        $appIcon = Resolve-PackRelicIcon -RepoRoot $RepoRoot -FallbackPath $resolvedApp
         return @{
             Mode = "app"
             AppPath = $resolvedApp
-            IconPath = $resolvedApp
+            IconPath = $appIcon
         }
     }
 
@@ -32,10 +33,11 @@ function Resolve-Launcher {
     foreach ($candidate in $exeCandidates) {
         if (Test-Path -LiteralPath $candidate) {
             $resolvedExe = (Resolve-Path -LiteralPath $candidate).Path
+            $appIcon = Resolve-PackRelicIcon -RepoRoot $RepoRoot -FallbackPath $resolvedExe
             return @{
                 Mode = "app"
                 AppPath = $resolvedExe
-                IconPath = $resolvedExe
+                IconPath = $appIcon
             }
         }
     }
@@ -61,16 +63,30 @@ function Resolve-Launcher {
     foreach ($candidate in $pythonCandidates) {
         if (Test-Path -LiteralPath $candidate) {
             $resolvedPython = (Resolve-Path -LiteralPath $candidate).Path
+            $appIcon = Resolve-PackRelicIcon -RepoRoot $RepoRoot -FallbackPath $resolvedPython
             return @{
                 Mode = "python"
                 AppPath = $resolvedPython
                 ScriptPath = $resolvedScript
-                IconPath = $resolvedPython
+                IconPath = $appIcon
             }
         }
     }
 
     throw "No usable Python interpreter was found. Please pass -PythonPath explicitly."
+}
+
+function Resolve-PackRelicIcon {
+    param(
+        [string]$RepoRoot,
+        [string]$FallbackPath
+    )
+
+    $iconPath = Join-Path $RepoRoot "packrelic.ico"
+    if (Test-Path -LiteralPath $iconPath) {
+        return (Resolve-Path -LiteralPath $iconPath).Path
+    }
+    return $FallbackPath
 }
 
 function New-CommandString {

@@ -5,6 +5,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 
 project_root = Path(SPECPATH)
+icon_path = project_root / "packrelic.ico"
 
 hiddenimports = ["packrelic_native"]
 for package in (
@@ -63,6 +64,7 @@ exe = EXE(
     upx=True,
     console=True,
     disable_windowed_traceback=False,
+    icon=str(icon_path),
 )
 
 coll = COLLECT(
