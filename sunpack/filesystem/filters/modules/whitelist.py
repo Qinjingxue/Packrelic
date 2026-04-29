@@ -5,31 +5,34 @@ from typing import Any
 from sunpack.filesystem.filters.base import ScanCandidate, ScanDecision, keep, prune, reject
 
 
-class BlacklistScanFilter:
-    name = "blacklist"
+class WhitelistScanFilter:
+    name = "whitelist"
     stage = "path"
 
     def __init__(
         self,
         patterns=None,
-        blocked_extensions=None,
-        blocked_files=None,
+        allowed_extensions=None,
+        allowed_files=None,
         prune_dirs=None,
         path_globs=None,
         prune_dir_globs=None,
     ):
-        self.patterns = [
+        self.path_patterns = [
             *[str(pattern) for pattern in (patterns or []) if isinstance(pattern, str)],
             *[_path_glob_to_regex(pattern) for pattern in (path_globs or []) if isinstance(pattern, str) and pattern.strip()],
-            *[_file_name_to_regex(name) for name in (blocked_files or []) if isinstance(name, str) and name.strip()],
         ]
+        self.file_patterns = [
+            *[_file_name_to_regex(name) for name in (allowed_files or []) if isinstance(name, str) and name.strip()],
+        ]
+        self.patterns = [*self.path_patterns, *self.file_patterns]
         self.prune_dirs = [
             *[str(pattern) for pattern in (prune_dirs or []) if isinstance(pattern, str)],
             *[_dir_glob_to_regex(pattern) for pattern in (prune_dir_globs or []) if isinstance(pattern, str) and pattern.strip()],
         ]
-        self.blocked_extensions = {
+        self.allowed_extensions = {
             ext if ext.startswith(".") else f".{ext}"
-            for ext in (str(item).strip().lower() for item in (blocked_extensions or []))
+            for ext in (str(item).strip().lower() for item in (allowed_extensions or []))
             if ext
         }
 
@@ -37,31 +40,39 @@ class BlacklistScanFilter:
     def from_config(cls, config: dict[str, Any]):
         return cls(
             patterns=config.get("patterns") or [],
-            blocked_extensions=config.get("blocked_extensions") or [],
-            blocked_files=config.get("blocked_files") or [],
+            allowed_extensions=config.get("allowed_extensions") or config.get("blocked_extensions") or [],
+            allowed_files=config.get("allowed_files") or config.get("blocked_files") or [],
             prune_dirs=config.get("prune_dirs") or [],
             path_globs=config.get("path_globs") or [],
             prune_dir_globs=config.get("prune_dir_globs") or [],
         )
 
     def evaluate(self, candidate: ScanCandidate) -> ScanDecision:
+        if not self._has_rules():
+            return keep()
         path = candidate.path
-        ext = path.suffix.lower()
-        if candidate.kind == "file" and ext and ext in self.blocked_extensions:
-            return reject(f"Blocked extension: {ext}")
-
         candidates = self._path_candidates(path)
         if candidate.kind == "dir":
-            for pattern in self.prune_dirs:
-                if self._matches(pattern, candidates):
-                    return prune(f"Pruned directory: {pattern}")
+            if self._directory_allowed(candidates):
+                return keep()
+            return prune("Directory not in whitelist")
+        if self._file_allowed(path, candidates):
+            return keep()
+        return reject("File not in whitelist")
 
-        for pattern in self.patterns:
-            if self._matches(pattern, candidates):
-                if candidate.kind == "dir":
-                    return prune(f"Hit blacklist: {pattern}")
-                return reject(f"Hit blacklist: {pattern}")
-        return keep()
+    def _has_rules(self) -> bool:
+        return bool(self.patterns or self.prune_dirs or self.allowed_extensions)
+
+    def _directory_allowed(self, candidates: list[str]) -> bool:
+        return self._field_allows(self.path_patterns, candidates) and self._field_allows(self.prune_dirs, candidates)
+
+    def _file_allowed(self, path: Path, candidates: list[str]) -> bool:
+        ext = path.suffix.lower()
+        return (
+            self._field_allows(self.path_patterns, candidates)
+            and self._field_allows(self.file_patterns, candidates)
+            and (not self.allowed_extensions or (bool(ext) and ext in self.allowed_extensions))
+        )
 
     def _path_candidates(self, path: Path) -> list[str]:
         candidates = [
@@ -71,8 +82,11 @@ class BlacklistScanFilter:
         ]
         return [item.replace("\\", "/") for item in candidates if item]
 
-    def _matches(self, pattern: str, candidates: list[str]) -> bool:
-        return any(re.search(pattern, item, re.IGNORECASE) for item in candidates)
+    def _matches_any(self, patterns: list[str], candidates: list[str]) -> bool:
+        return any(re.search(pattern, item, re.IGNORECASE) for pattern in patterns for item in candidates)
+
+    def _field_allows(self, patterns: list[str], candidates: list[str]) -> bool:
+        return not patterns or self._matches_any(patterns, candidates)
 
 
 def _normalize_glob(value: str) -> str:

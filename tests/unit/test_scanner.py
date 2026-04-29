@@ -109,6 +109,25 @@ def test_directory_scanner_path_filter_skips_file_before_stat(tmp_path, monkeypa
     assert "keep.zip" in names
 
 
+def test_directory_scanner_blacklist_blocks_exact_file_names(tmp_path):
+    blocked = tmp_path / "Thumbs.db"
+    blocked.write_bytes(b"not an archive")
+    keep = tmp_path / "Thumbs.zip"
+    keep.write_bytes(b"PK\x03\x04payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "blacklist", "enabled": True, "blocked_files": ["thumbs.db"]},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "Thumbs.db" not in names
+    assert "Thumbs.zip" in names
+
+
 def test_directory_scanner_scan_filters_global_switch_disables_filters(tmp_path):
     blocked = tmp_path / "skip.py"
     blocked.write_text("print('keep when filters are globally disabled')", encoding="utf-8")
@@ -124,6 +143,136 @@ def test_directory_scanner_scan_filters_global_switch_disables_filters(tmp_path)
 
     names = {entry.path.name for entry in snapshot.entries}
     assert "skip.py" in names
+
+
+def test_directory_scanner_whitelist_disabled_does_not_filter(tmp_path):
+    (tmp_path / "keep.zip").write_bytes(b"PK\x03\x04payload")
+    (tmp_path / "other.rar").write_bytes(b"Rar!\x1a\x07\x00payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "whitelist", "enabled": False, "allowed_extensions": [".zip"]},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "keep.zip" in names
+    assert "other.rar" in names
+
+
+def test_directory_scanner_whitelist_keeps_only_allowed_extensions(tmp_path):
+    (tmp_path / "keep.zip").write_bytes(b"PK\x03\x04payload")
+    (tmp_path / "skip.rar").write_bytes(b"Rar!\x1a\x07\x00payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "whitelist", "enabled": True, "allowed_extensions": [".zip"]},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "keep.zip" in names
+    assert "skip.rar" not in names
+
+
+def test_directory_scanner_whitelist_keeps_only_allowed_path_globs(tmp_path):
+    allowed_dir = tmp_path / "archives"
+    blocked_dir = tmp_path / "other"
+    allowed_dir.mkdir()
+    blocked_dir.mkdir()
+    (allowed_dir / "keep.zip").write_bytes(b"PK\x03\x04payload")
+    (blocked_dir / "skip.zip").write_bytes(b"PK\x03\x04payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "whitelist", "enabled": True, "path_globs": ["archives/**"]},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "archives" in names
+    assert "keep.zip" in names
+    assert "other" not in names
+    assert "skip.zip" not in names
+
+
+def test_directory_scanner_whitelist_then_blacklist_both_apply(tmp_path):
+    (tmp_path / "keep.zip").write_bytes(b"PK\x03\x04payload")
+    (tmp_path / "skip.py").write_text("print('skip')", encoding="utf-8")
+    (tmp_path / "skip.rar").write_bytes(b"Rar!\x1a\x07\x00payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "whitelist", "enabled": True, "allowed_extensions": [".zip", ".py"]},
+                {"name": "blacklist", "enabled": True, "blocked_extensions": [".py"]},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "keep.zip" in names
+    assert "skip.py" not in names
+    assert "skip.rar" not in names
+
+
+def test_directory_scanner_whitelist_empty_fields_are_not_restrictions(tmp_path):
+    allowed_dir = tmp_path / "archives"
+    allowed_dir.mkdir()
+    (allowed_dir / "keep.zip").write_bytes(b"PK\x03\x04payload")
+    (allowed_dir / "skip.rar").write_bytes(b"Rar!\x1a\x07\x00payload")
+    (tmp_path / "other.zip").write_bytes(b"PK\x03\x04payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {
+                    "name": "whitelist",
+                    "enabled": True,
+                    "path_globs": ["archives/**"],
+                    "prune_dir_globs": [],
+                    "allowed_files": [],
+                    "allowed_extensions": [".zip"],
+                },
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "archives" in names
+    assert "keep.zip" in names
+    assert "skip.rar" not in names
+    assert "other.zip" not in names
+
+
+def test_directory_scanner_whitelist_non_empty_fields_are_combined_as_constraints(tmp_path):
+    (tmp_path / "sample.zip").write_bytes(b"PK\x03\x04payload")
+    (tmp_path / "sample.rar").write_bytes(b"Rar!\x1a\x07\x00payload")
+    (tmp_path / "other.zip").write_bytes(b"PK\x03\x04payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {
+                    "name": "whitelist",
+                    "enabled": True,
+                    "allowed_files": ["sample.zip"],
+                    "allowed_extensions": [".zip"],
+                },
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "sample.zip" in names
+    assert "sample.rar" not in names
+    assert "other.zip" not in names
 
 
 def test_directory_scanner_blacklist_prunes_directory(tmp_path):

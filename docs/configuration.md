@@ -84,12 +84,28 @@ CLI 可用 `--recur` 临时覆盖。
 
 扫描过滤器在目录遍历阶段执行，被过滤的条目不会进入 relation、detection 或 analysis。
 
+`whitelist` 是最高优先级允许集合，默认关闭。启用后，文件必须先命中 whitelist 才会进入后续扫描；字段与 `blacklist` 一致，但语义是“允许”。例如：
+
+```json
+{
+  "name": "whitelist",
+  "enabled": false,
+  "path_globs": ["archives/**"],
+  "prune_dir_globs": ["archives"],
+  "allowed_files": ["sample.zip"],
+  "allowed_extensions": [".zip", ".7z"]
+}
+```
+
+`whitelist` 使用 `allowed_files` 和 `allowed_extensions` 表示允许的完整文件名和扩展名。每个 whitelist 字段为空时表示该维度不限制；多个非空字段会同时作为约束。`blacklist` 使用 `blocked_files` 和 `blocked_extensions` 表示禁止的完整文件名和扩展名。
+
 `blacklist` 常用字段：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `path_globs` | `list[str]` | 路径 glob，使用 `/` 作为分隔符，例如 `.git/**`、`$RECYCLE.BIN/**`。 |
 | `prune_dir_globs` | `list[str]` | 目录名 glob，命中后剪枝整个子树，例如 `.venv`、`node_modules`。 |
+| `blocked_files` | `list[str]` | 完整文件名精确匹配，例如 `Thumbs.db`、`desktop.ini`。 |
 | `blocked_extensions` | `list[str]` | 阻止扫描的文件扩展名。 |
 
 高级兼容字段 `patterns` 和 `prune_dirs` 仍按正则读取，但默认配置不再使用它们。

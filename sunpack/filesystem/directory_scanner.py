@@ -5,7 +5,7 @@ from sunpack_native import scan_directory_entries as _NATIVE_SCAN_DIRECTORY_ENTR
 from sunpack.contracts.filesystem import DirectorySnapshot, FileEntry
 from sunpack.config.detection_view import DIRECTORY_SCAN_CURRENT_DIR_ONLY, directory_scan_mode
 from sunpack.filesystem.filters import build_filters
-from sunpack.filesystem.filters.base import ScanFilter
+from sunpack.filesystem.filters.base import ScanCandidate, ScanFilter
 
 
 class DirectoryScanner:
@@ -51,6 +51,7 @@ class DirectoryScanner:
             for row in rows
             if isinstance(row, dict) and row.get("path")
         ]
+        entries = self._apply_post_native_filters(entries)
         return DirectorySnapshot(root_path=root_path, entries=entries)
 
     def _native_scan_options(self) -> dict | None:
@@ -70,6 +71,8 @@ class DirectoryScanner:
                 prune_dirs.extend(getattr(scan_filter, "prune_dirs", []) or [])
                 blocked_extensions.extend(getattr(scan_filter, "blocked_extensions", []) or [])
                 continue
+            if name == "whitelist" and stage == "path":
+                continue
             if name == "size_minimum" and stage == "size":
                 value = getattr(scan_filter, "min_inspection_size_bytes", None)
                 if value is not None:
@@ -86,3 +89,45 @@ class DirectoryScanner:
             "blocked_extensions": blocked_extensions,
             "min_size": min_size,
         }
+
+    def _apply_post_native_filters(self, entries: list[FileEntry]) -> list[FileEntry]:
+        post_filters = [
+            scan_filter for scan_filter in self.filters
+            if getattr(scan_filter, "name", "") == "whitelist" and getattr(scan_filter, "stage", "") == "path"
+        ]
+        if not post_filters:
+            return entries
+
+        current = entries
+        for scan_filter in post_filters:
+            current = self._apply_post_native_filter(current, scan_filter)
+        return current
+
+    def _apply_post_native_filter(self, entries: list[FileEntry], scan_filter: ScanFilter) -> list[FileEntry]:
+        kept: list[FileEntry] = []
+        pruned_dirs: list[Path] = []
+        for entry in sorted(entries, key=lambda item: (len(item.path.parts), str(item.path).lower())):
+            if self._under_any(entry.path, pruned_dirs):
+                continue
+            decision = scan_filter.evaluate(ScanCandidate(
+                path=entry.path,
+                kind="dir" if entry.is_dir else "file",
+                size=entry.size,
+                mtime_ns=entry.mtime_ns,
+            ))
+            if decision.prune_dir and entry.is_dir:
+                pruned_dirs.append(entry.path)
+            if decision.reject_entry:
+                continue
+            kept.append(entry)
+        return kept
+
+    @staticmethod
+    def _under_any(path: Path, parents: list[Path]) -> bool:
+        for parent in parents:
+            try:
+                path.relative_to(parent)
+            except ValueError:
+                continue
+            return path != parent
+        return False

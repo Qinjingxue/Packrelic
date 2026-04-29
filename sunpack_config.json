@@ -16,6 +16,14 @@
     "scan_filters_enabled": true,
     "scan_filters": [
       {
+        "name": "whitelist",
+        "enabled": false,
+        "path_globs": ["archives/**", "downloads/**"],
+        "prune_dir_globs": ["archives", "downloads"],
+        "allowed_files": ["sample.zip"],
+        "allowed_extensions": [".zip", ".7z", ".rar"]
+      },
+      {
         "name": "blacklist",
         "enabled": true,
         "path_globs": [".git/**", ".vscode/**", "$RECYCLE.BIN/**"],
@@ -24,6 +32,7 @@
           "site-packages", ".venv", "venv", "env",
           ".cache", "repositories"
         ],
+        "blocked_files": ["Thumbs.db", "desktop.ini"],
         "blocked_extensions": [
           ".dll", ".save", ".py", ".pyc", ".json", ".xml", ".cfg", ".ini",
           ".sys", ".db", ".msi", ".cur", ".ani", ".ttf", ".woff", ".ico",
