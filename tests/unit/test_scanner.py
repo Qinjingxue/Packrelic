@@ -1,5 +1,8 @@
 from packrelic.filesystem.directory_scanner import DirectoryScanner
 from packrelic.detection import DetectionScheduler
+from packrelic.detection.task_provider import ArchiveTaskProvider
+from packrelic.detection.scene.definitions import RECOMMENDED_SCENE_RULES_PAYLOAD
+from tests.helpers.detection_config import with_detection_pipeline
 
 
 def test_directory_scanner_captures_files_and_directories(tmp_path):
@@ -164,3 +167,56 @@ def test_target_scan_reuses_session_for_duplicate_directories(tmp_path, monkeypa
 
     assert len([bag for bag in bags if bag.get("file.path") == str(tmp_path / "archive.zip")]) == 1
     assert scan_count == 1
+
+
+def test_archive_task_provider_reuses_scan_session_for_scene_facts(tmp_path, monkeypatch):
+    target = tmp_path / "archive.7z"
+    target.write_bytes(b"7z\xbc\xaf\x27\x1c" + b"payload")
+
+    import packrelic.detection.pipeline.facts.collectors.scene_markers as scene_markers
+
+    def fail_if_directory_fallback(directory, rules):
+        raise AssertionError(f"scene facts should use scan-session snapshots, got fallback scan for {directory}")
+
+    monkeypatch.setattr(scene_markers, "collect_scene_markers_from_directory", fail_if_directory_fallback)
+
+    config = with_detection_pipeline(
+        {"thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3}},
+        precheck=[
+            {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+            {
+                "name": "scene_protect",
+                "enabled": True,
+                "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
+            },
+        ],
+        scoring=[
+            {
+                "name": "extension",
+                "enabled": True,
+                "extension_score_groups": [{"score": 5, "extensions": [".7z"]}],
+            },
+        ],
+    )
+
+    tasks = ArchiveTaskProvider(config).scan_targets([str(tmp_path)])
+
+    assert [task.main_path for task in tasks] == [str(target)]
+
+
+def test_scene_marker_directory_fallback_uses_bounded_depth(tmp_path, monkeypatch):
+    from packrelic.detection.pipeline.facts.collectors.scene_markers import _collect_scene_markers_for_directory
+
+    observed_depths = []
+    original_scan = DirectoryScanner.scan
+
+    def recording_scan(self):
+        observed_depths.append(self.max_depth)
+        return original_scan(self)
+
+    monkeypatch.setattr(DirectoryScanner, "scan", recording_scan)
+
+    markers = _collect_scene_markers_for_directory(str(tmp_path), RECOMMENDED_SCENE_RULES_PAYLOAD, snapshot=None)
+
+    assert markers == []
+    assert observed_depths == [3]

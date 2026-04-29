@@ -100,7 +100,7 @@ def cached_scene_markers_for_directory(directory: str, rules: list[dict], snapsh
 def _collect_scene_markers_for_directory(directory: str, rules: list[dict], snapshot=None) -> list[str]:
     if snapshot is not None:
         return sorted(collect_scene_markers_from_snapshot(snapshot, rules))
-    return sorted(collect_scene_markers_from_directory(directory, rules))
+    return sorted(collect_scene_markers_from_directory(directory, rules, max_depth=_scene_snapshot_depth(rules)))
 
 
 def candidate_directories(start_dir: str, max_depth: int) -> list[str]:

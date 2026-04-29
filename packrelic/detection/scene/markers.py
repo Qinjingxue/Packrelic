@@ -66,8 +66,8 @@ def collect_scene_markers_from_snapshot(snapshot: DirectorySnapshot, rules: list
     return markers
 
 
-def collect_scene_markers_from_directory(directory: str, rules: list[dict]) -> set[str]:
-    snapshot = DirectoryScanner(directory, config={}).scan()
+def collect_scene_markers_from_directory(directory: str, rules: list[dict], max_depth: int | None = 1) -> set[str]:
+    snapshot = DirectoryScanner(directory, max_depth=max_depth, config={}).scan()
     return collect_scene_markers_from_snapshot(snapshot, rules)
 
 

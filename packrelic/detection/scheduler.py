@@ -55,7 +55,13 @@ class DetectionScheduler:
         )
 
     def build_candidate_fact_bags(self, target_paths: list[str]) -> list[FactBag]:
-        return build_fact_bags_for_targets(target_paths, session=DetectionScanSession(config=self.config), config=self.config)
+        fact_bags, _scan_session = self.build_candidate_fact_bags_with_session(target_paths)
+        return fact_bags
+
+    def build_candidate_fact_bags_with_session(self, target_paths: list[str]) -> tuple[list[FactBag], DetectionScanSession]:
+        scan_session = DetectionScanSession(config=self.config)
+        fact_bags = build_fact_bags_for_targets(target_paths, session=scan_session, config=self.config)
+        return fact_bags, scan_session
 
     def evaluate_bag(
         self,

@@ -27,8 +27,9 @@ class ArchiveTaskProvider:
             return self._scan_standard_archive_targets(scan_roots, processed_keys)
 
         tasks: list[ArchiveTask] = []
-        fact_bags = self._filter_incomplete_split_groups(self.detector.build_candidate_fact_bags(scan_roots))
-        for detection in self.detector.evaluate_bags(fact_bags):
+        candidate_bags, scan_session = self.detector.build_candidate_fact_bags_with_session(scan_roots)
+        fact_bags = self._filter_incomplete_split_groups(candidate_bags)
+        for detection in self.detector.evaluate_bags(fact_bags, scan_session=scan_session):
             bag = detection.fact_bag
             if not bag.get("candidate.entry_path"):
                 continue
