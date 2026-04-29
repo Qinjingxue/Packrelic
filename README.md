@@ -1,5 +1,7 @@
 # SunPack
 
+Codex驱动开发
+
 SunPack 是一个 Windows-first 的智能归档处理与损坏压缩包尽力恢复工具。它不只是批量调用 7-Zip 解压，而是围绕真实文件状态建立一条可循环的 pipeline：
 
 ```text
