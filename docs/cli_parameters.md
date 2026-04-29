@@ -95,7 +95,7 @@ python sunpack.py scan [options] <paths...>
 
 `scan` 会扫描输入路径，输出识别到的解压任务、分卷关系、检测扩展名、分数和命中规则。它不会解压，也不会清理文件。
 
-目录扫描范围受 `filesystem.directory_scan_mode`、`filesystem.scan_filters_enabled` 和 `filesystem.scan_filters` 影响；被黑名单、目录剪枝、阻止扩展名或最小大小过滤掉的文件不会进入 detection。
+目录扫描范围受 `filesystem.directory_scan_mode`、`filesystem.scan_filters_enabled` 和 `filesystem.scan_filters` 影响；被黑名单、目录剪枝、阻止扩展名、大小范围或修改时间范围过滤掉的文件不会进入 detection。
 
 示例：
 

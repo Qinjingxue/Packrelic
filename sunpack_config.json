@@ -43,9 +43,15 @@
         ]
       },
       {
-        "name": "size_minimum",
+        "name": "size_range",
         "enabled": true,
-        "min_inspection_size_bytes": 1048576
+        "gte": 1048576
+      },
+      {
+        "name": "mtime_range",
+        "enabled": false,
+        "gte": "2024-01-01T00:00:00+08:00",
+        "lt": "2027-01-01T00:00:00+08:00"
       }
     ]
   },

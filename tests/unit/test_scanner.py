@@ -29,6 +29,76 @@ def test_directory_scanner_records_file_size(tmp_path):
     assert entry.size == target.stat().st_size
 
 
+def test_directory_scanner_size_range_filters_files_outside_range(tmp_path):
+    small = tmp_path / "small.zip"
+    medium = tmp_path / "medium.zip"
+    large = tmp_path / "large.zip"
+    small.write_bytes(b"a" * 8)
+    medium.write_bytes(b"b" * 16)
+    large.write_bytes(b"c" * 32)
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "size_range", "enabled": True, "gte": 10, "lt": 32},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "small.zip" not in names
+    assert "medium.zip" in names
+    assert "large.zip" not in names
+
+
+def test_directory_scanner_size_minimum_legacy_config_still_filters(tmp_path):
+    small = tmp_path / "small.zip"
+    keep = tmp_path / "keep.zip"
+    small.write_bytes(b"a" * 8)
+    keep.write_bytes(b"b" * 16)
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 10},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "small.zip" not in names
+    assert "keep.zip" in names
+
+
+def test_directory_scanner_mtime_range_filters_files_outside_range(tmp_path):
+    old = tmp_path / "old.zip"
+    keep = tmp_path / "keep.zip"
+    new = tmp_path / "new.zip"
+    old.write_bytes(b"old")
+    keep.write_bytes(b"keep")
+    new.write_bytes(b"new")
+    old_ns = 1_700_000_000_000_000_000
+    keep_ns = 1_800_000_000_000_000_000
+    new_ns = 1_900_000_000_000_000_000
+    import os
+    os.utime(old, ns=(old_ns, old_ns))
+    os.utime(keep, ns=(keep_ns, keep_ns))
+    os.utime(new, ns=(new_ns, new_ns))
+
+    snapshot = DirectoryScanner(str(tmp_path), config={
+        "filesystem": {
+            "scan_filters": [
+                {"name": "mtime_range", "enabled": True, "gte": keep_ns, "lt": new_ns},
+            ]
+        }
+    }).scan()
+
+    names = {entry.path.name for entry in snapshot.entries}
+    assert "old.zip" not in names
+    assert "keep.zip" in names
+    assert "new.zip" not in names
+
+
 def test_directory_scanner_current_dir_only_scan_mode_skips_subdirectories(tmp_path):
     nested = tmp_path / "nested"
     nested.mkdir()

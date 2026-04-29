@@ -30,7 +30,7 @@ class DirectoryScanner:
     def _scan_native(self) -> DirectorySnapshot | None:
         options = self._native_scan_options()
         if options is None:
-            raise RuntimeError("Native directory scan requires built-in blacklist/size_minimum filters only")
+            raise RuntimeError("Native directory scan requires built-in filesystem filters only")
         rows = _NATIVE_SCAN_DIRECTORY_ENTRIES(
             str(self.root_path),
             self.max_depth,
@@ -73,13 +73,15 @@ class DirectoryScanner:
                 continue
             if name == "whitelist" and stage == "path":
                 continue
-            if name == "size_minimum" and stage == "size":
+            if name in {"size_minimum", "size_range"} and stage == "size":
                 value = getattr(scan_filter, "min_inspection_size_bytes", None)
                 if value is not None:
                     try:
-                        min_size = int(value)
+                        min_size = max(int(value), int(min_size or 0))
                     except (TypeError, ValueError):
                         return None
+                continue
+            if name == "mtime_range" and stage == "mtime":
                 continue
             return None
 
@@ -93,7 +95,11 @@ class DirectoryScanner:
     def _apply_post_native_filters(self, entries: list[FileEntry]) -> list[FileEntry]:
         post_filters = [
             scan_filter for scan_filter in self.filters
-            if getattr(scan_filter, "name", "") == "whitelist" and getattr(scan_filter, "stage", "") == "path"
+            if (
+                getattr(scan_filter, "name", "") == "whitelist"
+                and getattr(scan_filter, "stage", "") == "path"
+            )
+            or getattr(scan_filter, "stage", "") in {"size", "mtime"}
         ]
         if not post_filters:
             return entries

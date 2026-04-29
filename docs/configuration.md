@@ -80,7 +80,7 @@ CLI 可用 `--recur` 临时覆盖。
 
 ### scan_filters
 
-`scan_filters_enabled` 是扫描过滤器总开关。设为 `false` 时保留 `scan_filters` 配置但不应用任何过滤器，适合临时排查是否被黑名单、最小大小或目录剪枝挡掉。
+`scan_filters_enabled` 是扫描过滤器总开关。设为 `false` 时保留 `scan_filters` 配置但不应用任何过滤器，适合临时排查是否被黑名单、大小范围、修改时间范围或目录剪枝挡掉。
 
 扫描过滤器在目录遍历阶段执行，被过滤的条目不会进入 relation、detection 或 analysis。
 
@@ -110,11 +110,27 @@ CLI 可用 `--recur` 临时覆盖。
 
 高级兼容字段 `patterns` 和 `prune_dirs` 仍按正则读取，但默认配置不再使用它们。
 
-`size_minimum`：
+`size_range` 用文件大小限制 filesystem 输出。只有落在配置范围内的文件才会进入 relation、detection 或 analysis；目录不受该过滤器影响。范围字段可混用：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `min_inspection_size_bytes` | `int` | 小于该大小的文件不进入候选检测。 |
+| `gt` / `greater_than` | `int` | 文件大小必须大于该值。 |
+| `gte` / `greater_than_or_equal` | `int` | 文件大小必须大于等于该值。 |
+| `lt` / `less_than` | `int` | 文件大小必须小于该值。 |
+| `lte` / `less_than_or_equal` | `int` | 文件大小必须小于等于该值。 |
+| `eq` / `equal` | `int` | 文件大小必须等于该值。 |
+
+旧的 `size_minimum` 仍兼容，等价于 `size_range` 的 `gte`：
+
+```json
+{"name": "size_range", "enabled": true, "gte": 1048576, "lt": 1073741824}
+```
+
+`mtime_range` 用文件修改时间限制 filesystem 输出，字段语义与 `size_range` 相同。值可以写纳秒时间戳，也可以写 ISO 时间字符串：
+
+```json
+{"name": "mtime_range", "enabled": false, "gte": "2024-01-01T00:00:00+08:00", "lt": "2027-01-01T00:00:00+08:00"}
+```
 
 目录扫描使用 Rust `scan_directory_entries`。过滤器无法映射到 native 参数时会显性报错，不做 Python fallback。
 

@@ -13,10 +13,14 @@ from sunpack.passwords import dedupe_passwords, get_builtin_passwords, PasswordS
 def build_effective_config(config: dict) -> dict[str, Any]:
     thresholds = config.get("thresholds", {}) if isinstance(config.get("thresholds"), dict) else {}
     pipeline_config = rule_pipeline_config(config)
-    size_rule = scan_filter_config(config, "size_minimum")
+    size_rule = scan_filter_config(config, "size_range") or scan_filter_config(config, "size_minimum")
     size_minimum = None
     if isinstance(size_rule, dict):
-        if "min_inspection_size_bytes" in size_rule:
+        if "gte" in size_rule:
+            size_minimum = size_rule["gte"]
+        elif "greater_than_or_equal" in size_rule:
+            size_minimum = size_rule["greater_than_or_equal"]
+        elif "min_inspection_size_bytes" in size_rule:
             size_minimum = size_rule["min_inspection_size_bytes"]
     return {
         "thresholds": {
