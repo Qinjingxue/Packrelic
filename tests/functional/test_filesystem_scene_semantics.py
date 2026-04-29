@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from sunpack.detection import ArchiveTaskProvider
 from sunpack.filesystem.directory_scanner import DirectoryScanner
 
@@ -64,6 +66,66 @@ def _write_rpg_maker(root: Path) -> Path:
     archive = root / "www" / "audio" / "bgm.7z"
     archive.write_bytes(b"7z\xbc\xaf\x27\x1c")
     return archive
+
+
+def _write_renpy(root: Path) -> Path:
+    (root / "game").mkdir(parents=True)
+    (root / "renpy").mkdir()
+    (root / "lib").mkdir()
+    (root / "game" / "script.rpy").write_text("label start:\n    return\n", encoding="utf-8")
+    archive = root / "game" / "data.rpa"
+    archive.write_bytes(b"RPA-3.0 synthetic")
+    return archive
+
+
+def _write_godot(root: Path) -> Path:
+    root.mkdir(parents=True)
+    (root / "game.exe").write_bytes(b"MZ")
+    (root / "project.godot").write_text("[application]\nconfig/name='Synthetic'", encoding="utf-8")
+    archive = root / "data.pck"
+    archive.write_bytes(b"GDPC synthetic")
+    return archive
+
+
+def _write_nwjs(root: Path) -> Path:
+    root.mkdir(parents=True)
+    (root / "nw.exe").write_bytes(b"MZ")
+    archive = root / "package.nw"
+    archive.write_bytes(b"PK\x03\x04payload")
+    return archive
+
+
+def _write_electron(root: Path) -> Path:
+    (root / "resources" / "app.asar.unpacked").mkdir(parents=True)
+    (root / "app.exe").write_bytes(b"MZ")
+    archive = root / "resources" / "app.asar"
+    archive.write_bytes(b"asar synthetic")
+    return archive
+
+
+@pytest.mark.parametrize(
+    ("scene_name", "builder"),
+    [
+        ("rpg_maker_game", _write_rpg_maker),
+        ("renpy_game", _write_renpy),
+        ("godot_game", _write_godot),
+        ("nwjs_game", _write_nwjs),
+        ("electron_app_game", _write_electron),
+    ],
+)
+def test_scene_semantics_prunes_typical_game_directory_trees(tmp_path, scene_name, builder):
+    scene_root = tmp_path / scene_name
+    protected = builder(scene_root)
+    generic = tmp_path / "generic.zip"
+    generic.write_bytes(b"PK\x03\x04payload")
+
+    snapshot = DirectoryScanner(str(tmp_path), config=_config()).scan()
+
+    paths = {item.path for item in snapshot.entries}
+    assert scene_root not in paths
+    assert protected not in paths
+    assert not any(scene_root in path.parents for path in paths)
+    assert generic in paths
 
 
 def test_scene_semantics_prunes_matched_scene_subtree_before_later_filters(tmp_path):

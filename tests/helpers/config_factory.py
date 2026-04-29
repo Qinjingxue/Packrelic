@@ -67,6 +67,21 @@ CONFIGS: dict[str, dict[str, Any]] = {
         {"name": "seven_zip_probe", "enabled": True},
         {"name": "seven_zip_validation", "enabled": True},
     ]),
+    "archive_scan_deep_embedded": with_detection_pipeline({
+        "thresholds": {"archive_score_threshold": 6, "maybe_archive_threshold": 3},
+    }, precheck=[
+        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+        {"name": "scene_protect", "enabled": True},
+    ], scoring=[
+        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
+        {"name": "embedded_payload_identity", "enabled": True, "embedded_payload_scan_level": "deep"},
+        {"name": "seven_zip_structure_identity", "enabled": True},
+        {"name": "rar_structure_identity", "enabled": True},
+        {"name": "scene_penalty", "enabled": True},
+    ], confirmation=[
+        {"name": "seven_zip_probe", "enabled": True},
+        {"name": "seven_zip_validation", "enabled": True},
+    ]),
 }
 
 

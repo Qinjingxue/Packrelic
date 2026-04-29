@@ -8,7 +8,6 @@ from pathlib import Path
 from sunpack.contracts.detection import FactBag
 from sunpack.coordinator.inspector import InspectOrchestrator
 from sunpack.detection import DetectionScheduler
-from tests.helpers.scene_rules import RECOMMENDED_SCENE_RULES_PAYLOAD
 from tests.helpers.detection_config import with_detection_pipeline
 
 
@@ -300,129 +299,6 @@ class DetectionBehaviorTests(unittest.TestCase):
         self.assertEqual(decision.total_score, 6)
         self.assertEqual(bag.get("file.detected_ext"), ".7z")
         self.assertEqual(bag.get("file.probe_offset"), 434176)
-
-    def test_scene_penalty_suppresses_embedded_runtime_resource(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "www" / "audio").mkdir(parents=True)
-            (root / "www" / "data").mkdir(parents=True)
-            (root / "game.exe").write_bytes(b"MZ")
-            (root / "www" / "data" / "Map001.json").write_text("{}", encoding="utf-8")
-            resource = root / "www" / "audio" / "bgm.jpg"
-            resource.write_bytes(b"\xff\xd8audio-cover\xff\xd9" + b"PK\x03\x04" + b"hidden")
-
-            bag = FactBag()
-            bag.set("file.path", str(resource))
-            config = with_detection_pipeline({
-                "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-            }, precheck=[
-                {"name": "scene_protect", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
-            ], scoring=[
-                {"name": "embedded_payload_identity", "enabled": True},
-                {"name": "scene_penalty", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
-            ])
-            decision = DetectionScheduler(config).evaluate_bag(bag)
-
-            self.assertFalse(decision.should_extract)
-            self.assertTrue(bag.get("file.embedded_archive_found"))
-            self.assertIn("scene_penalty", decision.matched_rules)
-
-    def test_scene_protect_stops_protected_archive_but_not_runtime_exact_path(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "www" / "audio").mkdir(parents=True)
-            (root / "www" / "data").mkdir(parents=True)
-            runtime = root / "game.exe"
-            archive = root / "www" / "audio" / "bgm.7z"
-            runtime.write_bytes(b"MZ")
-            archive.write_bytes(b"7z\xbc\xaf\x27\x1c")
-
-            config = with_detection_pipeline(precheck=[
-                {"name": "scene_protect", "enabled": True, "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD},
-            ])
-
-            archive_bag = FactBag()
-            archive_bag.set("file.path", str(archive))
-            archive_decision = DetectionScheduler(config).evaluate_bag(archive_bag)
-
-            runtime_bag = FactBag()
-            runtime_bag.set("file.path", str(runtime))
-            runtime_decision = DetectionScheduler(config).evaluate_bag(runtime_bag)
-
-            self.assertFalse(archive_decision.should_extract)
-            self.assertEqual(archive_decision.stop_reason.split(":", 1)[0], "Scene Protect")
-            self.assertTrue(archive_bag.get("scene.is_runtime_resource_archive"))
-            self.assertFalse(runtime_bag.get("scene.is_runtime_resource_archive"))
-            self.assertFalse(runtime_decision.should_extract)
-            self.assertIsNone(runtime_decision.stop_reason)
-
-    def test_scene_penalty_applies_large_penalty_when_scene_protect_is_disabled(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "www" / "audio").mkdir(parents=True)
-            (root / "www" / "data").mkdir(parents=True)
-            (root / "game.exe").write_bytes(b"MZ")
-            archive = root / "www" / "audio" / "bgm.7z"
-            archive.write_bytes(b"7z\xbc\xaf\x27\x1c")
-
-            bag = FactBag()
-            bag.set("file.path", str(archive))
-            config = with_detection_pipeline({
-                "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-            }, scoring=[
-                {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-                {
-                    "name": "scene_penalty",
-                    "enabled": True,
-                    "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
-                    "runtime_resource_archive_penalty": -99,
-                },
-            ])
-
-            decision = DetectionScheduler(config).evaluate_bag(bag)
-
-            self.assertFalse(decision.should_extract)
-            self.assertEqual(decision.total_score, -94)
-            self.assertIn("extension", decision.matched_rules)
-            self.assertIn("scene_penalty", decision.matched_rules)
-            self.assertTrue(bag.get("scene.is_runtime_resource_archive"))
-
-    def test_weak_scene_protected_archive_is_penalized_when_precheck_allows_weak_matches(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "www" / "audio").mkdir(parents=True)
-            (root / "www" / "js").mkdir(parents=True)
-            archive = root / "www" / "audio" / "bgm.7z"
-            archive.write_bytes(b"7z\xbc\xaf\x27\x1c")
-
-            bag = FactBag()
-            bag.set("file.path", str(archive))
-            config = with_detection_pipeline({
-                "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
-            }, precheck=[
-                {
-                    "name": "scene_protect",
-                    "enabled": True,
-                    "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
-                    "protect_weak_matches": False,
-                },
-            ], scoring=[
-                {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".001"]}]},
-                {
-                    "name": "scene_penalty",
-                    "enabled": True,
-                    "scene_rules": RECOMMENDED_SCENE_RULES_PAYLOAD,
-                    "runtime_resource_archive_penalty": -99,
-                },
-            ])
-
-            decision = DetectionScheduler(config).evaluate_bag(bag)
-
-            self.assertIsNone(decision.stop_reason)
-            self.assertFalse(decision.should_extract)
-            self.assertEqual(bag.get("scene.match_strength"), "weak")
-            self.assertTrue(bag.get("scene.is_runtime_resource_archive"))
-            self.assertIn("scene_penalty", decision.matched_rules)
 
     def test_maybe_split_with_strong_signal_stays_uncertain_after_scoring(self):
         with tempfile.TemporaryDirectory() as tmp:
