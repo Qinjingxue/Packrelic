@@ -1645,7 +1645,10 @@ fn rebuild_rar5_quarantine(data: &[u8], offset: usize) -> Option<(Vec<u8>, usize
     let mut saw_main = false;
     let mut end_offset = pos;
     while pos < data.len() {
-        let block = parse_rar5_block(data, pos)?;
+        let Some(block) = parse_rar5_block(data, pos) else {
+            skipped += 1;
+            break;
+        };
         if block.end > data.len() || !block.crc_ok {
             skipped += 1;
             break;
