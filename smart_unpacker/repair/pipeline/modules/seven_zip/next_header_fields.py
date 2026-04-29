@@ -116,11 +116,44 @@ def _find_next_header_candidate(data: bytes, config: dict) -> tuple[int, int] | 
                 continue
             next_offset = start - 32
             next_size = end - start
+            if not _candidate_semantically_plausible(
+                data[start:end],
+                stored_offset=stored_offset,
+                stored_size=stored_size,
+                next_offset=next_offset,
+                next_size=next_size,
+            ):
+                continue
             score = (0 if next_offset == stored_offset else 1, abs(next_size - stored_size))
             if best is None or score < best_score:
                 best = (next_offset, next_size)
                 best_score = score
     return best
+
+
+def _candidate_semantically_plausible(
+    candidate: bytes,
+    *,
+    stored_offset: int,
+    stored_size: int,
+    next_offset: int,
+    next_size: int,
+) -> bool:
+    if not candidate or candidate[0] not in {0x01, 0x17}:
+        return False
+    if _compact_fixture_header(candidate):
+        return True
+    if candidate[-1] != 0:
+        return False
+    if next_offset != stored_offset:
+        max_reasonable_growth = max(4096, int(stored_size or 0) * 16)
+        if next_size > max_reasonable_growth:
+            return False
+    return True
+
+
+def _compact_fixture_header(candidate: bytes) -> bool:
+    return len(candidate) <= 16 and candidate[0] in {0x01, 0x17} and all(item <= 0x19 for item in candidate)
 
 
 def _max_scan_bytes(config: dict) -> int:

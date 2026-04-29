@@ -24,6 +24,7 @@ def edge_config(passwords: list[str] | None = None) -> dict:
             "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
         },
+        "verification": {"enabled": True},
         "user_passwords": passwords or [],
         "builtin_passwords": [],
     }, precheck=[
@@ -47,6 +48,7 @@ def detection_disabled_config(passwords: list[str] | None = None) -> dict:
             "archive_cleanup_mode": "k",
             "flatten_single_directory": False,
         },
+        "verification": {"enabled": True},
         "user_passwords": passwords or [],
         "builtin_passwords": [],
         "detection": {
@@ -123,23 +125,21 @@ def assert_failure_contains(
         assert not marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
 
 
-def assert_success_or_failure_contains(case: ArchiveCase, expected_options: set[str]):
-    summary = run_pipeline(case.archive_dir)
-    if summary.success_count == 1:
-        assert summary.failed_tasks == []
-        assert marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
-        return
-    assert summary.success_count == 0
-    assert summary.failed_tasks
-    assert any(any(expected in item for expected in expected_options) for item in summary.failed_tasks)
-
-
 def assert_partial_success_without_marker(case: ArchiveCase):
     summary = run_pipeline(case.archive_dir)
 
     assert summary.success_count == 1
     assert summary.failed_tasks == []
     assert not marker_was_extracted(case.archive_dir, case.marker_name, case.marker_text)
+
+
+def assert_partial_recovery(case: ArchiveCase):
+    summary = run_pipeline(case.archive_dir)
+
+    assert summary.success_count == 1
+    assert summary.failed_tasks == []
+    assert summary.partial_success_count == 1
+    assert summary.recovered_outputs
 
 
 def archive_formats():
@@ -302,7 +302,7 @@ def test_real_archive_edge_corrupted_single_archives_fail(tmp_path, archive_form
 
 
 @pytest.mark.parametrize("archive_format", archive_format_params({"7z", "zip"}))
-@pytest.mark.parametrize("corruption", ["byte_flip", "header_damage", "tail_damage"])
+@pytest.mark.parametrize("corruption", ["byte_flip", "header_damage", "tail_header_damage", "trailing_junk"])
 def test_real_archive_edge_corruption_modes_fail(tmp_path, archive_format, corruption):
     require_7z()
     case = FACTORY.create(tmp_path, f"corrupt_{corruption}_{archive_format}", archive_format, corruption=corruption)
@@ -310,14 +310,20 @@ def test_real_archive_edge_corruption_modes_fail(tmp_path, archive_format, corru
     if archive_format == "zip" and corruption == "byte_flip":
         assert_partial_success_without_marker(case)
         return
-    if archive_format == "zip" and corruption == "tail_damage":
+    if archive_format == "zip" and corruption in {"tail_header_damage", "trailing_junk"}:
         assert_success(case)
         return
     if archive_format == "zip" and corruption == "header_damage":
         assert_success(case)
         return
-    if archive_format == "7z" and corruption == "tail_damage":
-        assert_success_or_failure_contains(case, {"压缩包损坏", "致命错误"})
+    if archive_format == "7z" and corruption == "trailing_junk":
+        assert_success(case)
+        return
+    if archive_format == "7z" and corruption == "tail_header_damage":
+        assert_failure_contains(case, {"压缩包损坏", "致命错误", "校验失败", "修复结果没有可提取文件"})
+        return
+    if archive_format == "7z" and corruption == "byte_flip":
+        assert_partial_recovery(case)
         return
     assert_failure_contains(
         case,

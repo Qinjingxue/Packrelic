@@ -381,7 +381,12 @@ def corrupt_file(path: Path, truncate: bool = False, mode: str | None = None):
         raw[:16] = b"\0" * 16
         path.write_bytes(raw)
         return
-    if effective_mode == "tail_damage":
+    if effective_mode in {"trailing_junk", "tail_junk"}:
+        raw.extend(b"SUNPACK_TRAILING_JUNK")
+        path.write_bytes(raw)
+        return
+    # tail_damage is kept as a legacy alias for the destructive footer/header mutation.
+    if effective_mode in {"tail_header_damage", "tail_damage"}:
         if len(raw) < 32:
             raw.extend(b"x" * (32 - len(raw)))
         raw[-16:] = b"\0" * 16

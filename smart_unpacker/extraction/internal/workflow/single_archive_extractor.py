@@ -147,8 +147,22 @@ class SingleArchiveExtractor:
                     )
 
                     if run_result.returncode == 0:
-                        print(f"[EXTRACT] 成功: {archive}")
                         diagnostics = self._diagnostics_from(run_result)
+                        if self._empty_repaired_success(diagnostics, task):
+                            print(f"[EXTRACT] 失败: {archive} (错误: 修复结果没有可提取文件)")
+                            shutil.rmtree(out_dir, ignore_errors=True)
+                            diagnostics["failure_stage"] = "verification"
+                            diagnostics["failure_kind"] = "empty_repair_output"
+                            return self._failed(
+                                archive,
+                                out_dir,
+                                run_parts,
+                                "修复结果没有可提取文件",
+                                password_used=correct_pwd,
+                                selected_codepage=selected_codepage,
+                                diagnostics=diagnostics,
+                            )
+                        print(f"[EXTRACT] 成功: {archive}")
                         manifest_path = ""
                         if diagnostics.get("result"):
                             manifest_path = write_extraction_progress_manifest(
@@ -318,3 +332,18 @@ class SingleArchiveExtractor:
     def _diagnostics_from(result: object) -> dict:
         diagnostics = getattr(result, "worker_diagnostics", None)
         return dict(diagnostics) if isinstance(diagnostics, dict) else {}
+
+    @staticmethod
+    def _empty_repaired_success(diagnostics: dict, task: ArchiveTask) -> bool:
+        result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
+        if str(result.get("status") or "") != "ok":
+            return False
+        if int(result.get("item_count", 0) or 0) > 0:
+            return False
+        if int(result.get("files_written", 0) or 0) > 0 or int(result.get("bytes_written", 0) or 0) > 0:
+            return False
+        try:
+            state = task.archive_state()
+        except Exception:
+            return False
+        return bool(getattr(state, "patches", None))
