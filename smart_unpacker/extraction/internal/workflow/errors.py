@@ -62,6 +62,8 @@ def classify_extract_error(
     if worker_result:
         if worker_result.get("missing_volume"):
             return "分卷缺失或不完整"
+        if is_split_archive and _worker_reports_payload_damage(worker_result):
+            return "压缩包损坏"
         if worker_result.get("wrong_password") or worker_result.get("native_status") == "wrong_password":
             return "密码错误"
         if worker_result.get("checksum_error"):
@@ -120,3 +122,19 @@ def classify_extract_error(
             error_msg = f"7z进程异常退出 (退出码 {code})"
 
     return error_msg
+
+
+def _worker_reports_payload_damage(worker_result: dict) -> bool:
+    if worker_result.get("checksum_error") or worker_result.get("damaged"):
+        return True
+    if worker_result.get("native_status") == "damaged":
+        return True
+    failure_kind = str(worker_result.get("failure_kind") or "").lower()
+    if failure_kind in {"corrupted_data", "data_error", "checksum_error", "crc_error"}:
+        return True
+    diagnostics = worker_result.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        nested_kind = str(diagnostics.get("failure_kind") or "").lower()
+        if nested_kind in {"corrupted_data", "data_error", "checksum_error", "crc_error"}:
+            return True
+    return False

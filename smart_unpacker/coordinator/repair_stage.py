@@ -204,12 +204,13 @@ class ArchiveRepairStage:
         diagnostics = dict(result.diagnostics or {})
         worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
         native_diagnostics = worker_result.get("diagnostics") if isinstance(worker_result.get("diagnostics"), dict) else {}
+        split_payload_damage = self._split_payload_damage_signal(task, worker_result, native_diagnostics)
         payload = {
             "status": "failed",
             "format": self._format_from_task(task),
             "error": result.error,
-            "damaged": "damaged" in flags,
-            "checksum_error": "checksum_error" in flags or "crc_error" in flags,
+            "damaged": "damaged" in flags or split_payload_damage,
+            "checksum_error": "checksum_error" in flags or "crc_error" in flags or split_payload_damage,
             "missing_volume": "missing_volume" in flags,
             "wrong_password": "wrong_password" in flags,
             "archive_type": self._format_from_task(task),
@@ -238,6 +239,11 @@ class ArchiveRepairStage:
             ):
                 if key in worker_result:
                     payload[key] = worker_result[key]
+            if split_payload_damage:
+                payload["damaged"] = True
+                payload["checksum_error"] = True
+                payload["wrong_password"] = False
+                payload.setdefault("failure_kind", "data_error")
             worker_native = worker_result.get("diagnostics") if isinstance(worker_result.get("diagnostics"), dict) else {}
             output_trace = worker_native.get("output_trace") if isinstance(worker_native.get("output_trace"), dict) else {}
             if output_trace:
@@ -259,6 +265,27 @@ class ArchiveRepairStage:
         if native_diagnostics:
             payload["native_diagnostics"] = native_diagnostics
         return payload
+
+    def _split_payload_damage_signal(
+        self,
+        task: ArchiveTask,
+        worker_result: dict[str, Any],
+        native_diagnostics: dict[str, Any],
+    ) -> bool:
+        is_split = bool(getattr(task.split_info, "is_split", False) or len(task.all_parts or []) > 1)
+        if not is_split:
+            return False
+        for payload in (worker_result, native_diagnostics):
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("damaged") or payload.get("checksum_error"):
+                return True
+            if str(payload.get("native_status") or "").lower() == "damaged":
+                return True
+            failure_kind = str(payload.get("failure_kind") or "").lower()
+            if failure_kind in {"corrupted_data", "data_error", "checksum_error", "crc_error"}:
+                return True
+        return False
 
     def _flags_from_failure_text(self, error: str) -> list[str]:
         text = str(error or "").lower()

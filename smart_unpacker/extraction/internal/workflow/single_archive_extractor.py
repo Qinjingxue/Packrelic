@@ -121,14 +121,17 @@ class SingleArchiveExtractor:
                 test_err = resolution.error_text
                 if self.password_store.has_candidates():
                     if correct_pwd is None and "wrong password" in test_err:
-                        shutil.rmtree(out_dir, ignore_errors=True)
-                        return self._failed(
-                            archive,
-                            out_dir,
-                            run_parts,
-                            "密码错误或未知密码",
-                            diagnostics=self._diagnostics_from(test_result),
-                        )
+                        if is_split:
+                            correct_pwd = ""
+                        else:
+                            shutil.rmtree(out_dir, ignore_errors=True)
+                            return self._failed(
+                                archive,
+                                out_dir,
+                                run_parts,
+                                "密码错误或未知密码",
+                                diagnostics=self._diagnostics_from(test_result),
+                            )
 
                 selected_codepage = self._codepage_from_facts(task)
 

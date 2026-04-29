@@ -282,20 +282,35 @@ def terminal_failure_reason(result: ExtractionResult) -> str:
     worker_result = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
     native = worker_result.get("diagnostics") if isinstance(worker_result.get("diagnostics"), dict) else {}
     flags = set()
+    damage_signals = False
+    password_signals = False
     for payload in (worker_result, diagnostics, native):
         if not isinstance(payload, dict):
             continue
         for flag in TERMINAL_FAILURE_FLAGS:
+            if flag == "wrong_password" and payload.get(flag):
+                password_signals = True
+                continue
             if payload.get(flag):
                 flags.add(flag)
         failure_kind = str(payload.get("failure_kind") or "")
         failure_stage = str(payload.get("failure_stage") or "")
+        if payload.get("damaged") or payload.get("checksum_error") or failure_kind in {
+            "corrupted_data",
+            "data_error",
+            "checksum_error",
+            "crc_error",
+        }:
+            damage_signals = True
         if failure_kind == "output_filesystem":
             flags.add("output_filesystem")
         if failure_stage.startswith("worker_") or failure_kind.startswith("process_"):
             flags.add("process_failure")
     text = str(result.error or "").lower()
-    if "password" in text or "密码" in text:
+    is_split = len(result.all_parts or []) > 1 or _looks_like_split_name(result.archive)
+    if password_signals and not (is_split and damage_signals):
+        flags.add("wrong_password")
+    if ("password" in text or "密码" in text) and not (is_split and damage_signals):
         flags.add("wrong_password")
     if "volume" in text or "分卷" in text:
         flags.add("missing_volume")
@@ -305,6 +320,11 @@ def terminal_failure_reason(result: ExtractionResult) -> str:
         if flag in flags:
             return flag
     return ""
+
+
+def _looks_like_split_name(path: str) -> bool:
+    name = Path(str(path or "")).name.lower()
+    return name.endswith(".001") or ".part1." in name or ".part01." in name
 
 
 def input_digest(task: ArchiveTask) -> str:
