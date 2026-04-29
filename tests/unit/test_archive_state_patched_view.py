@@ -3,9 +3,12 @@ import zipfile
 import gzip
 import io
 import tarfile
+from pathlib import Path
+
+import pytest
 
 from sunpack.analysis.scheduler import ArchiveAnalysisScheduler
-from sunpack.contracts.archive_input import ArchiveInputDescriptor
+from sunpack.contracts.archive_input import ArchiveInputDescriptor, ArchiveInputPart, ArchiveInputRange, ArchiveInputSegment
 from sunpack.contracts.archive_state import ArchiveState, PatchOperation, PatchPlan
 from sunpack.contracts.detection import FactBag
 from sunpack.contracts.tasks import ArchiveTask
@@ -20,6 +23,7 @@ from sunpack.repair.pipeline.modules.tar.checksum_fix import TarHeaderChecksumFi
 from sunpack.repair.pipeline.modules.zip._rebuild import rebuild_zip_from_source
 from sunpack.repair.pipeline.modules.zip.trailing_junk_trim import ZipTrailingJunkTrim
 from sunpack.support.archive_state_view import ArchiveStateByteView
+from sunpack.verification.archive_state_manifest import archive_state_manifest
 
 
 def test_archive_state_byte_view_applies_replace_truncate_append(tmp_path):
@@ -270,3 +274,29 @@ def test_native_zip_rebuild_accepts_patched_state_bytes_source(tmp_path):
     assert scan.entries == 1
     with zipfile.ZipFile(rebuilt) as zf:
         assert zf.read("inside.txt") == b"ok"
+
+
+def test_archive_state_manifest_verifies_chunyu_embedded_zip_range():
+    archive = Path("testfiles/chunyu_syokushu/ちゅうにゅう触手洞窟.exe")
+    if not archive.is_file():
+        pytest.skip("local Chunyu embedded ZIP sample is not available")
+    start = 61_057_024
+    descriptor = ArchiveInputDescriptor(
+        entry_path=str(archive),
+        open_mode="file_range",
+        format_hint="zip",
+        logical_name="ちゅうにゅう触手洞窟",
+        parts=[
+            ArchiveInputPart(
+                path=str(archive),
+                range=ArchiveInputRange(path=str(archive), start=start, end=archive.stat().st_size),
+            )
+        ],
+        segment=ArchiveInputSegment(start=start, end=archive.stat().st_size, confidence=0.99),
+    )
+    manifest = archive_state_manifest(ArchiveState.from_archive_input(descriptor), max_items=200000)
+
+    assert manifest.ok
+    assert manifest.damaged is False
+    assert manifest.checksum_error is False
+    assert manifest.file_count == 447

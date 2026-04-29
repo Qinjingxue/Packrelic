@@ -526,23 +526,23 @@ fn verify_zip_payload(
 fn verify_deflate(input: &[u8], expected_crc: u32, expected_size: u64) -> bool {
     use flate2::{Decompress, FlushDecompress, Status};
     let mut decompressor = Decompress::new(false);
-    let mut output = Vec::with_capacity(64 * 1024);
+    let mut output = [0u8; 64 * 1024];
     let mut crc = Crc32::new();
     loop {
         let before_in = decompressor.total_in();
         let before_out = decompressor.total_out();
-        let before_len = output.len();
         let input_offset = before_in as usize;
         if input_offset > input.len() {
             return false;
         }
         let Ok(status) =
-            decompressor.decompress_vec(&input[input_offset..], &mut output, FlushDecompress::None)
+            decompressor.decompress(&input[input_offset..], &mut output, FlushDecompress::None)
         else {
             return false;
         };
-        if output.len() > before_len {
-            crc.update(&output[before_len..]);
+        let produced = (decompressor.total_out() - before_out) as usize;
+        if produced > 0 {
+            crc.update(&output[..produced]);
         }
         if status == Status::StreamEnd {
             return decompressor.total_in() as usize == input.len()
@@ -554,9 +554,6 @@ fn verify_deflate(input: &[u8], expected_crc: u32, expected_size: u64) -> bool {
         }
         if before_in == decompressor.total_in() && before_out == decompressor.total_out() {
             return false;
-        }
-        if output.len() > COPY_CHUNK_SIZE {
-            output.clear();
         }
     }
 }
