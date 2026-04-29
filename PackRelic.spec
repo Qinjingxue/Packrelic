@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from PyInstaller.building.build_main import Analysis, COLLECT, EXE, PYZ
@@ -6,6 +7,7 @@ from PyInstaller.utils.hooks import collect_submodules
 
 project_root = Path(SPECPATH)
 icon_path = project_root / "packrelic.ico"
+dist_name = os.environ.get("PACKRELIC_DIST_NAME", "packrelic")
 
 hiddenimports = ["packrelic_native"]
 for package in (
@@ -71,5 +73,5 @@ coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
-    name="packrelic",
+    name=dist_name,
 )

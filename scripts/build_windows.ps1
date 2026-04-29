@@ -2,7 +2,9 @@
 param(
     [switch]$SkipTests,
     [switch]$Clean,
-    [string]$Version
+    [string]$Version,
+    [ValidateSet("x64", "arm64")]
+    [string]$Arch = "x64"
 )
 
 Set-StrictMode -Version Latest
@@ -63,6 +65,99 @@ function Assert-CommandExists {
     if (-not (Get-Command $Command -ErrorAction SilentlyContinue)) {
         throw "$Description not found in PATH: $Command"
     }
+}
+
+function Get-ProcessBuildArch {
+    $arch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLowerInvariant()
+    switch ($arch) {
+        "x64" { return "x64" }
+        "arm64" { return "arm64" }
+        default { return $arch }
+    }
+}
+
+function Get-CMakePlatform {
+    param([string]$BuildArch)
+    switch ($BuildArch) {
+        "x64" { return "x64" }
+        "arm64" { return "ARM64" }
+    }
+    throw "Unsupported build architecture: $BuildArch"
+}
+
+function Get-RustTarget {
+    param([string]$BuildArch)
+    switch ($BuildArch) {
+        "x64" { return "x86_64-pc-windows-msvc" }
+        "arm64" { return "aarch64-pc-windows-msvc" }
+    }
+    throw "Unsupported build architecture: $BuildArch"
+}
+
+function Get-ExpectedPeMachine {
+    param([string]$BuildArch)
+    switch ($BuildArch) {
+        "x64" { return 0x8664 }
+        "arm64" { return 0xAA64 }
+    }
+    throw "Unsupported build architecture: $BuildArch"
+}
+
+function Get-PeMachine {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $stream = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        if ($stream.Length -lt 0x40) {
+            throw "File is too small to be a PE image: $LiteralPath"
+        }
+        $reader = [System.IO.BinaryReader]::new($stream)
+        try {
+            if ($reader.ReadUInt16() -ne 0x5A4D) {
+                throw "Missing MZ signature: $LiteralPath"
+            }
+            $stream.Seek(0x3C, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $peOffset = $reader.ReadUInt32()
+            if ($peOffset + 6 -gt $stream.Length) {
+                throw "Invalid PE header offset: $LiteralPath"
+            }
+            $stream.Seek([int64]$peOffset, [System.IO.SeekOrigin]::Begin) | Out-Null
+            if ($reader.ReadUInt32() -ne 0x00004550) {
+                throw "Missing PE signature: $LiteralPath"
+            }
+            return [int]$reader.ReadUInt16()
+        } finally {
+            $reader.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Get-PeMachineName {
+    param([int]$Machine)
+    switch ($Machine) {
+        0x014C { return "x86" }
+        0x8664 { return "x64" }
+        0xAA64 { return "arm64" }
+        default { return ("0x{0:X4}" -f $Machine) }
+    }
+}
+
+function Assert-PeMachine {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string]$BuildArch,
+        [string]$Description = "PE image"
+    )
+
+    Assert-PathExists -LiteralPath $LiteralPath -Description $Description
+    $expected = Get-ExpectedPeMachine -BuildArch $BuildArch
+    $actual = Get-PeMachine -LiteralPath $LiteralPath
+    if ($actual -ne $expected) {
+        throw ("{0} architecture mismatch: expected {1}, got {2}: {3}" -f $Description, $BuildArch, (Get-PeMachineName -Machine $actual), $LiteralPath)
+    }
+    Write-Host ("{0} architecture: {1} ({2})" -f $Description, $BuildArch, $LiteralPath) -ForegroundColor Green
 }
 
 function Invoke-Native {
@@ -189,26 +284,38 @@ function Build-SevenZipWrapper {
         [Parameter(Mandatory = $true)]
         [string]$ToolsRoot,
         [Parameter(Mandatory = $true)]
-        [string]$SevenZipDllPath
+        [string]$SevenZipDllPath,
+        [Parameter(Mandatory = $true)]
+        [string]$BuildArch
     )
 
     Write-Step "Building 7z.dll C++ wrapper"
     Assert-PathExists -LiteralPath (Join-Path $WrapperRoot "CMakeLists.txt") -Description "7z wrapper CMake project"
     Assert-PathExists -LiteralPath $SevenZipDllPath -Description "Bundled 7z.dll"
-    Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $WrapperRoot, "-B", $BuildDir, "-DCMAKE_BUILD_TYPE=Release")
+    $cmakePlatform = Get-CMakePlatform -BuildArch $BuildArch
+    Invoke-Native -FilePath $CMakeCommand -Arguments @("-S", $WrapperRoot, "-B", $BuildDir, "-A", $cmakePlatform, "-DCMAKE_BUILD_TYPE=Release")
     Invoke-Native -FilePath $CMakeCommand -Arguments @("--build", $BuildDir, "--config", "Release")
-    Invoke-Native -FilePath "ctest" -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
+    if ((Get-ProcessBuildArch) -eq $BuildArch) {
+        Invoke-Native -FilePath "ctest" -Arguments @("--test-dir", $BuildDir, "-C", "Release", "--output-on-failure")
+    } else {
+        Write-Host "Skipping C++ smoke test because $BuildArch binaries cannot run in the current process architecture." -ForegroundColor Yellow
+    }
 
     $wrapperDll = Join-Path $BuildDir "Release\sevenzip_password_tester_capi.dll"
     $workerExe = Join-Path $BuildDir "Release\sevenzip_worker.exe"
     Assert-PathExists -LiteralPath $wrapperDll -Description "Built 7z wrapper DLL"
     Assert-PathExists -LiteralPath $workerExe -Description "Built 7z worker executable"
+    Assert-PeMachine -LiteralPath $wrapperDll -BuildArch $BuildArch -Description "Built 7z wrapper DLL"
+    Assert-PeMachine -LiteralPath $workerExe -BuildArch $BuildArch -Description "Built 7z worker executable"
     Copy-Item -LiteralPath $wrapperDll -Destination (Join-Path $ToolsRoot "sevenzip_password_tester_capi.dll") -Force
     Copy-Item -LiteralPath $workerExe -Destination (Join-Path $ToolsRoot "sevenzip_worker.exe") -Force
 }
 
 function Assert-PackagedNativeExtension {
-    param([string]$PackageRoot)
+    param(
+        [string]$PackageRoot,
+        [string]$BuildArch
+    )
 
     $nativeExtension = Get-ChildItem -LiteralPath $PackageRoot -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object {
@@ -222,6 +329,7 @@ function Assert-PackagedNativeExtension {
     }
 
     Write-Host ("Packaged native extension: {0}" -f $nativeExtension.FullName) -ForegroundColor Green
+    Assert-PeMachine -LiteralPath $nativeExtension.FullName -BuildArch $BuildArch -Description "Packaged packrelic_native extension"
 }
 
 function Test-PythonImports {
@@ -348,10 +456,18 @@ function Copy-IfExists {
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $repoRoot
+$buildArch = $Arch.ToLowerInvariant()
+$processArch = Get-ProcessBuildArch
+$rustTarget = Get-RustTarget -BuildArch $buildArch
 
 Write-Step "Environment preflight"
 if ($env:OS -ne "Windows_NT") {
     throw "This build script only supports Windows."
+}
+Write-Host "Requested architecture: $buildArch"
+Write-Host "Build Python/process architecture: $processArch"
+if ($processArch -ne $buildArch) {
+    throw "Windows PyInstaller/PyO3 final executable builds must run under a target-architecture Python. This machine/process is '$processArch', so it cannot produce a real '$buildArch' pkrc.exe. Use an ARM64 Windows Python environment for -Arch arm64; use static PE validation on the resulting package."
 }
 
 $pythonCommand = Get-PythonCommand
@@ -365,8 +481,8 @@ $iconPath = Join-Path $repoRoot "packrelic.ico"
 $nativeCrateRoot = Join-Path $repoRoot "native\packrelic_native"
 $nativeCargoToml = Join-Path $nativeCrateRoot "Cargo.toml"
 $sevenZipWrapperRoot = Join-Path $repoRoot "native\sevenzip_password_tester"
-$sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot "build"
-$toolsRoot = Join-Path $repoRoot "tools"
+$sevenZipWrapperBuildDir = Join-Path $sevenZipWrapperRoot ("build-" + $buildArch)
+$toolsRoot = if ($buildArch -eq "x64") { Join-Path $repoRoot "tools" } else { Join-Path $repoRoot ("tools-" + $buildArch) }
 $sevenZipPath = Join-Path $toolsRoot "7z.exe"
 $sevenZipDllPath = Join-Path $toolsRoot "7z.dll"
 $sevenZipWrapperDllPath = Join-Path $toolsRoot "sevenzip_password_tester_capi.dll"
@@ -374,15 +490,16 @@ $sevenZipWorkerPath = Join-Path $toolsRoot "sevenzip_worker.exe"
 $sevenZipLicensePath = Join-Path $repoRoot "licenses\7zip-license.txt"
 $distRoot = Join-Path $repoRoot "dist"
 $buildRoot = Join-Path $repoRoot "build"
-$nativeWheelRoot = Join-Path $buildRoot "native-wheels"
+$nativeWheelRoot = Join-Path $buildRoot ("native-wheels-" + $buildArch)
 $releaseRoot = Join-Path $repoRoot "release"
-$distAppRoot = Join-Path $distRoot "packrelic"
+$distFolderName = if ($buildArch -eq "x64") { "packrelic" } else { "packrelic-" + $buildArch }
+$distAppRoot = Join-Path $distRoot $distFolderName
 $distExePath = Join-Path $distAppRoot "pkrc.exe"
 $distInternalRoot = Join-Path $distAppRoot "_internal"
 $distToolsRoot = Join-Path $distAppRoot "tools"
 $distLicensesRoot = Join-Path $distAppRoot "licenses"
 $versionValue = Get-ReleaseVersion -ExplicitVersion $Version -RepoRoot $repoRoot
-$releaseZipName = "packrelic-windows-x64-{0}.zip" -f $versionValue
+$releaseZipName = "packrelic-windows-{0}-{1}.zip" -f $buildArch, $versionValue
 $releaseZipPath = Join-Path $releaseRoot $releaseZipName
 $runAcceptanceTests = -not $SkipTests
 
@@ -400,6 +517,8 @@ Assert-PathExists -LiteralPath $sevenZipPath -Description "Bundled 7-Zip executa
 Assert-PathExists -LiteralPath $sevenZipDllPath -Description "Bundled 7-Zip runtime DLL"
 Assert-PathExists -LiteralPath $sevenZipLicensePath -Description "7-Zip license file"
 Assert-CommandExists -Command "cargo" -Description "Rust toolchain"
+Assert-PeMachine -LiteralPath $sevenZipPath -BuildArch $buildArch -Description "Bundled 7-Zip executable"
+Assert-PeMachine -LiteralPath $sevenZipDllPath -BuildArch $buildArch -Description "Bundled 7-Zip runtime DLL"
 
 if ($Clean) {
     Write-Step "Cleaning build virtual environment"
@@ -433,13 +552,14 @@ Invoke-Native -FilePath $maturinCommand -Arguments @(
     "build",
     "--manifest-path", $nativeCargoToml,
     "--release",
+    "--target", $rustTarget,
     "--out", $nativeWheelRoot
 )
 $nativeWheelPath = Get-LatestWheel -WheelRoot $nativeWheelRoot
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "pip", "install", "--force-reinstall", $nativeWheelPath)
 Test-NativeImport -PythonPath $venvPython
 
-Build-SevenZipWrapper -CMakeCommand $cmakeCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath
+Build-SevenZipWrapper -CMakeCommand $cmakeCommand -WrapperRoot $sevenZipWrapperRoot -BuildDir $sevenZipWrapperBuildDir -ToolsRoot $toolsRoot -SevenZipDllPath $sevenZipDllPath -BuildArch $buildArch
 Assert-PathExists -LiteralPath $sevenZipWrapperDllPath -Description "Bundled 7z wrapper DLL"
 Assert-PathExists -LiteralPath $sevenZipWorkerPath -Description "Bundled 7z worker executable"
 Test-SevenZipWrapper -PythonPath $venvPython
@@ -457,12 +577,14 @@ if ($runAcceptanceTests) {
 }
 
 Write-Step "Building Windows release with PyInstaller"
+$env:PACKRELIC_DIST_NAME = $distFolderName
 Invoke-Native -FilePath $venvPython -Arguments @("-m", "PyInstaller", "--noconfirm", $specPath)
 
 Write-Step "Validating packaged outputs"
 Assert-PathExists -LiteralPath $distExePath -Description "Packaged pkrc executable"
+Assert-PeMachine -LiteralPath $distExePath -BuildArch $buildArch -Description "Packaged pkrc executable"
 Assert-PathExists -LiteralPath $distInternalRoot -Description "PyInstaller internal resource directory"
-Assert-PackagedNativeExtension -PackageRoot $distAppRoot
+Assert-PackagedNativeExtension -PackageRoot $distAppRoot -BuildArch $buildArch
 Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "builtin_passwords.txt") -Description "Duplicate internal password file"
 Assert-PathMissing -LiteralPath (Join-Path $distInternalRoot "packrelic_config.json") -Description "Duplicate internal config file"
 
@@ -493,6 +615,10 @@ Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "7z.dll") -Description 
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sevenzip_password_tester_capi.dll") -Description "External tools/sevenzip_password_tester_capi.dll"
 Assert-PathExists -LiteralPath (Join-Path $distToolsRoot "sevenzip_worker.exe") -Description "External tools/sevenzip_worker.exe"
 Assert-PathExists -LiteralPath (Join-Path $distLicensesRoot "7zip-license.txt") -Description "External 7-Zip license file"
+Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "7z.exe") -BuildArch $buildArch -Description "Packaged tools/7z.exe"
+Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "7z.dll") -BuildArch $buildArch -Description "Packaged tools/7z.dll"
+Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "sevenzip_password_tester_capi.dll") -BuildArch $buildArch -Description "Packaged tools/sevenzip_password_tester_capi.dll"
+Assert-PeMachine -LiteralPath (Join-Path $distToolsRoot "sevenzip_worker.exe") -BuildArch $buildArch -Description "Packaged tools/sevenzip_worker.exe"
 
 $versionFilePath = Join-Path $distAppRoot "VERSION.txt"
 $gitCommit = Get-GitCommit -RepoRoot $repoRoot
@@ -500,17 +626,23 @@ $pythonVersion = (& $venvPython --version).Trim()
 $metadata = @(
     "product=PackRelic"
     "version=$versionValue"
+    "arch=$buildArch"
     "git_commit=$gitCommit"
     "python=$pythonVersion"
     "built_at_utc=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
 )
 [System.IO.File]::WriteAllLines($versionFilePath, $metadata)
 
-Write-Step "Running packaged smoke tests"
-Invoke-Native -FilePath $distExePath -Arguments @("--help")
-Invoke-Native -FilePath $distExePath -Arguments @("passwords", "--json")
-Invoke-Native -FilePath $distExePath -Arguments @("inspect", (Join-Path $repoRoot "tests"), "--json")
-Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")
+if ($processArch -eq $buildArch) {
+    Write-Step "Running packaged smoke tests"
+    Invoke-Native -FilePath $distExePath -Arguments @("--help")
+    Invoke-Native -FilePath $distExePath -Arguments @("passwords", "--json")
+    Invoke-Native -FilePath $distExePath -Arguments @("inspect", (Join-Path $repoRoot "tests"), "--json")
+    Invoke-Native -FilePath $distExePath -Arguments @("config", "validate", "--json")
+} else {
+    Write-Step "Skipping packaged smoke tests"
+    Write-Host "Packaged executable is $buildArch and cannot run under the current $processArch process." -ForegroundColor Yellow
+}
 
 Write-Step "Creating distributable zip archive"
 if (Test-Path -LiteralPath $releaseZipPath) {

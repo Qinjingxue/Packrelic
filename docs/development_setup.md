@@ -122,7 +122,7 @@ Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_worker.exe tool
 6. 使用 PyInstaller 构建 `pkrc.exe`
 7. 将 `tools\7z.exe`、`tools\7z.dll`、`tools\sevenzip_password_tester_capi.dll`、`tools\sevenzip_worker.exe` 和 license 复制到发行目录
 8. 运行 packaged smoke tests
-9. 生成 `release\packrelic-windows-x64-<version>.zip`
+9. 生成 `release\packrelic-windows-<arch>-<version>.zip`
 
 常用参数：
 
@@ -130,6 +130,22 @@ Copy-Item native\sevenzip_password_tester\build\Release\sevenzip_worker.exe tool
 .\scripts\build_windows.ps1 -SkipTests
 .\scripts\build_windows.ps1 -Clean
 .\scripts\build_windows.ps1 -Version 1.2.3
+```
+
+架构参数：
+
+```powershell
+.\scripts\build_windows.ps1 -Arch x64
+.\scripts\build_windows.ps1 -Arch arm64
+```
+
+`x64` 是默认值。Windows ARM64 最终可执行文件必须在 ARM64 Windows + ARM64 Python 环境中构建；脚本会拒绝在 x64 Python 下生成“伪 ARM64”包。构建过程会静态校验 `pkrc.exe`、`packrelic_native`、`7z.exe`、`7z.dll`、`sevenzip_password_tester_capi.dll` 和 `sevenzip_worker.exe` 的 PE machine 架构。
+
+已有发行目录也可以独立做静态架构校验：
+
+```powershell
+.\scripts\verify_windows_package_arch.ps1 -PackageRoot dist\packrelic -Arch x64
+.\scripts\verify_windows_package_arch.ps1 -PackageRoot dist\packrelic-arm64 -Arch arm64
 ```
 
 ## 原生组件职责
