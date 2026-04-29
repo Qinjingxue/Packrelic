@@ -353,6 +353,136 @@ pub(crate) fn zip_directory_field_repair(
     Ok(result.unbind())
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_entries=20000,
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_entry_uncompressed_mb=512.0,
+    verify_candidates=true
+))]
+pub(crate) fn zip_conflict_resolver_rebuild(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_entries: usize,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_entry_uncompressed_mb: f64,
+    verify_candidates: bool,
+) -> PyResult<Py<PyDict>> {
+    let options = DeepZipOptions {
+        max_candidates: 1,
+        max_entries: max_entries.max(1),
+        max_input_bytes: mb_to_bytes(max_input_size_mb),
+        max_output_bytes: mb_to_bytes(max_output_size_mb),
+        max_entry_uncompressed_bytes: mb_to_bytes(max_entry_uncompressed_mb),
+        max_duration: None,
+        verify_candidates,
+    };
+    let data = match read_source_input(source_input, options.max_input_bytes) {
+        Ok(data) => data,
+        Err(message) => return status_dict(py, "skipped", "", &message, &[], &[], 0, 0, 0.0),
+    };
+    let scan = scan_entries(&data, &options, Instant::now());
+    if scan.entries.is_empty() {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "no recoverable ZIP entries were available for conflict resolution",
+            &scan.warnings,
+            &[],
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            0.0,
+        );
+    }
+    let selected_indices = select_conflict_free_zip_entries(&scan.entries);
+    if selected_indices.is_empty() {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "ZIP conflict resolver could not select any non-overlapping entry",
+            &scan.warnings,
+            &[],
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            0.0,
+        );
+    }
+    let conflict_count = scan.entries.len().saturating_sub(selected_indices.len());
+    if conflict_count == 0 && scan.skipped_offsets.is_empty() {
+        return status_dict(
+            py,
+            "unrepairable",
+            "",
+            "ZIP entries already look conflict-free",
+            &scan.warnings,
+            &[],
+            scan.skipped_offsets.len(),
+            scan.encrypted_entries,
+            0.0,
+        );
+    }
+    let plan = make_plan(
+        "zip_conflict_resolver_rebuild",
+        selected_indices,
+        &scan.entries,
+        0.91,
+        vec![
+            "build_zip_entry_conflict_graph",
+            "select_best_non_overlapping_entries",
+            "rebuild_clean_zip",
+        ],
+    );
+    let output_path = Path::new(workspace).join("zip_conflict_resolver_rebuild.zip");
+    let stats = match write_candidate_zip(&data, &scan.entries, &plan, &output_path, options.max_output_bytes) {
+        Ok(stats) => stats,
+        Err(message) => {
+            return status_dict(
+                py,
+                "unrepairable",
+                "",
+                &message,
+                &scan.warnings,
+                &[],
+                scan.skipped_offsets.len(),
+                scan.encrypted_entries,
+                0.0,
+            )
+        }
+    };
+    let mut warnings = scan.warnings.clone();
+    warnings.push(format!("ZIP conflict resolver dropped {conflict_count} duplicate or overlapping entries"));
+    let selected = WrittenCandidate {
+        name: "zip_conflict_resolver_rebuild",
+        path: output_path.to_string_lossy().to_string(),
+        confidence: 0.91,
+        actions: plan.actions.clone(),
+        entries: stats.entries,
+        verified_entries: stats.verified_entries,
+        descriptor_entries: stats.descriptor_entries,
+        passthrough_entries: stats.passthrough_entries,
+        size: stats.size,
+        rank_score: plan.rank_score,
+    };
+    status_dict(
+        py,
+        "partial",
+        &selected.path,
+        "ZIP duplicate/overlapping entry conflicts were resolved into a clean candidate",
+        &warnings,
+        &[selected.clone()],
+        scan.skipped_offsets.len(),
+        scan.encrypted_entries,
+        0.91,
+    )
+}
+
 #[derive(Debug, Clone)]
 struct DeepZipOptions {
     max_candidates: usize,
@@ -411,7 +541,7 @@ struct WriteStats {
     size: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct WrittenCandidate {
     name: &'static str,
     path: String,
@@ -849,6 +979,59 @@ fn make_plan(
             + passthrough * 45
             + (confidence * 10.0) as i64,
     }
+}
+
+fn select_conflict_free_zip_entries(entries: &[RecoveredEntry]) -> Vec<usize> {
+    let mut order = (0..entries.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| {
+        zip_entry_score(&entries[*right])
+            .cmp(&zip_entry_score(&entries[*left]))
+            .then_with(|| entries[*left].data_start.cmp(&entries[*right].data_start))
+    });
+    let mut selected = Vec::new();
+    let mut used_names = std::collections::HashSet::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for index in order {
+        let entry = &entries[index];
+        let name_key = String::from_utf8_lossy(&entry.name)
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_ascii_lowercase();
+        if name_key.is_empty()
+            || name_key.contains('\0')
+            || name_key.split('/').any(|part| part == ".." || part.is_empty())
+            || !used_names.insert(name_key)
+        {
+            continue;
+        }
+        if ranges
+            .iter()
+            .any(|(start, end)| entry.data_start < *end && entry.data_end > *start)
+        {
+            continue;
+        }
+        ranges.push((entry.data_start, entry.data_end));
+        selected.push(index);
+    }
+    selected.sort_by_key(|index| entries[*index].data_start);
+    selected
+}
+
+fn zip_entry_score(entry: &RecoveredEntry) -> i64 {
+    let mut score = 0i64;
+    if entry.verified {
+        score += 1000;
+    }
+    if entry.method == 0 || entry.method == 8 {
+        score += 100;
+    } else if entry.passthrough {
+        score += 20;
+    }
+    if entry.descriptor {
+        score += 40;
+    }
+    score += (entry.uncompressed_size.min(16 * 1024 * 1024) / 4096) as i64;
+    score
 }
 
 fn write_candidate_zip(

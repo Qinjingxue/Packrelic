@@ -196,6 +196,10 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        zip_deep_repair::zip_conflict_resolver_rebuild,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         compression_stream_repair::gzip_footer_fix_repair,
         m
     )?)?;
@@ -209,6 +213,10 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         compression_stream_repair::tar_boundary_repair,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        compression_stream_repair::tar_sparse_pax_longname_repair,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
@@ -241,6 +249,18 @@ fn smart_unpacker_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         archive_deep_repair::seven_zip_next_header_field_repair,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::seven_zip_solid_block_partial_salvage,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::rar_file_quarantine_rebuild,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        archive_deep_repair::archive_nested_payload_salvage,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

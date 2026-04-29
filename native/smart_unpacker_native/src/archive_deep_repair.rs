@@ -1,7 +1,9 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+use flate2::read::GzDecoder;
+use sevenz_rust2::{Archive, BlockDecoder, Password};
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const COPY_CHUNK_SIZE: usize = 1024 * 1024;
@@ -647,6 +649,152 @@ pub(crate) fn rar_end_block_repair(
         selected.confidence,
         &action_refs,
         &written,
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_output_size_mb=2048.0,
+    max_entries=20000
+))]
+pub(crate) fn seven_zip_solid_block_partial_salvage(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_output_size_mb: f64,
+    max_entries: usize,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => return status_dict(py, "skipped", "", "zip", &message, &[], 0, 0, 0, 0.0, &[]),
+    };
+    let recovered = match recover_seven_zip_entries_by_block(&data, max_entries.max(1)) {
+        Ok(entries) => entries,
+        Err(message) => return status_dict(py, "unrepairable", "", "zip", &message, &[], 0, data.len() as u64, 0, 0.0, &[]),
+    };
+    if recovered.is_empty() {
+        return status_dict(py, "unrepairable", "", "zip", "no decodable 7z block entries were recoverable", &[], 0, data.len() as u64, 0, 0.0, &[]);
+    }
+    let output_path = Path::new(workspace).join("seven_zip_solid_block_partial_salvage.zip");
+    let output_bytes = match write_stored_zip_entries(&recovered, &output_path, mb_to_bytes(max_output_size_mb)) {
+        Ok(bytes) => bytes,
+        Err(message) => return status_dict(py, "unrepairable", "", "zip", &message, &[], 0, data.len() as u64, 0, 0.0, &[]),
+    };
+    let selected = WrittenArchiveCandidate {
+        name: "seven_zip_solid_block_partial_salvage".to_string(),
+        path: output_path.to_string_lossy().to_string(),
+        format: "zip".to_string(),
+        status: "partial".to_string(),
+        offset: 0,
+        end_offset: data.len() as u64,
+        output_bytes,
+        confidence: (0.58 + recovered.len() as f64 * 0.04).min(0.88),
+        actions: vec![
+            "parse_7z_next_header_blocks".to_string(),
+            "decode_7z_blocks_independently".to_string(),
+            "repack_recoverable_entries_as_zip".to_string(),
+        ],
+        warnings: vec!["7z salvage output is a ZIP containing recovered files only".to_string()],
+    };
+    status_dict_with_candidates(
+        py,
+        "partial",
+        &selected.path,
+        "zip",
+        "7z block-level salvage recovered decodable entries into a ZIP candidate",
+        &selected.warnings,
+        0,
+        data.len() as u64,
+        output_bytes,
+        selected.confidence,
+        &[
+            "parse_7z_next_header_blocks",
+            "decode_7z_blocks_independently",
+            "repack_recoverable_entries_as_zip",
+        ],
+        &[selected.clone()],
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_candidates=8
+))]
+pub(crate) fn rar_file_quarantine_rebuild(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_candidates: usize,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => return status_dict(py, "skipped", "", "rar", &message, &[], 0, 0, 0, 0.0, &[]),
+    };
+    let candidates = rebuild_rar_file_quarantine_candidates(&data, workspace, max_candidates.max(1));
+    let Some(selected) = candidates.first() else {
+        return status_dict(py, "unrepairable", "", "rar", "no complete RAR file blocks were available for quarantine rebuild", &[], 0, data.len() as u64, 0, 0.0, &[]);
+    };
+    let action_refs = selected.actions.iter().map(String::as_str).collect::<Vec<_>>();
+    status_dict_with_candidates(
+        py,
+        &selected.status,
+        &selected.path,
+        "rar",
+        "RAR file-level quarantine produced a candidate with complete file blocks only",
+        &selected.warnings,
+        selected.offset,
+        selected.end_offset,
+        selected.output_bytes,
+        selected.confidence,
+        &action_refs,
+        &candidates,
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    source_input,
+    workspace,
+    max_input_size_mb=512.0,
+    max_candidates=8
+))]
+pub(crate) fn archive_nested_payload_salvage(
+    py: Python<'_>,
+    source_input: &Bound<'_, PyDict>,
+    workspace: &str,
+    max_input_size_mb: f64,
+    max_candidates: usize,
+) -> PyResult<Py<PyDict>> {
+    let data = match read_source_input(source_input, mb_to_bytes(max_input_size_mb)) {
+        Ok(data) => data,
+        Err(message) => return status_dict(py, "skipped", "", "archive", &message, &[], 0, 0, 0, 0.0, &[]),
+    };
+    let candidates = nested_archive_candidates(&data, workspace, max_candidates.max(1));
+    let Some(selected) = candidates.first() else {
+        return status_dict(py, "unrepairable", "", "archive", "no nested archive payload candidate was found", &[], 0, data.len() as u64, 0, 0.0, &[]);
+    };
+    let action_refs = selected.actions.iter().map(String::as_str).collect::<Vec<_>>();
+    status_dict_with_candidates(
+        py,
+        "partial",
+        &selected.path,
+        &selected.format,
+        "nested archive payload was salvaged from a damaged container",
+        &selected.warnings,
+        selected.offset,
+        selected.end_offset,
+        selected.output_bytes,
+        selected.confidence,
+        &action_refs,
+        &candidates,
     )
 }
 
@@ -1322,6 +1470,473 @@ fn rar5_block(block_type: u64, flags: u64, data: &[u8]) -> Vec<u8> {
     output.extend_from_slice(&header_data);
     output.extend_from_slice(data);
     output
+}
+
+#[derive(Clone)]
+struct StoredZipEntry {
+    name: Vec<u8>,
+    data: Vec<u8>,
+    crc32: u32,
+}
+
+fn recover_seven_zip_entries_by_block(
+    data: &[u8],
+    max_entries: usize,
+) -> Result<Vec<StoredZipEntry>, String> {
+    if !data.starts_with(SEVEN_Z_MAGIC) {
+        return Err("input does not start with a 7z signature".to_string());
+    }
+    let mut cursor = Cursor::new(data.to_vec());
+    let archive = Archive::read(&mut cursor, &Password::empty()).map_err(|err| err.to_string())?;
+    let password = Password::empty();
+    let mut output = Vec::new();
+    for block_index in 0..archive.blocks.len() {
+        if output.len() >= max_entries {
+            break;
+        }
+        let mut source = Cursor::new(data.to_vec());
+        let decoder = BlockDecoder::new(1, block_index, &archive, &password, &mut source);
+        let _ = decoder.for_each_entries(&mut |entry, reader| {
+            if output.len() >= max_entries {
+                return Ok(false);
+            }
+            if entry.is_directory || entry.is_anti_item {
+                return Ok(true);
+            }
+            let name = sanitize_archive_name(entry.name());
+            if name.is_empty() {
+                return Ok(true);
+            }
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            if entry.has_crc && crc32(&bytes) as u64 != entry.crc {
+                return Ok(true);
+            }
+            output.push(StoredZipEntry {
+                name: name.into_bytes(),
+                crc32: crc32(&bytes),
+                data: bytes,
+            });
+            Ok(true)
+        });
+    }
+    Ok(output)
+}
+
+fn rebuild_rar_file_quarantine_candidates(
+    data: &[u8],
+    workspace: &str,
+    max_candidates: usize,
+) -> Vec<WrittenArchiveCandidate> {
+    let mut candidates = Vec::new();
+    let offsets = find_all(data, RAR4_MAGIC)
+        .into_iter()
+        .map(|offset| (offset, RarVersion::Rar4))
+        .chain(find_all(data, RAR5_MAGIC).into_iter().map(|offset| (offset, RarVersion::Rar5)))
+        .collect::<Vec<_>>();
+    for (offset, version) in offsets {
+        if candidates.len() >= max_candidates {
+            break;
+        }
+        let rebuilt = match version {
+            RarVersion::Rar4 => rebuild_rar4_quarantine(data, offset),
+            RarVersion::Rar5 => rebuild_rar5_quarantine(data, offset),
+        };
+        let Some((bytes, kept, skipped, end_offset)) = rebuilt else {
+            continue;
+        };
+        if kept == 0 || skipped == 0 {
+            continue;
+        }
+        let output_path = Path::new(workspace).join(format!("rar_file_quarantine_{offset:08x}.rar"));
+        let output_bytes = match write_slice_candidate(&bytes, &output_path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        candidates.push(WrittenArchiveCandidate {
+            name: format!("rar_file_quarantine_{offset:08x}"),
+            path: output_path.to_string_lossy().to_string(),
+            format: "rar".to_string(),
+            status: "partial".to_string(),
+            offset: offset as u64,
+            end_offset: end_offset as u64,
+            output_bytes,
+            confidence: (0.64 + kept as f64 * 0.04).min(0.88),
+            actions: vec![
+                "walk_rar_file_blocks".to_string(),
+                "drop_incomplete_or_untrusted_file_blocks".to_string(),
+                "rebuild_rar_with_recoverable_file_blocks".to_string(),
+            ],
+            warnings: vec![format!("kept {kept} complete RAR file blocks and skipped {skipped}")],
+        });
+    }
+    candidates
+}
+
+fn rebuild_rar4_quarantine(data: &[u8], offset: usize) -> Option<(Vec<u8>, usize, usize, usize)> {
+    if !data.get(offset..)?.starts_with(RAR4_MAGIC) {
+        return None;
+    }
+    let mut pos = offset + RAR4_MAGIC.len();
+    let mut output = data[offset..pos].to_vec();
+    let mut kept = 0usize;
+    let mut skipped = 0usize;
+    let mut saw_main = false;
+    let mut end_offset = pos;
+    while pos + 7 <= data.len() {
+        let stored_crc = u16_le(data, pos) as u32;
+        let header_type = data[pos + 2];
+        let flags = u16_le(data, pos + 3);
+        let header_size = u16_le(data, pos + 5) as usize;
+        if !matches!(header_type, 0x73..=0x7b) || header_size < 7 || pos + header_size > data.len() {
+            break;
+        }
+        let header = &data[pos..pos + header_size];
+        if (crc32(&header[2..]) & 0xffff) != stored_crc {
+            skipped += 1;
+            break;
+        }
+        let add_size = if flags & 0x8000 != 0 {
+            if header_size < 11 {
+                skipped += 1;
+                break;
+            }
+            u32_le(header, 7) as usize
+        } else {
+            0
+        };
+        let block_end = pos.checked_add(header_size)?.checked_add(add_size)?;
+        if block_end > data.len() {
+            skipped += 1;
+            break;
+        }
+        if header_type == 0x73 && !saw_main {
+            output.extend_from_slice(&data[pos..block_end]);
+            saw_main = true;
+        } else if header_type == 0x74 {
+            output.extend_from_slice(&data[pos..block_end]);
+            kept += 1;
+        } else if header_type == 0x7b {
+            output.extend_from_slice(&data[pos..block_end]);
+            end_offset = block_end;
+            return Some((output, kept, skipped, end_offset));
+        } else {
+            skipped += 1;
+        }
+        end_offset = block_end;
+        pos = block_end;
+    }
+    if saw_main && kept > 0 {
+        output.extend_from_slice(&rar4_end_block());
+        Some((output, kept, skipped.max(1), end_offset))
+    } else {
+        None
+    }
+}
+
+fn rebuild_rar5_quarantine(data: &[u8], offset: usize) -> Option<(Vec<u8>, usize, usize, usize)> {
+    if !data.get(offset..)?.starts_with(RAR5_MAGIC) {
+        return None;
+    }
+    let mut pos = offset + RAR5_MAGIC.len();
+    let mut output = data[offset..pos].to_vec();
+    let mut kept = 0usize;
+    let mut skipped = 0usize;
+    let mut saw_main = false;
+    let mut end_offset = pos;
+    while pos < data.len() {
+        let block = parse_rar5_block(data, pos)?;
+        if block.end > data.len() || !block.crc_ok {
+            skipped += 1;
+            break;
+        }
+        if block.block_type == 1 && !saw_main {
+            output.extend_from_slice(&data[pos..block.end]);
+            saw_main = true;
+        } else if block.block_type == 2 {
+            output.extend_from_slice(&data[pos..block.end]);
+            kept += 1;
+        } else if block.block_type == 5 {
+            output.extend_from_slice(&data[pos..block.end]);
+            end_offset = block.end;
+            return Some((output, kept, skipped, end_offset));
+        } else {
+            skipped += 1;
+        }
+        end_offset = block.end;
+        pos = block.end;
+    }
+    if saw_main && kept > 0 {
+        output.extend_from_slice(&rar5_end_block());
+        Some((output, kept, skipped.max(1), end_offset))
+    } else {
+        None
+    }
+}
+
+fn nested_archive_candidates(
+    data: &[u8],
+    workspace: &str,
+    max_candidates: usize,
+) -> Vec<WrittenArchiveCandidate> {
+    let mut ranges = Vec::new();
+    collect_nested_archive_ranges(data, &mut ranges, max_candidates);
+    ranges.sort_by_key(|item| item.0);
+    let mut output = Vec::new();
+    for (offset, end, format, confidence) in ranges.into_iter().take(max_candidates) {
+        if offset == 0 && end == data.len() {
+            continue;
+        }
+        let ext = match format {
+            "zip" => ".zip",
+            "7z" => ".7z",
+            "rar" => ".rar",
+            "tar" => ".tar",
+            "gzip" => ".gz",
+            _ => ".bin",
+        };
+        let output_path = Path::new(workspace).join(format!("archive_nested_payload_{offset:08x}{ext}"));
+        let output_bytes = match write_slice_candidate(&data[offset..end], &output_path) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        output.push(WrittenArchiveCandidate {
+            name: format!("nested_payload_{offset:08x}"),
+            path: output_path.to_string_lossy().to_string(),
+            format: format.to_string(),
+            status: "partial".to_string(),
+            offset: offset as u64,
+            end_offset: end as u64,
+            output_bytes,
+            confidence,
+            actions: vec!["scan_nested_archive_signatures".to_string(), "extract_nested_archive_payload".to_string()],
+            warnings: vec!["candidate was carved from inside a damaged outer container".to_string()],
+        });
+    }
+    output
+}
+
+fn collect_nested_archive_ranges<'a>(
+    data: &'a [u8],
+    output: &mut Vec<(usize, usize, &'a str, f64)>,
+    max_candidates: usize,
+) {
+    for offset in find_all(data, b"PK\x03\x04") {
+        if output.len() >= max_candidates {
+            return;
+        }
+        if let Some(end) = nested_zip_end(data, offset) {
+            output.push((offset, end, "zip", 0.86));
+        }
+    }
+    for offset in find_all(data, SEVEN_Z_MAGIC) {
+        if output.len() >= max_candidates {
+            return;
+        }
+        if let Some(candidate) = seven_zip_candidate(data, offset) {
+            output.push((offset, candidate.archive_end, "7z", 0.84));
+        }
+    }
+    for offset in find_all(data, RAR4_MAGIC) {
+        if output.len() >= max_candidates {
+            return;
+        }
+        if let Some(walk) = walk_rar4_blocks(data, offset) {
+            output.push((offset, walk.last_complete_end, "rar", if walk.end_block_found { 0.86 } else { 0.72 }));
+        }
+    }
+    for offset in find_all(data, RAR5_MAGIC) {
+        if output.len() >= max_candidates {
+            return;
+        }
+        if let Some(walk) = walk_rar5_blocks(data, offset) {
+            output.push((offset, walk.last_complete_end, "rar", if walk.end_block_found { 0.86 } else { 0.72 }));
+        }
+    }
+    for offset in find_all(data, b"\x1f\x8b\x08") {
+        if output.len() >= max_candidates {
+            return;
+        }
+        if let Some(end) = nested_gzip_end(data, offset) {
+            output.push((offset, end, "gzip", 0.78));
+        }
+    }
+    for offset in (0..data.len().saturating_sub(512)).step_by(512) {
+        if output.len() >= max_candidates {
+            return;
+        }
+        if offset == 0 {
+            continue;
+        }
+        if plausible_tar_header(&data[offset..offset + 512]) {
+            if let Some(end) = nested_tar_end(data, offset) {
+                output.push((offset, end, "tar", 0.74));
+            }
+        }
+    }
+}
+
+fn nested_zip_end(data: &[u8], offset: usize) -> Option<usize> {
+    let mut pos = memchr::memmem::find(&data[offset..], b"PK\x05\x06").map(|value| offset + value)?;
+    loop {
+        if pos + 22 <= data.len() {
+            let comment_len = u16_le(data, pos + 20) as usize;
+            let end = pos + 22 + comment_len;
+            if end <= data.len() {
+                return Some(end);
+            }
+        }
+        let next = memchr::memmem::find(&data[pos + 4..], b"PK\x05\x06")?;
+        pos = pos + 4 + next;
+    }
+}
+
+fn nested_gzip_end(data: &[u8], offset: usize) -> Option<usize> {
+    for end in offset + 18..=data.len().min(offset + 128 * 1024 * 1024) {
+        let mut decoder = GzDecoder::new(Cursor::new(data[offset..end].to_vec()));
+        let mut sink = Vec::new();
+        if decoder.read_to_end(&mut sink).is_ok() {
+            return Some(end);
+        }
+    }
+    None
+}
+
+fn nested_tar_end(data: &[u8], offset: usize) -> Option<usize> {
+    let mut pos = offset;
+    while pos + 512 <= data.len() {
+        let header = &data[pos..pos + 512];
+        if header.iter().all(|byte| *byte == 0) {
+            let end = (pos + 1024).min(data.len());
+            return Some(end);
+        }
+        let size = parse_tar_number(&header[124..136])? as usize;
+        let padded = size.checked_add(511)? / 512 * 512;
+        pos = pos.checked_add(512)?.checked_add(padded)?;
+    }
+    None
+}
+
+fn write_stored_zip_entries(
+    entries: &[StoredZipEntry],
+    output: &Path,
+    max_output_bytes: Option<u64>,
+) -> Result<u64, String> {
+    ensure_parent(output).map_err(|err| err.to_string())?;
+    let temp = temp_path(output);
+    let result = (|| -> Result<u64, String> {
+        let mut file = File::create(&temp).map_err(|err| err.to_string())?;
+        let mut cd = Vec::new();
+        for entry in entries {
+            if entry.name.len() > u16::MAX as usize || entry.data.len() > u32::MAX as usize {
+                return Err("recovered entry exceeds ZIP32 limits".to_string());
+            }
+            let local_offset = file.stream_position().map_err(|err| err.to_string())?;
+            file.write_all(&0x0403_4B50u32.to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&20u16.to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&entry.crc32.to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&(entry.data.len() as u32).to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&(entry.data.len() as u32).to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&(entry.name.len() as u16).to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+            file.write_all(&entry.name).map_err(|err| err.to_string())?;
+            file.write_all(&entry.data).map_err(|err| err.to_string())?;
+            append_stored_zip_cd(&mut cd, entry, local_offset as u32);
+            if max_output_bytes.is_some_and(|limit| file.stream_position().unwrap_or(u64::MAX) > limit) {
+                return Err("candidate output exceeds repair.deep.max_output_size_mb".to_string());
+            }
+        }
+        let cd_offset = file.stream_position().map_err(|err| err.to_string())?;
+        file.write_all(&cd).map_err(|err| err.to_string())?;
+        file.write_all(&0x0605_4B50u32.to_le_bytes()).map_err(|err| err.to_string())?;
+        file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+        file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+        file.write_all(&(entries.len() as u16).to_le_bytes()).map_err(|err| err.to_string())?;
+        file.write_all(&(entries.len() as u16).to_le_bytes()).map_err(|err| err.to_string())?;
+        file.write_all(&(cd.len() as u32).to_le_bytes()).map_err(|err| err.to_string())?;
+        file.write_all(&(cd_offset as u32).to_le_bytes()).map_err(|err| err.to_string())?;
+        file.write_all(&0u16.to_le_bytes()).map_err(|err| err.to_string())?;
+        file.flush().map_err(|err| err.to_string())?;
+        let size = file.stream_position().map_err(|err| err.to_string())?;
+        if max_output_bytes.is_some_and(|limit| size > limit) {
+            return Err("candidate output exceeds repair.deep.max_output_size_mb".to_string());
+        }
+        Ok(size)
+    })();
+    match result {
+        Ok(size) => {
+            if output.exists() {
+                fs::remove_file(output).map_err(|err| err.to_string())?;
+            }
+            fs::rename(&temp, output).map_err(|err| err.to_string())?;
+            Ok(size)
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
+fn append_stored_zip_cd(output: &mut Vec<u8>, entry: &StoredZipEntry, local_offset: u32) {
+    output.extend_from_slice(&0x0201_4B50u32.to_le_bytes());
+    output.extend_from_slice(&20u16.to_le_bytes());
+    output.extend_from_slice(&20u16.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&entry.crc32.to_le_bytes());
+    output.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
+    output.extend_from_slice(&(entry.data.len() as u32).to_le_bytes());
+    output.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output.extend_from_slice(&0u32.to_le_bytes());
+    output.extend_from_slice(&local_offset.to_le_bytes());
+    output.extend_from_slice(&entry.name);
+}
+
+fn sanitize_archive_name(name: &str) -> String {
+    let normalized = name.replace('\\', "/");
+    let parts = normalized
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != "." && *part != "..")
+        .collect::<Vec<_>>();
+    parts.join("/")
+}
+
+fn plausible_tar_header(header: &[u8]) -> bool {
+    if header.len() != 512 {
+        return false;
+    }
+    let name_end = header[0..100].iter().position(|byte| *byte == 0).unwrap_or(100);
+    if name_end == 0 || !header[..name_end].iter().all(|byte| (0x20..=0x7e).contains(byte)) {
+        return false;
+    }
+    parse_tar_number(&header[124..136]).is_some()
+}
+
+fn parse_tar_number(field: &[u8]) -> Option<u64> {
+    let mut value = 0u64;
+    let mut seen = false;
+    for byte in field {
+        match *byte {
+            b'0'..=b'7' => {
+                seen = true;
+                value = value.checked_mul(8)?.checked_add((byte - b'0') as u64)?;
+            }
+            b'\0' | b' ' => {}
+            _ => return None,
+        }
+    }
+    Some(if seen { value } else { 0 })
 }
 
 fn write_vint(mut value: u64) -> Vec<u8> {
