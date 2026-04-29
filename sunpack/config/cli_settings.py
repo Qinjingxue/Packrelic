@@ -1,10 +1,10 @@
 from typing import Any
 
-from sunpack.config.paths import get_config_path
-from sunpack.support.json_format import load_json_file
+from sunpack.config.fields.cli import DEFAULT_CLI_LANGUAGE
+from sunpack.config.loader import load_effective_config_payload
 
 
-DEFAULT_CLI_LANG = "en"
+DEFAULT_CLI_LANG = DEFAULT_CLI_LANGUAGE
 
 
 def normalize_cli_language(value: Any) -> str:
@@ -13,11 +13,8 @@ def normalize_cli_language(value: Any) -> str:
 
 
 def load_cli_language_from_config() -> str:
-    config_path = get_config_path()
-    if not config_path.exists():
-        return DEFAULT_CLI_LANG
     try:
-        payload = load_json_file(config_path)
+        _config_path, payload = load_effective_config_payload()
     except Exception:
         return DEFAULT_CLI_LANG
     cli_settings = payload.get("cli") if isinstance(payload, dict) else None

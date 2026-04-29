@@ -25,4 +25,10 @@ CONFIG_FIELDS = (
         normalize=normalize_archive_cleanup_mode,
         owner=__name__,
     ),
+    ConfigField(
+        path=("post_extract", "flatten_single_directory"),
+        default=True,
+        normalize=bool,
+        owner=__name__,
+    ),
 )

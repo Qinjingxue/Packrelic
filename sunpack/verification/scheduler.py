@@ -1,5 +1,6 @@
 from typing import Any
 
+from sunpack.config.fields.verification import DEFAULT_VERIFICATION_CONFIG
 from sunpack.contracts.tasks import ArchiveTask
 from sunpack.extraction.result import ExtractionResult
 from sunpack.passwords import PasswordSession
@@ -13,26 +14,6 @@ from sunpack.verification.result import (
     SOURCE_INTEGRITY_UNKNOWN,
     VerificationResult,
 )
-
-
-DEFAULT_VERIFICATION_CONFIG = {
-    "enabled": False,
-    "max_retries": 0,
-    "cleanup_failed_output": True,
-    "accept_partial_when_source_damaged": True,
-    "partial_min_completeness": 0.2,
-    "complete_accept_threshold": 0.999,
-    "partial_accept_threshold": 0.2,
-    "retry_on_verification_failure": True,
-    "methods": [
-        {"name": "extraction_exit_signal", "enabled": True},
-        {"name": "output_presence", "enabled": True},
-        {"name": "expected_name_presence", "enabled": True},
-        {"name": "manifest_size_match", "enabled": True},
-        {"name": "archive_test_crc", "enabled": True},
-        {"name": "sample_readability", "enabled": True},
-    ],
-}
 
 
 class VerificationScheduler:

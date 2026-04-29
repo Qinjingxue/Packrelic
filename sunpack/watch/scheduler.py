@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from sunpack.config.fields.watch import DEFAULT_WATCH_CONFIG
 from sunpack.watch.scanner import WatchCandidate, looks_like_archive, scan_watch_candidates
 from sunpack.watch.state import WatchStateStore
 from sunpack_native import watch_candidate_for_path as _native_watch_candidate_for_path
@@ -32,19 +33,30 @@ class WatchScheduler:
         *,
         out_dir: str,
         state_path: str,
-        interval_seconds: float = 1.0,
-        stable_seconds: float = 10.0,
-        recursive: bool = True,
-        initial_scan: bool = True,
+        interval_seconds: float | None = None,
+        stable_seconds: float | None = None,
+        recursive: bool | None = None,
+        initial_scan: bool | None = None,
+        archive_suffixes: list[str] | None = None,
+        observer_stop_timeout_seconds: float | None = None,
         runner_factory=None,
     ):
         self.config = config
         self.watch_roots = [os.path.abspath(path) for path in watch_roots]
         self.out_dir = os.path.abspath(out_dir)
-        self.interval_seconds = max(0.1, float(interval_seconds))
-        self.stable_seconds = max(0.0, float(stable_seconds))
-        self.recursive = recursive
-        self.initial_scan = initial_scan
+        self.interval_seconds = max(0.1, float(DEFAULT_WATCH_CONFIG["interval_seconds"] if interval_seconds is None else interval_seconds))
+        self.stable_seconds = max(0.0, float(DEFAULT_WATCH_CONFIG["stable_seconds"] if stable_seconds is None else stable_seconds))
+        self.recursive = bool(DEFAULT_WATCH_CONFIG["recursive"] if recursive is None else recursive)
+        self.initial_scan = bool(DEFAULT_WATCH_CONFIG["initial_scan"] if initial_scan is None else initial_scan)
+        self.archive_suffixes = list(archive_suffixes) if archive_suffixes is not None else None
+        self.observer_stop_timeout_seconds = max(
+            0.0,
+            float(
+                DEFAULT_WATCH_CONFIG["observer_stop_timeout_seconds"]
+                if observer_stop_timeout_seconds is None
+                else observer_stop_timeout_seconds
+            ),
+        )
         self.state = WatchStateStore(state_path)
         self._lock = threading.Lock()
         self._pending: dict[str, WatchCandidate] = {}
@@ -63,14 +75,14 @@ class WatchScheduler:
         self._observer.start()
         self._started = True
         if self.initial_scan:
-            for candidate in scan_watch_candidates(self.watch_roots, recursive=self.recursive):
+            for candidate in scan_watch_candidates(self.watch_roots, recursive=self.recursive, archive_suffixes=self.archive_suffixes):
                 self.enqueue(candidate.path)
 
     def stop(self):
         if not self._started:
             return
         self._observer.stop()
-        self._observer.join(timeout=5.0)
+        self._observer.join(timeout=self.observer_stop_timeout_seconds)
         self._started = False
 
     def run_forever(self):
@@ -101,7 +113,7 @@ class WatchScheduler:
             return len(self._pending)
 
     def enqueue(self, path: str):
-        candidate = _candidate_for_event_path(path)
+        candidate = _candidate_for_event_path(path, archive_suffixes=self.archive_suffixes)
         if candidate is None:
             return
         if not self._is_under_watched_root(candidate.path):
@@ -198,8 +210,8 @@ class _ArchiveEventHandler(FileSystemEventHandler):
             self.scheduler.enqueue(src_path)
 
 
-def _candidate_for_event_path(path: str) -> WatchCandidate | None:
-    if not path or not looks_like_archive(path):
+def _candidate_for_event_path(path: str, *, archive_suffixes: list[str] | None = None) -> WatchCandidate | None:
+    if not path or not looks_like_archive(path, archive_suffixes=archive_suffixes):
         return None
     item = _native_watch_candidate_for_path(str(path))
     if item is None:

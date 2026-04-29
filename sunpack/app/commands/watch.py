@@ -69,26 +69,34 @@ def register(subparsers, ctx):
     )
     localize_help_action(parser, ctx)
     parser.add_argument("paths", nargs="+", help=ctx.t(TEXTS, "paths"))
-    parser.add_argument("--interval", type=float, default=5.0, help=ctx.t(TEXTS, "interval"))
-    parser.add_argument("--stable", type=float, default=10.0, help=ctx.t(TEXTS, "stable"))
+    parser.add_argument("--interval", type=float, default=None, help=ctx.t(TEXTS, "interval"))
+    parser.add_argument("--stable", type=float, default=None, help=ctx.t(TEXTS, "stable"))
     parser.add_argument("--state", dest="state_path", help=ctx.t(TEXTS, "state"))
     parser.add_argument("--once", action="store_true", help=ctx.t(TEXTS, "once"))
-    parser.add_argument("--no-recursive", dest="recursive", action="store_false", default=True, help=ctx.t(TEXTS, "no_recursive"))
-    parser.add_argument("--no-initial-scan", dest="initial_scan", action="store_false", default=True, help=ctx.t(TEXTS, "no_initial_scan"))
-    parser.add_argument("--max-folders", type=int, default=16, help=ctx.t(TEXTS, "max_folders"))
+    parser.add_argument("--no-recursive", dest="recursive", action="store_false", default=None, help=ctx.t(TEXTS, "no_recursive"))
+    parser.add_argument("--no-initial-scan", dest="initial_scan", action="store_false", default=None, help=ctx.t(TEXTS, "no_initial_scan"))
+    parser.add_argument("--max-folders", type=int, default=None, help=ctx.t(TEXTS, "max_folders"))
 
 
 def handle(args, ctx):
     reporter = ctx.reporter
+    config = load_config()
+    watch_config = config.get("watch") if isinstance(config.get("watch"), dict) else {}
+    interval_seconds = args.interval if args.interval is not None else float(watch_config.get("interval_seconds", 5.0))
+    stable_seconds = args.stable if args.stable is not None else float(watch_config.get("stable_seconds", 10.0))
+    recursive = args.recursive if args.recursive is not None else bool(watch_config.get("recursive", True))
+    initial_scan = args.initial_scan if args.initial_scan is not None else bool(watch_config.get("initial_scan", True))
+    max_folders = args.max_folders if args.max_folders is not None else int(watch_config.get("max_folders", 16))
+
     target_paths, missing_paths = resolve_target_paths(args.paths)
     if missing_paths:
         return result_for_missing(COMMAND, args, missing_paths)
-    if len(target_paths) > max(1, int(args.max_folders)):
+    if len(target_paths) > max(1, int(max_folders)):
         return EXIT_USAGE, CliCommandResult(
             command=COMMAND,
             inputs={"paths": list(args.paths)},
             summary={},
-            errors=[ctx.t(TEXTS, "too_many_folders").format(max_count=args.max_folders)],
+            errors=[ctx.t(TEXTS, "too_many_folders").format(max_count=max_folders)],
         )
 
     try:
@@ -100,7 +108,6 @@ def handle(args, ctx):
     except Exception as exc:
         return EXIT_USAGE, CliCommandResult(command=COMMAND, inputs={"paths": list(args.paths)}, summary={}, errors=[str(exc)])
 
-    config = load_config()
     config_overrides = apply_runtime_config_overrides(config, args)
     password_summary = build_password_summary(passwords, use_builtin_passwords=not args.no_builtin_passwords)
     config["user_passwords"] = password_summary.user_passwords
@@ -115,10 +122,12 @@ def handle(args, ctx):
             target_paths,
             out_dir=out_dir,
             state_path=state_path,
-            interval_seconds=args.interval,
-            stable_seconds=args.stable,
-            recursive=args.recursive,
-            initial_scan=args.initial_scan,
+            interval_seconds=interval_seconds,
+            stable_seconds=stable_seconds,
+            recursive=recursive,
+            initial_scan=initial_scan,
+            archive_suffixes=watch_config.get("archive_suffixes") if isinstance(watch_config.get("archive_suffixes"), list) else None,
+            observer_stop_timeout_seconds=float(watch_config.get("observer_stop_timeout_seconds", 5.0)),
             runner_factory=PipelineRunner,
         )
     except Exception as exc:
@@ -164,12 +173,12 @@ def handle(args, ctx):
             "paths": target_paths,
             "out_dir": out_dir,
             "state_path": state_path,
-            "interval": args.interval,
-            "stable": args.stable,
-            "recursive": args.recursive,
+            "interval": interval_seconds,
+            "stable": stable_seconds,
+            "recursive": recursive,
             "once": args.once,
-            "initial_scan": args.initial_scan,
-            "max_folders": args.max_folders,
+            "initial_scan": initial_scan,
+            "max_folders": max_folders,
             "config_overrides": config_overrides,
         },
         summary={

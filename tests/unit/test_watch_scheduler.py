@@ -10,6 +10,7 @@ from sunpack.watch.scheduler import WatchScheduler
 class FakeObserver:
     started_count = 0
     stopped_count = 0
+    join_timeouts = []
 
     def __init__(self):
         self.scheduled = []
@@ -28,6 +29,7 @@ class FakeObserver:
         type(self).stopped_count += 1
 
     def join(self, timeout=None):
+        type(self).join_timeouts.append(timeout)
         return None
 
 
@@ -44,6 +46,7 @@ def _write_zip(path: Path):
 def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monkeypatch):
     FakeObserver.started_count = 0
     FakeObserver.stopped_count = 0
+    FakeObserver.join_timeouts = []
     monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
 
     watch_root = tmp_path / "in"
@@ -67,6 +70,40 @@ def test_watch_scheduler_uses_watchdog_observer_and_initial_scan(tmp_path, monke
 
     watcher.stop()
     assert FakeObserver.stopped_count == 1
+
+
+def test_watch_scheduler_uses_configured_suffixes_and_stop_timeout(tmp_path, monkeypatch):
+    FakeObserver.started_count = 0
+    FakeObserver.stopped_count = 0
+    FakeObserver.join_timeouts = []
+    monkeypatch.setattr(scheduler_module, "Observer", FakeObserver)
+
+    watch_root = tmp_path / "in"
+    watch_root.mkdir()
+    (watch_root / "sample.rar").write_bytes(b"Rar!\x1a\x07\x00payload")
+    _write_zip(watch_root / "sample.zip")
+
+    watcher = WatchScheduler(
+        {},
+        [str(watch_root)],
+        out_dir=str(tmp_path / "out"),
+        state_path=str(tmp_path / "state.json"),
+        stable_seconds=0,
+        initial_scan=False,
+        archive_suffixes=[".rar"],
+        observer_stop_timeout_seconds=1.25,
+    )
+
+    watcher.start()
+    watcher.enqueue(str(watch_root / "sample.rar"))
+    watcher.enqueue(str(watch_root / "sample.zip"))
+
+    pending_paths = set(watcher._pending)
+    assert any(path.endswith("sample.rar") for path in pending_paths)
+    assert not any(path.endswith("sample.zip") for path in pending_paths)
+
+    watcher.stop()
+    assert FakeObserver.join_timeouts == [1.25]
 
 
 def test_watch_scheduler_processes_stable_candidate_with_watch_root_common_root(tmp_path, monkeypatch):

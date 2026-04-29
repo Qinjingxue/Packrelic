@@ -20,12 +20,15 @@ class ConfigField:
 
 
 CONFIG_FIELD_PROVIDER_MODULES = (
+    "sunpack.config.fields.cli",
     "sunpack.config.fields.coordinator",
     "sunpack.config.fields.detection",
+    "sunpack.config.fields.extraction",
     "sunpack.config.fields.filesystem",
     "sunpack.config.fields.postprocess",
     "sunpack.config.fields.repair",
     "sunpack.config.fields.verification",
+    "sunpack.config.fields.watch",
 )
 
 _FIELDS: dict[tuple[str, ...], ConfigField] | None = None

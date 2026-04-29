@@ -166,6 +166,26 @@ CLI 可用 `--recur` 临时覆盖。
 | `max_largest_item_size` | 单个最大条目上限，字节，`0` 表示不限。 |
 | `max_compression_ratio` | 压缩比上限，`0` 表示不限。 |
 
+## watch
+
+`watch` 配置控制 `sunpack watch` 的默认行为；CLI 参数仍可临时覆盖对应值。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `interval_seconds` | `float` | watcher 轮询稳定文件的间隔。 |
+| `stable_seconds` | `float` | 文件大小和修改时间保持不变多久后才开始处理。 |
+| `recursive` | `bool` | 是否递归监控目录。 |
+| `initial_scan` | `bool` | 启动 watcher 时是否扫描已有文件。 |
+| `max_folders` | `int` | 单次 watch 接受的最大路径数量。 |
+| `observer_stop_timeout_seconds` | `float` | 停止 watchdog observer 时等待线程退出的超时。 |
+| `archive_suffixes` | `list[str]` | watch 认为可能是归档的后缀列表。 |
+
+## extraction
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `write_progress_manifest` | `bool` | 是否把内部 progress manifest 写成输出目录中的 `.sunpack/extraction_manifest.json`；默认只保留在内存里供 verification/repair 使用。 |
+
 ## analysis
 
 `analysis` 是 detection 和 extraction 之间的结构分析层，也会在 repair beam 候选评估中复用。它输出格式证据、边界、损坏标志、分卷视图和可供 worker 使用的虚拟输入。
