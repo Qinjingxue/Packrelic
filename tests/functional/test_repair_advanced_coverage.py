@@ -352,6 +352,101 @@ def test_nested_salvage_output_recurses_into_inner_archive_repair_pipeline(tmp_p
     assert (inner_archive.with_suffix("") / "final.txt").read_bytes() == b"done"
 
 
+def test_pipeline_runner_run_entry_repairs_real_rar_carrier_crop_when_available(tmp_path):
+    _require_worker_or_skip()
+    rar = get_optional_rar()
+    if rar is None:
+        pytest.skip("rar.exe is not configured for real RAR repair coverage")
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    inner = _build_rar_archive(tmp_path / "rar-fixture", rar, {"final.txt": b"rar"})
+    source = input_dir / "carrier.rar"
+    source.write_bytes(b"SFX-PREFIX" + inner.read_bytes() + b"TAIL")
+
+    config = _pipeline_runner_repair_config(
+        tmp_path,
+        modules=[{"name": "rar_carrier_crop_deep_recovery", "enabled": True}],
+        extensions=[".rar"],
+    )
+    runner = PipelineRunner(config)
+    extractor = _FailOriginalPathsThenRealExtractor({source})
+    runner.extractor = extractor
+    runner.batch_runner.extractor = extractor
+
+    summary = runner.run(str(input_dir))
+
+    assert summary.success_count == 1
+    assert not summary.failed_tasks
+    assert (input_dir / "carrier" / "final.txt").read_bytes() == b"rar"
+
+
+@pytest.mark.parametrize(
+    ("inner_name", "inner_payload", "inner_format", "flags", "modules", "expected_module"),
+    [
+        (
+            "inner.tar",
+            lambda tmp_path: _tar_bytes({"final.txt": b"tar"}, corrupt_first_checksum=True),
+            "tar",
+            ["tar_checksum_bad"],
+            [{"name": "tar_header_checksum_fix", "enabled": True}],
+            "tar_header_checksum_fix",
+        ),
+        (
+            "inner.7z",
+            lambda tmp_path: _build_7z_archive(tmp_path / "seven-fixture", {"final.txt": b"7z"}).read_bytes()
+            + b"TRAILING-JUNK",
+            "7z",
+            ["trailing_junk", "boundary_unreliable"],
+            [{"name": "seven_zip_boundary_trim", "enabled": True}],
+            "seven_zip_boundary_trim",
+        ),
+    ],
+)
+def test_nested_salvage_recurses_into_inner_tar_and_7z_repair_pipeline(
+    tmp_path,
+    inner_name,
+    inner_payload,
+    inner_format,
+    flags,
+    modules,
+    expected_module,
+):
+    _require_worker_or_skip()
+
+    inner_archive = _run_nested_multiformat_repair_pipeline(
+        tmp_path,
+        inner_name=inner_name,
+        inner_payload=inner_payload(tmp_path),
+        inner_format=inner_format,
+        flags=flags,
+        inner_modules=modules,
+        expected_module=expected_module,
+    )
+
+    assert (inner_archive.with_suffix("") / "final.txt").is_file()
+
+
+def test_nested_salvage_recurses_into_inner_rar_crop_repair_when_available(tmp_path):
+    _require_worker_or_skip()
+    rar = get_optional_rar()
+    if rar is None:
+        pytest.skip("rar.exe is not configured for real nested RAR coverage")
+
+    inner = _build_rar_archive(tmp_path / "nested-rar-fixture", rar, {"final.txt": b"rar"}).read_bytes()
+    inner_archive = _run_nested_multiformat_repair_pipeline(
+        tmp_path,
+        inner_name="inner.rar",
+        inner_payload=b"SFX-PREFIX" + inner + b"TAIL",
+        inner_format="rar",
+        flags=["carrier_archive", "sfx", "boundary_unreliable"],
+        inner_modules=[{"name": "rar_carrier_crop_deep_recovery", "enabled": True}],
+        expected_module="rar_carrier_crop_deep_recovery",
+    )
+
+    assert (inner_archive.with_suffix("") / "final.txt").read_bytes() == b"rar"
+
+
 def test_zip_conflict_resolver_rejects_traversal_and_keeps_safe_duplicate(tmp_path):
     source = tmp_path / "adversarial.zip"
     source.write_bytes(b"".join([
@@ -416,6 +511,23 @@ def test_zip_conflict_resolver_rejects_windows_unicode_and_reserved_conflicts(tm
         assert _windows_reserved_base(name) not in {"CON", "PRN", "AUX", "NUL"}
 
 
+def test_zip_conflict_resolver_ignores_malicious_central_directory_metadata(tmp_path):
+    source = tmp_path / "cd-local-conflict.zip"
+    source.write_bytes(_zip_with_cd_local_metadata_conflicts())
+    result = _run_single_module_repair(
+        tmp_path,
+        "zip_conflict_resolver_rebuild",
+        "zip",
+        source,
+        ["duplicate_entries", "overlapping_entries", "local_header_conflict", "damaged"],
+    )
+
+    assert result.status == "partial"
+    with zipfile.ZipFile(result.repaired_input["path"]) as archive:
+        assert archive.namelist() == ["safe.txt"]
+        assert archive.read("safe.txt") == b"good-from-local"
+
+
 def test_deep_module_input_size_limit_blocks_large_nested_salvage(tmp_path):
     inner = _zip_bytes({"inner.txt": b"payload"})
     source = tmp_path / "oversize-carrier.bin"
@@ -467,6 +579,98 @@ def test_deep_candidate_cap_limits_nested_payload_salvage_outputs(tmp_path):
 
     assert len(batch.candidates) == 1
     assert batch.candidates[0].module_name == "archive_nested_payload_salvage"
+
+
+def test_deep_output_size_limit_rejects_candidate_and_removes_temp_files(tmp_path):
+    from smart_unpacker_native import zip_deep_partial_recovery
+
+    source = tmp_path / "oversized-output.zip"
+    source.write_bytes(_raw_stored_local_entry("large.bin", b"x" * 2048))
+    workspace = tmp_path / "repair"
+
+    result = dict(zip_deep_partial_recovery(
+        {"kind": "file", "path": str(source), "format_hint": "zip"},
+        str(workspace),
+        4,
+        20000,
+        512.0,
+        0.00001,
+        512.0,
+        30.0,
+        False,
+    ))
+
+    assert result["status"] == "unrepairable"
+    assert any("max_output_size_mb" in warning for warning in result["warnings"])
+    assert not list(workspace.rglob("*.tmp"))
+    assert not list(workspace.rglob("zip_deep_*.zip"))
+
+
+def test_deep_time_budget_returns_without_candidates(tmp_path):
+    from smart_unpacker_native import zip_deep_partial_recovery
+
+    source = tmp_path / "many-local-headers.zip"
+    source.write_bytes(b"".join(
+        _raw_stored_local_entry(f"file-{index}.txt", b"x")
+        for index in range(256)
+    ))
+
+    result = dict(zip_deep_partial_recovery(
+        {"kind": "file", "path": str(source), "format_hint": "zip"},
+        str(tmp_path / "repair"),
+        4,
+        20000,
+        512.0,
+        2048.0,
+        512.0,
+        0.000000000001,
+        False,
+    ))
+
+    assert result["status"] == "unrepairable"
+    assert result["recovered_entries"] == 0
+    assert any("time budget" in warning for warning in result["warnings"])
+
+
+def test_coordinator_zero_max_repair_rounds_skips_repair_loop(tmp_path):
+    _require_worker_or_skip()
+    source = tmp_path / "prefixed.zip"
+    source.write_bytes(b"SFX-PREFIX" + _zip_bytes({"ok.txt": b"ok"}) + b"TAIL")
+    extractor = _AlwaysFailExtractor(error="zip structure is damaged")
+    task = _task(source, detected_ext="zip")
+    task.fact_bag.set("analysis.selected_format", "zip")
+    task.fact_bag.set("analysis.confidence", 0.82)
+    config = {
+        "repair": {
+            "enabled": True,
+            "workspace": str(tmp_path / "repair"),
+            "max_repair_rounds_per_task": 0,
+            "stages": {"deep": True},
+            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "modules": [{"name": "zip_deep_partial_recovery", "enabled": True}],
+            "beam": {"enabled": True, "max_rounds": 2},
+        },
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "extraction_exit_signal"},
+                {"name": "output_presence"},
+                {"name": "archive_test_crc"},
+            ],
+        },
+    }
+    runner = ExtractionBatchRunner(RunContext(), extractor, NestedOutputScanPolicy({}), config=config)
+
+    try:
+        outcome = runner._extract_verify_with_retries(task, str(tmp_path / "out"), runtime_scheduler=None)
+    finally:
+        extractor.close()
+
+    assert outcome.success is False
+    assert extractor.calls == 1
+    assert task.fact_bag.get("repair.module") is None
+    assert task.fact_bag.get("repair.attempts") is None
+    assert not (tmp_path / "repair").exists()
 
 
 class _FailOnceThenRealExtractor:
@@ -521,9 +725,10 @@ class _FailOnceThenRealExtractor:
 class _FailOriginalPathsThenRealExtractor:
     password_session = None
 
-    def __init__(self, fail_paths: set[Path]):
+    def __init__(self, fail_paths: set[Path], *, error: str = "synthetic structure failure before repair"):
         self.fail_paths = {str(path.resolve()) for path in fail_paths}
         self.failed_once: set[str] = set()
+        self.error = error
         self.real = ExtractionScheduler(max_retries=1, process_config={"persistent_workers": False})
         self.password_session = self.real.password_session
 
@@ -546,7 +751,7 @@ class _FailOriginalPathsThenRealExtractor:
                 archive=str(archive_path),
                 out_dir=out_dir,
                 all_parts=[str(archive_path)],
-                error="synthetic structure failure before repair",
+                error=self.error,
                 diagnostics={
                     "failure_stage": "archive_open",
                     "failure_kind": "structure_recognition",
@@ -559,6 +764,54 @@ class _FailOriginalPathsThenRealExtractor:
                 },
             )
         return self.real.extract(task, out_dir, runtime_scheduler=runtime_scheduler)
+
+
+class _AlwaysFailExtractor:
+    password_session = None
+
+    def __init__(
+        self,
+        *,
+        error: str = "synthetic structure failure before repair",
+        failure_kind: str = "structure_recognition",
+        failure_stage: str = "archive_open",
+    ):
+        self.calls = 0
+        self.error = error
+        self.failure_kind = failure_kind
+        self.failure_stage = failure_stage
+        self.real = ExtractionScheduler(max_retries=1, process_config={"persistent_workers": False})
+        self.password_session = self.real.password_session
+
+    def close(self) -> None:
+        self.real.close()
+
+    def default_output_dir_for_task(self, task):
+        return str(Path(task.main_path).with_suffix(""))
+
+    def inspect(self, task, out_dir):
+        return type("Preflight", (), {"skip_result": None})()
+
+    def extract(self, task, out_dir, runtime_scheduler=None):
+        self.calls += 1
+        archive_path = Path(task.archive_input().entry_path or task.main_path)
+        return ExtractionResult(
+            success=False,
+            archive=str(archive_path),
+            out_dir=out_dir,
+            all_parts=[str(archive_path)],
+            error=self.error,
+            diagnostics={
+                "failure_stage": self.failure_stage,
+                "failure_kind": self.failure_kind,
+                "result": {
+                    "status": "failed",
+                    "native_status": "damaged",
+                    "failure_stage": self.failure_stage,
+                    "failure_kind": self.failure_kind,
+                },
+            },
+        )
 
 
 class _StaticCandidateScheduler:
@@ -776,6 +1029,138 @@ def _run_single_module_repair(tmp_path: Path, module_name: str, fmt: str, source
     ))
 
 
+def _run_nested_multiformat_repair_pipeline(
+    tmp_path: Path,
+    *,
+    inner_name: str,
+    inner_payload: bytes,
+    inner_format: str,
+    flags: list[str],
+    inner_modules: list[dict],
+    expected_module: str,
+) -> Path:
+    outer = _zip_bytes({inner_name: inner_payload}, compression=zipfile.ZIP_DEFLATED)
+    source = tmp_path / f"outer-{inner_format}.zip"
+    source.write_bytes(b"BROKEN-OUTER" + outer + b"OUTER-TAIL")
+    outer_task = _task(source, detected_ext=".zip")
+    outer_task.fact_bag.set("analysis.selected_format", "archive")
+    outer_task.fact_bag.set("analysis.confidence", 0.82)
+    _set_analysis_evidence(outer_task, "archive", ["outer_container_bad", "nested_archive"])
+
+    config = _nested_salvage_pipeline_config(tmp_path)
+    config["repair"]["modules"] = [{"name": "archive_nested_payload_salvage", "enabled": True}]
+    runner = PipelineRunner(config)
+    runner.batch_runner.analysis_stage = _PassthroughAnalysisStage()
+    outer_extractor = _FailOriginalPathsThenRealExtractor({source})
+    inner_extractor = None
+    runner.batch_runner.extractor = outer_extractor
+    try:
+        first_roots = runner.batch_runner.execute([outer_task])
+        assert first_roots
+        inner_archive = next(Path(first_roots[0]).rglob(inner_name))
+
+        error = "tar header checksum is damaged" if inner_format == "tar" else "synthetic structure failure before repair"
+        inner_config = _coordinator_repair_attempt_config(tmp_path, modules=inner_modules)
+        scanned_tasks = runner._scan_targets(first_roots)
+        assert any(Path(task.main_path).resolve() == inner_archive.resolve() for task in scanned_tasks)
+        inner_extractor = _FailOnceThenRealExtractor(error=error, failure_kind="structure_recognition")
+        inner_runner = ExtractionBatchRunner(
+            RunContext(),
+            inner_extractor,
+            NestedOutputScanPolicy({}),
+            config=inner_config,
+        )
+        inner_task = _task(inner_archive, detected_ext=inner_format)
+        _prepare_repair_task(inner_task, inner_format, flags)
+        inner_out = inner_archive.with_suffix("")
+        outcome = inner_runner._extract_verify_with_retries(
+            inner_task,
+            str(inner_out),
+            runtime_scheduler=None,
+        )
+    finally:
+        outer_extractor.close()
+        if inner_extractor is not None:
+            inner_extractor.close()
+        runner.extractor.close()
+
+    assert runner.context.success_count == 1
+    assert outcome.success is True
+    assert not runner.context.failed_tasks
+    assert outer_task.fact_bag.get("repair.module") == "archive_nested_payload_salvage"
+    assert outcome.repair_module == expected_module
+    return inner_archive
+
+
+def _prepare_repair_task(task: ArchiveTask, fmt: str, flags: list[str]) -> None:
+    task.detected_ext = fmt
+    task.fact_bag.set("file.detected_ext", f".{fmt.lstrip('.')}")
+    task.fact_bag.set("analysis.selected_format", fmt)
+    task.fact_bag.set("analysis.confidence", 0.82)
+    _set_analysis_evidence(task, fmt, flags)
+
+
+def _coordinator_repair_attempt_config(tmp_path: Path, *, modules: list[dict]) -> dict:
+    return {
+        "repair": {
+            "enabled": True,
+            "workspace": str(tmp_path / "repair-inner"),
+            "max_repair_rounds_per_task": 1,
+            "stages": {"deep": True},
+            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "modules": modules,
+            "beam": {"enabled": True, "max_rounds": 1},
+        },
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "extraction_exit_signal"},
+                {"name": "output_presence"},
+                {"name": "archive_test_crc"},
+            ],
+        },
+    }
+
+
+def _pipeline_runner_repair_config(tmp_path: Path, *, modules: list[dict], extensions: list[str]) -> dict:
+    return normalize_config(with_detection_pipeline({
+        "recursive_extract": "2",
+        "thresholds": {"archive_score_threshold": 5, "maybe_archive_threshold": 3},
+        "post_extract": {
+            "archive_cleanup_mode": "k",
+            "flatten_single_directory": False,
+        },
+        "repair": {
+            "enabled": True,
+            "workspace": str(tmp_path / "repair"),
+            "max_attempts_per_task": 2,
+            "max_repair_rounds_per_task": 2,
+            "stages": {"deep": True},
+            "deep": {"verify_candidates": False, "max_candidates_per_module": 4},
+            "modules": modules,
+            "beam": {"enabled": True, "max_rounds": 2},
+        },
+        "verification": {
+            "enabled": True,
+            "methods": [
+                {"name": "extraction_exit_signal"},
+                {"name": "output_presence"},
+                {"name": "archive_test_crc"},
+            ],
+            "partial_min_completeness": 0.2,
+            "partial_accept_threshold": 0.2,
+        },
+    }, precheck=[
+        {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
+    ], scoring=[
+        {
+            "name": "extension",
+            "enabled": True,
+            "extension_score_groups": [{"score": 5, "extensions": list(extensions)}],
+        },
+    ]))
+
+
 def _nested_salvage_pipeline_config(tmp_path: Path) -> dict:
     return normalize_config(with_detection_pipeline({
         "recursive_extract": "3",
@@ -810,7 +1195,11 @@ def _nested_salvage_pipeline_config(tmp_path: Path) -> dict:
     }, precheck=[
         {"name": "size_minimum", "enabled": True, "min_inspection_size_bytes": 0},
     ], scoring=[
-        {"name": "extension", "enabled": True, "extension_score_groups": [{"score": 5, "extensions": [".zip"]}]},
+        {
+            "name": "extension",
+            "enabled": True,
+            "extension_score_groups": [{"score": 5, "extensions": [".zip", ".tar", ".7z", ".rar"]}],
+        },
         {"name": "zip_structure_identity", "enabled": True},
     ]))
 
@@ -870,6 +1259,77 @@ def _raw_stored_local_entry(name: str, payload: bytes, *, crc32: int | None = No
     )
 
 
+def _zip_with_cd_local_metadata_conflicts() -> bytes:
+    bad_payload = b"bad-from-local"
+    good_payload = b"good-from-local"
+    first = _raw_stored_local_entry("safe.txt", bad_payload, crc32=0)
+    second_offset = len(first)
+    second = _raw_stored_local_entry("safe.txt", good_payload)
+    local = first + second
+    central = b"".join([
+        _central_directory_entry(
+            "../evil.txt",
+            local_header_offset=second_offset,
+            crc32=0,
+            compressed_size=999,
+            uncompressed_size=999,
+        ),
+        _central_directory_entry(
+            "safe.txt",
+            local_header_offset=0,
+            crc32=0,
+            compressed_size=len(bad_payload),
+            uncompressed_size=len(bad_payload),
+        ),
+    ])
+    eocd = struct.pack(
+        "<IHHHHIIH",
+        0x06054B50,
+        0,
+        0,
+        2,
+        2,
+        len(central),
+        len(local),
+        0,
+    )
+    return local + central + eocd
+
+
+def _central_directory_entry(
+    name: str,
+    *,
+    local_header_offset: int,
+    crc32: int,
+    compressed_size: int,
+    uncompressed_size: int,
+) -> bytes:
+    encoded = name.encode("utf-8")
+    return (
+        struct.pack(
+            "<IHHHHHHIIIHHHHHII",
+            0x02014B50,
+            20,
+            20,
+            0,
+            0,
+            0,
+            0,
+            crc32,
+            compressed_size,
+            uncompressed_size,
+            len(encoded),
+            0,
+            0,
+            0,
+            0,
+            0,
+            local_header_offset,
+        )
+        + encoded
+    )
+
+
 def _zip_name_conflict_key(name: str) -> str:
     import unicodedata
 
@@ -886,7 +1346,7 @@ def _windows_reserved_base(name: str) -> str:
 def _build_7z_archive(tmp_path: Path, entries: dict[str, bytes]) -> Path:
     seven_zip = _require_7z_tool_or_skip()
     source_dir = tmp_path / "seven-src"
-    source_dir.mkdir()
+    source_dir.mkdir(parents=True)
     for name, payload in entries.items():
         target = source_dir / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -904,7 +1364,7 @@ def _build_7z_archive(tmp_path: Path, entries: dict[str, bytes]) -> Path:
 
 def _build_rar_archive(tmp_path: Path, rar: Path, entries: dict[str, bytes]) -> Path:
     source_dir = tmp_path / "rar-src"
-    source_dir.mkdir()
+    source_dir.mkdir(parents=True)
     for name, payload in entries.items():
         target = source_dir / name
         target.parent.mkdir(parents=True, exist_ok=True)

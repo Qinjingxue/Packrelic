@@ -62,6 +62,7 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
     status_rank = _status_rank(verification.assessment_status)
     decision_rank = _decision_rank(verification.decision_hint)
     source_quality = _coverage_source_quality(coverage.sources)
+    source_integrity_rank = _source_integrity_rank(verification.source_integrity)
     complete_files = int(coverage.complete_files or verification.complete_files or 0)
     failed_missing = int(coverage.failed_files or verification.failed_files or 0) + int(
         coverage.missing_files or verification.missing_files or 0
@@ -81,6 +82,7 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
         + completeness * 1.5
         + file_coverage * 0.55
         + byte_coverage * 0.35
+        + source_integrity_rank * 0.08
         + source_quality * 0.3
         + min(1.0, complete_files / max(1, int(coverage.expected_files or complete_files or 1))) * 0.25
         + partial_files * 0.01
@@ -98,6 +100,8 @@ def rank_attempt(attempt: RecoveryAttempt) -> RecoveryRank:
         "completeness": completeness,
         "file_coverage": file_coverage,
         "byte_coverage": byte_coverage,
+        "source_integrity": verification.source_integrity,
+        "source_integrity_rank": source_integrity_rank,
         "complete_files": complete_files,
         "partial_files": partial_files,
         "failed_missing_files": failed_missing,
@@ -146,14 +150,19 @@ def compare_attempts(
     rejected = [attempt for attempt, _rank in ranked[max(1, int(keep_limit or 1)):]]
     stop_reason = ""
     should_continue = best_rank.decision in {"continue_repair", "keep_partial"}
-    if incumbent is not None and best.attempt_id != incumbent.attempt_id:
+    if incumbent is not None:
         incumbent_rank = ranks.get(incumbent.attempt_id)
-        if incumbent_rank is not None and best_rank.rank_score <= incumbent_rank.rank_score + max(0.0, min_improvement):
-            best = incumbent
-            selected = [incumbent, *[item for item in selected if item.attempt_id != incumbent.attempt_id]][: max(1, int(keep_limit or 1))]
-            rejected = [item for item in candidates if item.attempt_id not in {selected_item.attempt_id for selected_item in selected}]
+        non_incumbent_attempted = any(item.attempt_id != incumbent.attempt_id for item in candidates)
+        if best.attempt_id == incumbent.attempt_id and non_incumbent_attempted:
             should_continue = False
             stop_reason = "no_improvement"
+        elif best.attempt_id != incumbent.attempt_id:
+            if incumbent_rank is not None and best_rank.rank_score <= incumbent_rank.rank_score + max(0.0, min_improvement):
+                best = incumbent
+                selected = [incumbent, *[item for item in selected if item.attempt_id != incumbent.attempt_id]][: max(1, int(keep_limit or 1))]
+                rejected = [item for item in candidates if item.attempt_id not in {selected_item.attempt_id for selected_item in selected}]
+                should_continue = False
+                stop_reason = "no_improvement"
     if not stop_reason:
         stop_reason = _stop_reason_for_rank(ranks[best.attempt_id])
     return RecoveryComparisonResult(
@@ -226,6 +235,7 @@ def _sort_key(attempt: RecoveryAttempt, rank: RecoveryRank) -> tuple:
         -int(vector["failed_missing_files"]),
         round(vector["file_coverage"], 6),
         round(vector["byte_coverage"], 6),
+        round(vector["source_integrity_rank"], 6),
         round(vector["source_quality"], 6),
         -float(vector["patch_cost"]),
         -int(attempt.round_index),
@@ -326,6 +336,16 @@ def _single_source_quality(source: dict[str, Any]) -> float:
     if code == "info.sample_readability_coverage":
         return 0.3
     return _clamp01(float(source.get("confidence", 0.5) or 0.5))
+
+
+def _source_integrity_rank(source_integrity: str) -> float:
+    return {
+        "complete": 1.0,
+        "unknown": 0.5,
+        "damaged": 0.3,
+        "payload_damaged": 0.2,
+        "truncated": 0.1,
+    }.get(str(source_integrity or "unknown"), 0.5)
 
 
 def _stable_digest(payload: Any) -> str:
