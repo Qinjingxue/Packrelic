@@ -5,6 +5,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cwctype>
 #include <filesystem>
@@ -155,24 +156,93 @@ bool seven_zip_header_ok_at(const std::wstring& path, UInt64 offset, UInt64 file
     return crc32_bytes(next_header.data(), static_cast<std::size_t>(next_header.size())) == le32_at(header, 28);
 }
 
-std::vector<UInt64> find_seven_zip_signature_offsets(const std::wstring& path, std::size_t max_candidates = 16) {
-    std::vector<UInt64> offsets;
+struct EmbeddedSignature {
+    const unsigned char* bytes = nullptr;
+    std::size_t size = 0;
+    unsigned char format_id = 0;
+    const wchar_t* archive_type = L"";
+};
+
+bool zip_local_header_plausible_at(const std::wstring& path, UInt64 offset, UInt64 file_size) {
+    if (offset + 30u > file_size) {
+        return false;
+    }
+    std::vector<unsigned char> header;
+    if (!read_file_range_exact(path, offset, 30, header)) {
+        return false;
+    }
+    if (le32_at(header, 0) != 0x04034B50u) {
+        return false;
+    }
+    const UInt32 compressed_size = le32_at(header, 18);
+    const UInt32 name_len = static_cast<UInt32>(header[26] | (header[27] << 8));
+    const UInt32 extra_len = static_cast<UInt32>(header[28] | (header[29] << 8));
+    const UInt64 payload_offset = offset + 30u + name_len + extra_len;
+    if (name_len == 0 || payload_offset > file_size) {
+        return false;
+    }
+    if (compressed_size != 0 && payload_offset + compressed_size > file_size) {
+        return false;
+    }
+    return true;
+}
+
+bool candidate_header_ok_at(const std::wstring& path, const EmbeddedSignature& signature, UInt64 offset, UInt64 file_size) {
+    if (offset == 0) {
+        return false;
+    }
+    if (signature.format_id == 0x07) {
+        return seven_zip_header_ok_at(path, offset, file_size);
+    }
+    if (signature.format_id == 0x01) {
+        return zip_local_header_plausible_at(path, offset, file_size);
+    }
+    return offset + signature.size <= file_size;
+}
+
+std::vector<EmbeddedArchiveCandidate> find_embedded_signature_candidates(
+    const std::wstring& path,
+    std::size_t max_candidates = 32
+) {
+    std::vector<EmbeddedArchiveCandidate> candidates;
 #ifdef _WIN32
     const UInt64 file_size = file_size_or_zero(path);
-    if (file_size <= 32) {
-        return offsets;
+    if (file_size <= 8) {
+        return candidates;
     }
     HANDLE handle = CreateFileW(win32_extended_path(path).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
-        return offsets;
+        return candidates;
     }
 
-    const unsigned char signature[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
+    static constexpr unsigned char seven_zip[] = {'7', 'z', 0xBC, 0xAF, 0x27, 0x1C};
+    static constexpr unsigned char rar4[] = {'R', 'a', 'r', '!', 0x1A, 0x07, 0x00};
+    static constexpr unsigned char rar5[] = {'R', 'a', 'r', '!', 0x1A, 0x07, 0x01, 0x00};
+    static constexpr unsigned char zip[] = {'P', 'K', 0x03, 0x04};
+    static constexpr unsigned char gzip[] = {0x1F, 0x8B};
+    static constexpr unsigned char bzip2[] = {'B', 'Z', 'h'};
+    static constexpr unsigned char xz[] = {0xFD, '7', 'z', 'X', 'Z', 0x00};
+    static constexpr unsigned char zstd[] = {0x28, 0xB5, 0x2F, 0xFD};
+    const std::array<EmbeddedSignature, 8> signatures{{
+        {seven_zip, sizeof(seven_zip), 0x07, L"7z"},
+        {rar5, sizeof(rar5), 0xCC, L"rar"},
+        {rar4, sizeof(rar4), 0x03, L"rar"},
+        {zip, sizeof(zip), 0x01, L"zip"},
+        {xz, sizeof(xz), 0x0C, L"xz"},
+        {zstd, sizeof(zstd), 0x0E, L"zstd"},
+        {bzip2, sizeof(bzip2), 0x02, L"bzip2"},
+        {gzip, sizeof(gzip), 0x0F, L"gzip"},
+    }};
+    std::size_t longest_signature = 0;
+    for (const auto& signature : signatures) {
+        longest_signature = std::max(longest_signature, signature.size);
+    }
+
     constexpr DWORD kChunkSize = 4u * 1024u * 1024u;
     std::vector<unsigned char> carry;
     UInt64 file_offset = 0;
-    while (file_offset < file_size && offsets.size() < max_candidates) {
+    while (file_offset < file_size && candidates.size() < max_candidates) {
         const UInt64 remaining = file_size - file_offset;
         const DWORD want = static_cast<DWORD>(std::min<UInt64>(remaining, kChunkSize));
         std::vector<unsigned char> buffer(carry.size() + want);
@@ -184,23 +254,29 @@ std::vector<UInt64> find_seven_zip_signature_offsets(const std::wstring& path, s
         }
         buffer.resize(carry.size() + read);
         const UInt64 scan_base = file_offset - carry.size();
-        for (std::size_t index = 0; index + sizeof(signature) <= buffer.size(); ++index) {
-            if (!std::equal(std::begin(signature), std::end(signature), buffer.begin() + index)) {
-                continue;
-            }
-            const UInt64 absolute = scan_base + index;
-            if (absolute == 0) {
-                continue;
-            }
-            if (seven_zip_header_ok_at(path, absolute, file_size)) {
-                offsets.push_back(absolute);
-                if (offsets.size() >= max_candidates) {
+        for (std::size_t index = 0; index < buffer.size(); ++index) {
+            for (const auto& signature : signatures) {
+                if (index + signature.size > buffer.size()) {
+                    continue;
+                }
+                if (!std::equal(signature.bytes, signature.bytes + signature.size, buffer.begin() + index)) {
+                    continue;
+                }
+                const UInt64 absolute = scan_base + index;
+                if (!candidate_header_ok_at(path, signature, absolute, file_size)) {
+                    continue;
+                }
+                candidates.push_back(EmbeddedArchiveCandidate{path, absolute, signature.format_id, signature.archive_type});
+                if (candidates.size() >= max_candidates) {
                     break;
                 }
             }
+            if (candidates.size() >= max_candidates) {
+                break;
+            }
         }
         file_offset += read;
-        const std::size_t keep = std::min<std::size_t>(sizeof(signature) - 1, buffer.size());
+        const std::size_t keep = std::min<std::size_t>(longest_signature - 1, buffer.size());
         carry.assign(buffer.end() - keep, buffer.end());
     }
     CloseHandle(handle);
@@ -208,7 +284,7 @@ std::vector<UInt64> find_seven_zip_signature_offsets(const std::wstring& path, s
     (void)path;
     (void)max_candidates;
 #endif
-    return offsets;
+    return candidates;
 }
 
 std::vector<std::wstring> unique_paths(const std::wstring& archive_path, const std::vector<std::wstring>& part_paths) {
@@ -243,14 +319,32 @@ bool is_standard_seven_zip_path(const std::wstring& path) {
     return name.size() >= 7 && name.compare(name.size() - 7, 7, L".7z.001") == 0;
 }
 
+std::vector<EmbeddedArchiveCandidate> find_embedded_archive_candidates(
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths
+) {
+    std::vector<EmbeddedArchiveCandidate> candidates;
+    for (const auto& path : unique_paths(archive_path, part_paths)) {
+        auto path_candidates = find_embedded_signature_candidates(path);
+        candidates.insert(candidates.end(), path_candidates.begin(), path_candidates.end());
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+        if (left.offset != right.offset) {
+            return left.offset < right.offset;
+        }
+        return left.format_id < right.format_id;
+    });
+    return candidates;
+}
+
 std::vector<EmbeddedSevenZipCandidate> find_embedded_seven_zip_candidates(
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths
 ) {
     std::vector<EmbeddedSevenZipCandidate> candidates;
-    for (const auto& path : unique_paths(archive_path, part_paths)) {
-        for (const UInt64 offset : find_seven_zip_signature_offsets(path)) {
-            candidates.push_back(EmbeddedSevenZipCandidate{path, offset});
+    for (const auto& candidate : find_embedded_archive_candidates(archive_path, part_paths)) {
+        if (candidate.format_id == 0x07) {
+            candidates.push_back(candidate);
         }
     }
     return candidates;

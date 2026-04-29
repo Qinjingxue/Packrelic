@@ -22,6 +22,14 @@ namespace sunpack::sevenzip {
 
 #ifdef _WIN32
 
+namespace {
+
+bool encrypted_header_range_probe_candidate(const std::wstring& archive_type) {
+    return archive_type == L"7z" || archive_type == L"rar" || archive_type == L"rar4" || archive_type == L"rar5";
+}
+
+}  // namespace
+
 
 
 PasswordTestResult test_one_password(
@@ -226,7 +234,7 @@ PasswordTestResult test_one_password(
 
             result.message = "7z.dll did not create a supported archive handler";
 
-        } else if (!any_opened && plan.uses_ranges() && plan.archive_type == L"7z") {
+        } else if (!any_opened && plan.uses_ranges() && encrypted_header_range_probe_candidate(plan.archive_type)) {
 
             result.status = PasswordTestStatus::WrongPassword;
 
@@ -893,4 +901,3 @@ PasswordTestResult test_passwords_with_ranges(
 
 
 }  // namespace sunpack::sevenzip
-

@@ -62,3 +62,4 @@ test_targz/
 AGENTS.md
 native/sunpack_native/target/
 native/sevenzip_password_tester/build-x64/
+native/sevenzip_password_tester/build-pkrc/

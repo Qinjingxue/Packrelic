@@ -13,12 +13,12 @@ namespace sunpack::sevenzip {
 
 #ifdef _WIN32
 
-std::vector<ArchiveOpenPlan> embedded_seven_zip_open_plans(
+std::vector<ArchiveOpenPlan> embedded_archive_open_plans(
     const std::wstring& archive_path,
     const std::vector<std::wstring>& part_paths
 ) {
     std::vector<ArchiveOpenPlan> plans;
-    for (const auto& candidate : find_embedded_seven_zip_candidates(archive_path, part_paths)) {
+    for (const auto& candidate : find_embedded_archive_candidates(archive_path, part_paths)) {
         ExtractInputRange range;
         range.path = candidate.path;
         range.start = candidate.offset;
@@ -26,11 +26,25 @@ std::vector<ArchiveOpenPlan> embedded_seven_zip_open_plans(
 
         ArchiveOpenPlan plan;
         plan.ranges = {range};
-        plan.formats = {format_guid(0x07)};
+        plan.formats = {format_guid(candidate.format_id)};
         plan.archive_offset = candidate.offset;
-        plan.archive_type = L"7z";
-        plan.source = "embedded_7z";
+        plan.archive_type = candidate.archive_type;
+        plan.source = "embedded_carrier";
         plans.push_back(std::move(plan));
+    }
+    return plans;
+}
+
+std::vector<ArchiveOpenPlan> embedded_seven_zip_open_plans(
+    const std::wstring& archive_path,
+    const std::vector<std::wstring>& part_paths
+) {
+    std::vector<ArchiveOpenPlan> plans;
+    for (auto& plan : embedded_archive_open_plans(archive_path, part_paths)) {
+        if (plan.archive_type == L"7z") {
+            plan.source = "embedded_7z";
+            plans.push_back(std::move(plan));
+        }
     }
     return plans;
 }
@@ -55,7 +69,7 @@ std::vector<ArchiveOpenPlan> password_test_open_plans(
         return {base};
     }
 
-    std::vector<ArchiveOpenPlan> embedded = embedded_seven_zip_open_plans(archive_path, part_paths);
+    std::vector<ArchiveOpenPlan> embedded = embedded_archive_open_plans(archive_path, part_paths);
     if (embedded.empty()) {
         return {base};
     }
