@@ -93,6 +93,7 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
             damaged_root.mkdir(parents=True, exist_ok=True)
             for source_index, source in enumerate(sample_sources):
                 source_archive_id = _source_archive_id(source)
+                source_derivation = _load_source_derivation(source)
                 for variant_index in range(max(0, int(args.per_sample))):
                     profile = rng.choice(PROFILE_POOL)
                     variant_seed = rng.randrange(1, 2**31 - 1)
@@ -116,6 +117,8 @@ def _material_build(args: argparse.Namespace, material_root: Path) -> int:
                             material_sample_id=sample_dir.name,
                             damage_json_path=str(damage_json_path),
                         )
+                        if source_derivation:
+                            record["source_derivation"] = source_derivation
                         damage_json_path.parent.mkdir(parents=True, exist_ok=True)
                         damage_json_path.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
                         records.append(record)
@@ -293,8 +296,39 @@ def _source_archive_id(path: Path) -> str:
     return f"{stem}_{digest}"
 
 
-def _skipped_record(source: Path, fmt: str, source_archive_id: str, variant_index: int, profile: str, exc: Exception, material_format: str = "", material_sample_id: str = "") -> dict[str, Any]:
+def _load_source_derivation(path: Path) -> dict[str, Any]:
+    sidecar = Path(str(path) + ".derived.json")
+    if not sidecar.is_file():
+        return {}
+    try:
+        loaded = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
     return {
+        key: loaded.get(key)
+        for key in (
+            "sample_id",
+            "source_material_dir",
+            "material_format",
+            "format",
+            "method",
+            "level",
+            "solid",
+            "tool",
+            "tool_path",
+            "output_name",
+            "sha256",
+            "size",
+            "command",
+        )
+        if key in loaded
+    }
+
+
+def _skipped_record(source: Path, fmt: str, source_archive_id: str, variant_index: int, profile: str, exc: Exception, material_format: str = "", material_sample_id: str = "") -> dict[str, Any]:
+    record = {
         "schema_version": 1,
         "status": "skipped",
         "source_archive_id": source_archive_id,
@@ -307,6 +341,10 @@ def _skipped_record(source: Path, fmt: str, source_archive_id: str, variant_inde
         "damage_profile": profile,
         "error": str(exc),
     }
+    source_derivation = _load_source_derivation(source)
+    if source_derivation:
+        record["source_derivation"] = source_derivation
+    return record
 
 
 def _pretty_path(path: Path) -> Path:

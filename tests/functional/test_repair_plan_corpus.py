@@ -194,6 +194,180 @@ def test_material_build_organizes_direct_format_root_archives(tmp_path):
     assert {row["source_archive_name"] for row in rows} == {"direct.zip"}
 
 
+def test_derive_archives_generates_material_from_source_folders(tmp_path):
+    source_root = tmp_path / "source_material"
+    material_root = tmp_path / "material"
+    sample = source_root / "sample_plain"
+    sample.mkdir(parents=True)
+    (sample / "alpha.txt").write_text("alpha payload", encoding="utf-8")
+    nested = sample / "nested"
+    nested.mkdir()
+    (nested / "bravo.bin").write_bytes(b"bravo payload" * 8)
+    config = tmp_path / "archive_derivation_config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "parallel": {"workers": 2, "task_timeout_seconds": 30},
+                "formats": {
+                    "zip": {"enabled": False},
+                    "7z": {"enabled": False},
+                    "rar": {"enabled": False},
+                    "zstd": {"enabled": False},
+                    "tar": {"enabled": True},
+                    "gzip": {"enabled": True, "levels": [1]},
+                    "bzip2": {"enabled": True, "levels": [1]},
+                    "xz": {"enabled": True, "levels": [0]},
+                    "tar_gz": {"enabled": False},
+                    "tar_bz2": {"enabled": False},
+                    "tar_xz": {"enabled": False},
+                    "tar_zst": {"enabled": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    derive = subprocess.run(
+        [
+            sys.executable,
+            "repair_training/derive_archives.py",
+            "--source-root",
+            str(source_root),
+            "--material-root",
+            str(material_root),
+            "--config",
+            str(config),
+            "--no-pretty",
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    derive_summary = json.loads(derive.stdout.strip())
+    assert derive_summary["generated"] == 4
+    assert derive_summary["failed"] == 0
+    assert not (material_root / "zip" / "sample_plain").exists()
+    derived_rows = _jsonl(sample / "derived_manifest.jsonl")
+    assert len(derived_rows) == 4
+    assert {row["material_format"] for row in derived_rows} == {"tar", "gzip", "bzip2", "xz"}
+    assert all(row["sha256"] for row in derived_rows if row["status"] == "generated")
+    assert all(Path(str(row["output_path"]) + ".derived.json").is_file() for row in derived_rows)
+
+    subprocess.run(
+        [
+            sys.executable,
+            "repair_training/build_repair_plan_corpus.py",
+            "--material-root",
+            str(material_root),
+            "--formats",
+            "tar",
+            "--per-sample",
+            "1",
+            "--seed",
+            "404",
+            "--no-pretty",
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    damage_rows = _jsonl(material_root / "tar" / "sample_plain" / "damage_manifest.jsonl")
+    assert len(damage_rows) == 1
+    assert damage_rows[0]["source_derivation"]["source_material_dir"] == str(sample)
+    assert damage_rows[0]["source_derivation"]["material_format"] == "tar"
+
+    success_output = tmp_path / "derived_success.jsonl"
+    failure_output = tmp_path / "derived_failure.jsonl"
+    subprocess.run(
+        [
+            sys.executable,
+            "repair_training/collect_repair_plan_data.py",
+            "--material-root",
+            str(material_root),
+            "--formats",
+            "tar",
+            "--success-output",
+            str(success_output),
+            "--failure-output",
+            str(failure_output),
+            "--max-rounds",
+            "1",
+            "--max-candidates-per-round",
+            "2",
+            "--case-timeout-seconds",
+            "20",
+            "--no-pretty",
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    collected_rows = _jsonl(success_output) + _jsonl(failure_output)
+    assert collected_rows
+    assert all(row["source_derivation"]["source_material_dir"] == str(sample) for row in collected_rows)
+    assert all(row["stable_features"]["state"]["source_derivation"]["material_format"] == "tar" for row in collected_rows)
+
+
+def test_derive_archives_organizes_direct_source_material_files(tmp_path):
+    source_root = tmp_path / "source_material"
+    material_root = tmp_path / "material"
+    source_root.mkdir()
+    direct = source_root / "loose.txt"
+    direct.write_text("loose source material", encoding="utf-8")
+    config = tmp_path / "archive_derivation_config.json"
+    config.write_text(
+        json.dumps(
+            {
+                "formats": {
+                    "zip": {"enabled": False},
+                    "7z": {"enabled": False},
+                    "rar": {"enabled": False},
+                    "zstd": {"enabled": False},
+                    "tar": {"enabled": True},
+                    "gzip": {"enabled": False},
+                    "bzip2": {"enabled": False},
+                    "xz": {"enabled": False},
+                    "tar_gz": {"enabled": False},
+                    "tar_bz2": {"enabled": False},
+                    "tar_xz": {"enabled": False},
+                    "tar_zst": {"enabled": False},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    derive = subprocess.run(
+        [
+            sys.executable,
+            "repair_training/derive_archives.py",
+            "--source-root",
+            str(source_root),
+            "--material-root",
+            str(material_root),
+            "--config",
+            str(config),
+            "--no-pretty",
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    summary = json.loads(derive.stdout.strip())
+    assert summary["organized_root_files"] == 1
+    assert not direct.exists()
+    assert (source_root / "loose" / "loose.txt").is_file()
+    rows = _jsonl(source_root / "loose" / "derived_manifest.jsonl")
+    assert len(rows) == 1
+    assert rows[0]["material_format"] == "tar"
+    assert (material_root / "tar" / "loose" / rows[0]["output_name"]).is_file()
+
+
 def _write_clean_zip(path: Path) -> None:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("alpha.txt", b"alpha payload")

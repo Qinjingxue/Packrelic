@@ -1,0 +1,110 @@
+{
+  "tools": {
+    "seven_zip": "tools/7z.exe",
+    "rar": "tools/rar.exe",
+    "zstd": "tools/zstd.exe"
+  },
+  "parallel": {
+    "workers": 0,
+    "task_timeout_seconds": 120
+  },
+  "formats": {
+    "zip": {
+      "enabled": true,
+      "levels": [
+        0,
+        5,
+        9
+      ],
+      "methods": [
+        "deflate",
+        "store"
+      ]
+    },
+    "7z": {
+      "enabled": true,
+      "levels": [
+        0,
+        5,
+        9
+      ],
+      "methods": [
+        "lzma2"
+      ],
+      "solid": [
+        true,
+        false
+      ]
+    },
+    "tar": {
+      "enabled": true
+    },
+    "tar_gz": {
+      "enabled": true,
+      "levels": [
+        1,
+        6,
+        9
+      ]
+    },
+    "tar_bz2": {
+      "enabled": true,
+      "levels": [
+        1,
+        6,
+        9
+      ]
+    },
+    "tar_xz": {
+      "enabled": true,
+      "levels": [
+        0,
+        6,
+        9
+      ]
+    },
+    "gzip": {
+      "enabled": true,
+      "levels": [
+        1,
+        6,
+        9
+      ]
+    },
+    "bzip2": {
+      "enabled": true,
+      "levels": [
+        1,
+        6,
+        9
+      ]
+    },
+    "xz": {
+      "enabled": true,
+      "levels": [
+        0,
+        6,
+        9
+      ]
+    },
+    "zstd": {
+      "enabled": true,
+      "levels": [
+        1,
+        3,
+        10
+      ]
+    },
+    "rar": {
+      "enabled": true,
+      "levels": [
+        0,
+        3,
+        5
+      ],
+      "solid": [
+        false
+      ]
+    }
+  }
+}

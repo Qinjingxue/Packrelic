@@ -287,10 +287,12 @@ def _scheduler() -> RepairScheduler:
 def _state_features(record: dict[str, Any], batch, round_index: int, previous_actions: list[str], best_completeness: float) -> dict[str, Any]:
     diagnosis = batch.diagnosis if isinstance(batch.diagnosis, dict) else {}
     capability = diagnosis.get("capability_decision") if isinstance(diagnosis.get("capability_decision"), dict) else {}
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
     return {
         "format": record.get("format"),
         "damage_profile": record.get("damage_profile"),
         "damage_flags": list(record.get("damage_flags") or []),
+        "source_derivation": _compact_source_derivation(source_derivation),
         "corruption_zones": sorted({item.get("zone") for item in record.get("corruption_plan") or [] if item.get("zone")}),
         "corruption_kinds": sorted({item.get("kind") for item in record.get("corruption_plan") or [] if item.get("kind")}),
         "round": round_index,
@@ -319,6 +321,7 @@ def _action_row(
 ) -> dict[str, Any]:
     payload = candidate_feature_payload(candidate)
     module_decision = _module_decision(batch, candidate.module_name)
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
     return {
         "schema_version": 1,
         "source": "repair_plan_corpus",
@@ -328,6 +331,7 @@ def _action_row(
         "material_format": record.get("material_format"),
         "material_sample_id": record.get("material_sample_id"),
         "source_archive_name": record.get("source_archive_name"),
+        "source_derivation": _compact_source_derivation(source_derivation),
         "damaged_file_name": record.get("damaged_file_name"),
         "damaged_path": record.get("damaged_path"),
         "damage_json_path": record.get("damage_json_path"),
@@ -464,6 +468,7 @@ def _label_status(label: int, status: str, completeness: float) -> dict[str, Any
 
 
 def _round_empty_row(record: dict[str, Any], round_index: int, state_features: dict[str, Any], batch) -> dict[str, Any]:
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
     return {
         "schema_version": 1,
         "source": "repair_plan_corpus",
@@ -472,6 +477,7 @@ def _round_empty_row(record: dict[str, Any], round_index: int, state_features: d
         "material_format": record.get("material_format"),
         "material_sample_id": record.get("material_sample_id"),
         "source_archive_name": record.get("source_archive_name"),
+        "source_derivation": _compact_source_derivation(source_derivation),
         "damaged_file_name": record.get("damaged_file_name"),
         "round": round_index,
         "candidate_id": None,
@@ -486,6 +492,7 @@ def _round_empty_row(record: dict[str, Any], round_index: int, state_features: d
 
 
 def _terminal_row(record: dict[str, Any], status: str, message: str) -> dict[str, Any]:
+    source_derivation = record.get("source_derivation") if isinstance(record.get("source_derivation"), dict) else {}
     return {
         "schema_version": 1,
         "source": "repair_plan_corpus",
@@ -494,6 +501,7 @@ def _terminal_row(record: dict[str, Any], status: str, message: str) -> dict[str
         "material_format": record.get("material_format"),
         "material_sample_id": record.get("material_sample_id"),
         "source_archive_name": record.get("source_archive_name"),
+        "source_derivation": _compact_source_derivation(source_derivation),
         "damaged_file_name": record.get("damaged_file_name"),
         "round": None,
         "candidate_id": None,
@@ -501,7 +509,7 @@ def _terminal_row(record: dict[str, Any], status: str, message: str) -> dict[str
         "selected_by_current_system": False,
         "label": 0,
         "label_status": status,
-        "stable_features": {"state": {"format": record.get("format"), "damage_profile": record.get("damage_profile")}, "candidate": {}},
+        "stable_features": {"state": {"format": record.get("format"), "damage_profile": record.get("damage_profile"), "source_derivation": _compact_source_derivation(source_derivation)}, "candidate": {}},
         "teacher_features": {},
         "debug_features": {"message": message},
     }
@@ -524,6 +532,26 @@ def _compact_diagnosis(diagnosis: dict[str, Any]) -> dict[str, Any]:
         "repairable": diagnosis.get("repairable"),
         "categories": list(diagnosis.get("categories") or []),
         "damage_flags": list(diagnosis.get("damage_flags") or []),
+    }
+
+
+def _compact_source_derivation(source_derivation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: source_derivation.get(key)
+        for key in (
+            "sample_id",
+            "source_material_dir",
+            "material_format",
+            "format",
+            "method",
+            "level",
+            "solid",
+            "tool",
+            "output_name",
+            "sha256",
+            "size",
+        )
+        if key in source_derivation
     }
 
 
