@@ -21,7 +21,7 @@ class ArchiveNestedPayloadSalvage:
         routes=(
             RepairRoute(
                 formats=("zip", "7z", "seven_zip", "rar", "tar", "gzip", "archive"),
-                require_any_categories=("content_recovery", "directory_rebuild", "boundary_repair"),
+                require_any_categories=(),
                 require_any_flags=("outer_container_bad", "nested_archive"),
                 reject_any_flags=("carrier_archive", "sfx", "carrier_prefix"),
                 base_score=0.8,

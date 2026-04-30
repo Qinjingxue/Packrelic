@@ -10,6 +10,9 @@ from sunpack.repair.result import RepairResult
 from sunpack_native import gzip_footer_fix_repair as _native_gzip_footer_fix_repair
 
 
+_BOUNDARY_UNTRUSTED_FLAGS = {"trailing_junk", "trailing_padding", "boundary_unreliable"}
+
+
 class GzipFooterFix:
     spec = RepairModuleSpec(
         name="gzip_footer_fix",
@@ -30,6 +33,8 @@ class GzipFooterFix:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & _BOUNDARY_UNTRUSTED_FLAGS and "gzip_footer_bad" not in flags:
+            return 0.0
         if flags & {"damaged", "data_error"} and not flags & {"gzip_footer_bad", "crc_error"}:
             return 0.0
         if flags & {"gzip_footer_bad", "crc_error", "checksum_error"}:

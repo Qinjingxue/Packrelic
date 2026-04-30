@@ -7,6 +7,8 @@ import json
 import lzma
 import multiprocessing as mp
 import pickle
+import os
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -49,17 +51,32 @@ def main(argv: list[str] | None = None) -> int:
         "success_output": str(success_output),
         "failure_output": str(failure_output),
     }
+    started_all = time.perf_counter()
+    last_progress = started_all
+    debug_events = _DebugEvents(Path(args.debug_events) if args.debug_events else None)
     mode = "a" if args.append else "w"
     with success_output.open(mode, encoding="utf-8") as success_handle, failure_output.open(mode, encoding="utf-8") as failure_handle:
-        for record in records:
+        for record_index, record in enumerate(records, start=1):
+            total_timeout = float(args.total_timeout_seconds or 0)
+            if total_timeout > 0 and time.perf_counter() - started_all > total_timeout:
+                debug_events.write("total_timeout", record, record_index=record_index, total_records=len(records), elapsed_seconds=round(time.perf_counter() - started_all, 3))
+                summary["failed"] += 1
+                break
+            idle_timeout = float(args.idle_timeout_seconds or 0)
+            if idle_timeout > 0 and time.perf_counter() - last_progress > idle_timeout:
+                debug_events.write("idle_timeout", record, record_index=record_index, total_records=len(records), idle_seconds=round(time.perf_counter() - last_progress, 3))
+                summary["failed"] += 1
+                break
             if record.get("status") == "skipped":
                 summary["skipped"] += 1
                 continue
             if args.progress:
-                print(f"START {record.get('sample_id')}", flush=True)
+                print(f"START {record_index}/{len(records)} {record.get('sample_id')} fmt={record.get('material_format') or record.get('format')} source={record.get('source_archive_name')}", flush=True)
+            debug_events.write("sample_start", record, record_index=record_index, total_records=len(records))
             started = time.perf_counter()
-            status, rows = _collect_sample_with_timeout(record, args)
+            status, rows = _collect_sample_with_timeout(record, args, debug_events, record_index, len(records))
             elapsed = round(time.perf_counter() - started, 3)
+            last_progress = time.perf_counter()
             for row in rows:
                 row["elapsed_sample_seconds"] = elapsed
             is_success = any(int(row.get("label", 0) or 0) > 0 for row in rows)
@@ -74,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
             summary["failed"] += 1 if status == "failed" else 0
             if args.progress:
                 print(f"END {record.get('sample_id')} status={status} rows={len(rows)} elapsed={elapsed}s", flush=True)
+            debug_events.write("sample_end", record, record_index=record_index, total_records=len(records), status=status, rows=len(rows), elapsed_seconds=elapsed)
     if args.pretty:
         _pretty_path(success_output).write_text(json.dumps(success_pretty_records, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
         _pretty_path(failure_output).write_text(json.dumps(failure_pretty_records, ensure_ascii=False, indent=2, sort_keys=True, default=str), encoding="utf-8")
@@ -100,6 +118,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--beam-size", type=int, default=1, help="Reserved interface for beam collection; v1 advances the top current-system path.")
     parser.add_argument("--max-candidates-per-round", type=int, default=10, help="Maximum candidates logged per round.")
     parser.add_argument("--case-timeout-seconds", type=float, default=45.0, help="Terminate one sample after this timeout. Use 0 to disable.")
+    parser.add_argument("--total-timeout-seconds", type=float, default=0.0, help="Stop collection after this wall-clock budget. Use 0 to disable.")
+    parser.add_argument("--idle-timeout-seconds", type=float, default=0.0, help="Stop if no sample completes for this many seconds. Use 0 to disable.")
+    parser.add_argument("--heartbeat-seconds", type=float, default=5.0, help="While waiting for a sample worker, emit heartbeat progress every N seconds.")
+    parser.add_argument("--debug-events", default="", help="Optional JSONL path for collector START/END/TIMEOUT heartbeat events.")
     parser.add_argument("--progress", action="store_true", help="Print sample START/END progress.")
     return parser
 
@@ -163,22 +185,33 @@ def _csv_filter(raw: str) -> set[str]:
     return {item.strip().lower() for item in str(raw or "").split(",") if item.strip()}
 
 
-def _collect_sample_with_timeout(record: dict[str, Any], args: argparse.Namespace) -> tuple[str, list[dict[str, Any]]]:
+def _collect_sample_with_timeout(record: dict[str, Any], args: argparse.Namespace, debug_events: "_DebugEvents", record_index: int, total_records: int) -> tuple[str, list[dict[str, Any]]]:
     timeout = float(args.case_timeout_seconds or 0)
     if timeout <= 0:
         return _collect_sample(record, args)
     with tempfile.TemporaryDirectory(prefix=f"sunpack-plan-worker-{record.get('sample_id', 'sample')}-") as raw_tmp:
         result_path = Path(raw_tmp) / "result.pkl"
         process = mp.Process(target=_collect_worker, args=(record, args, str(result_path)), daemon=True)
+        started = time.perf_counter()
+        last_heartbeat = started
         process.start()
-        process.join(timeout)
-        if process.is_alive():
-            process.terminate()
-            process.join(5)
-            if process.is_alive():
-                process.kill()
+        while process.is_alive():
+            elapsed = time.perf_counter() - started
+            if elapsed >= timeout:
+                debug_events.write("sample_timeout", record, record_index=record_index, total_records=total_records, pid=process.pid, elapsed_seconds=round(elapsed, 3), timeout_seconds=timeout)
+                _kill_process_tree(process.pid)
                 process.join(5)
-            return "timeout", [_terminal_row(record, "timeout", f"sample exceeded {timeout:.1f}s timeout")]
+                if process.is_alive():
+                    process.kill()
+                    process.join(5)
+                return "timeout", [_terminal_row(record, "timeout", f"sample exceeded {timeout:.1f}s timeout")]
+            heartbeat = float(args.heartbeat_seconds or 0)
+            if heartbeat > 0 and time.perf_counter() - last_heartbeat >= heartbeat:
+                debug_events.write("sample_heartbeat", record, record_index=record_index, total_records=total_records, pid=process.pid, elapsed_seconds=round(elapsed, 3), timeout_seconds=timeout)
+                if args.progress:
+                    print(f"WAIT {record_index}/{total_records} {record.get('sample_id')} pid={process.pid} elapsed={elapsed:.1f}s/{timeout:.1f}s", flush=True)
+                last_heartbeat = time.perf_counter()
+            process.join(0.5)
         if result_path.exists():
             with result_path.open("rb") as handle:
                 return pickle.load(handle)
@@ -208,6 +241,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
     rows: list[dict[str, Any]] = []
     best_completeness = 0.0
     for round_index in range(max(1, int(args.max_rounds or 1))):
+        if args.progress:
+            print(f"  ROUND {round_index} {record.get('sample_id')} fmt={fmt}", flush=True)
         job = RepairJob(
             source_input=source_input,
             format=fmt,
@@ -216,6 +251,8 @@ def _collect_sample_rows(record: dict[str, Any], args: argparse.Namespace) -> li
             archive_key=f"{record.get('sample_id')}:round:{round_index}",
         )
         batch = scheduler.generate_repair_candidates(job)
+        if args.progress:
+            print(f"  CANDIDATES {record.get('sample_id')} round={round_index} count={len(batch.candidates)} warnings={len(batch.warnings or [])}", flush=True)
         state_features = _state_features(record, batch, round_index, previous_actions, best_completeness)
         candidates = materialize_candidates(list(batch.candidates))
         validated = [selector._with_native_validation(candidate) for candidate in candidates]  # noqa: SLF001
@@ -572,6 +609,42 @@ def _pretty_path(path: Path) -> Path:
     if suffix:
         return path.with_name(path.name.removesuffix(suffix) + ".pretty.json")
     return path.with_name(path.name + ".pretty.json")
+
+
+class _DebugEvents:
+    def __init__(self, path: Path | None):
+        self.path = path
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text("", encoding="utf-8")
+
+    def write(self, event: str, record: dict[str, Any], **extra: Any) -> None:
+        if self.path is None:
+            return
+        payload = {
+            "event": event,
+            "time": time.time(),
+            "sample_id": record.get("sample_id"),
+            "material_format": record.get("material_format"),
+            "format": record.get("format"),
+            "source_archive_name": record.get("source_archive_name"),
+            "damaged_file_name": record.get("damaged_file_name"),
+            **extra,
+        }
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+
+
+def _kill_process_tree(pid: int | None) -> None:
+    if not pid:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

@@ -9,6 +9,9 @@ from sunpack.repair.result import RepairResult
 from sunpack_native import gzip_deflate_member_resync_repair as _native_gzip_member_resync
 
 
+_BOUNDARY_UNTRUSTED_FLAGS = {"trailing_junk", "trailing_padding", "boundary_unreliable"}
+
+
 class GzipDeflateMemberResync:
     spec = RepairModuleSpec(
         name="gzip_deflate_member_resync",
@@ -23,6 +26,7 @@ class GzipDeflateMemberResync:
                 require_any_categories=("content_recovery",),
                 require_any_flags=("deflate_resync", "damaged", "checksum_error", "data_error"),
                 require_any_failure_kinds=("corrupted_data", "data_error", "checksum_error"),
+                reject_any_flags=tuple(sorted(_BOUNDARY_UNTRUSTED_FLAGS)),
                 base_score=0.86,
             ),
         ),
@@ -30,6 +34,8 @@ class GzipDeflateMemberResync:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & _BOUNDARY_UNTRUSTED_FLAGS:
+            return 0.0
         if flags & {"deflate_resync", "damaged", "checksum_error", "data_error"}:
             return 0.92
         if "content_recovery" in diagnosis.categories:

@@ -7,6 +7,10 @@ param(
     [int]$MaxRounds = 3,
     [int]$MaxCandidatesPerRound = 10,
     [double]$CaseTimeoutSeconds = 45.0,
+    [double]$TotalTimeoutSeconds = 0,
+    [double]$IdleTimeoutSeconds = 0,
+    [double]$HeartbeatSeconds = 5.0,
+    [string]$DebugEvents = ".sunpack\datasets\repair_plan_collect_events.jsonl",
     [string]$Formats = "",
     [string]$Sample = "",
     [switch]$Append,
@@ -45,8 +49,18 @@ $argsList = @(
     "--failure-output", $FailureOutput,
     "--max-rounds", "$MaxRounds",
     "--max-candidates-per-round", "$MaxCandidatesPerRound",
-    "--case-timeout-seconds", "$CaseTimeoutSeconds"
+    "--case-timeout-seconds", "$CaseTimeoutSeconds",
+    "--heartbeat-seconds", "$HeartbeatSeconds"
 )
+if ($TotalTimeoutSeconds -gt 0) {
+    $argsList += @("--total-timeout-seconds", "$TotalTimeoutSeconds")
+}
+if ($IdleTimeoutSeconds -gt 0) {
+    $argsList += @("--idle-timeout-seconds", "$IdleTimeoutSeconds")
+}
+if ($DebugEvents) {
+    $argsList += @("--debug-events", $DebugEvents)
+}
 
 if ($Manifest) {
     $argsList += @("--manifest", $Manifest)
@@ -83,4 +97,3 @@ if ($Manifest) {
 if ($LASTEXITCODE -ne 0) {
     throw "repair plan data collection failed (exit code $LASTEXITCODE)"
 }
-

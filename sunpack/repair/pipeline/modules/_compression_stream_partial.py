@@ -14,6 +14,7 @@ class CompressionStreamPartialRecovery:
     format_name: str = ""
     aliases: tuple[str, ...] = ()
     module_name: str = ""
+    reject_flags: tuple[str, ...] = ("trailing_junk", "trailing_padding", "boundary_unreliable")
 
     @property
     def spec(self) -> RepairModuleSpec:
@@ -35,6 +36,7 @@ class CompressionStreamPartialRecovery:
                         "unexpected_eof",
                     ),
                     require_any_failure_kinds=("unexpected_end",),
+                    reject_any_flags=self.reject_flags,
                     base_score=0.82,
                 ),
             ),
@@ -42,6 +44,8 @@ class CompressionStreamPartialRecovery:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & set(self.reject_flags):
+            return 0.0
         if flags & {
             "probably_truncated",
             "stream_truncated",

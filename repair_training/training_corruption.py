@@ -373,7 +373,7 @@ class BinaryCorruptor:
                 "boundary_unreliable",
             ],
             expected_statuses=("partial", "repaired"),
-            expected_module="zip_trailing_junk_trim",
+            expected_module="zip_central_directory_rebuild",
             expected_files={
                 "good.txt": entries["good.txt"],
                 "keep.bin": entries["keep.bin"],

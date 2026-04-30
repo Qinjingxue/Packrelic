@@ -14,6 +14,7 @@ class TarCompressedPartialRecovery:
     format_name: str = ""
     aliases: tuple[str, ...] = ()
     module_name: str = ""
+    reject_flags: tuple[str, ...] = ("trailing_junk", "trailing_padding", "boundary_unreliable")
 
     @property
     def spec(self) -> RepairModuleSpec:
@@ -43,6 +44,7 @@ class TarCompressedPartialRecovery:
                         "boundary_unreliable",
                     ),
                     require_any_failure_kinds=("unexpected_end", "corrupted_data", "data_error"),
+                    reject_any_flags=self.reject_flags,
                     base_score=0.86,
                 ),
             ),
@@ -50,6 +52,8 @@ class TarCompressedPartialRecovery:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & set(self.reject_flags):
+            return 0.0
         fmt = str(diagnosis.format or job.format or "").lower()
         if fmt == self.format_name and flags & _STRONG_FLAGS:
             return 0.98

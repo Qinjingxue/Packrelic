@@ -1808,8 +1808,9 @@ fn find_complete_stream_prefix(
     if data.is_empty() {
         return None;
     }
-    let min_end = data.len().saturating_sub(max_probe_junk_bytes);
-    for end in min_end..=data.len() {
+    let probe_window = max_probe_junk_bytes.max(1).min(4096);
+    let min_end = data.len().saturating_sub(probe_window);
+    for end in (min_end..=data.len()).rev() {
         if decode_stream_exact(&data[..end], format).is_ok() {
             return Some(end);
         }

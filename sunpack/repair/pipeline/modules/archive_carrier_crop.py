@@ -24,7 +24,7 @@ class ArchiveCarrierCropDeepRecovery:
         routes=(
             RepairRoute(
                 formats=("7z", "seven_zip", "rar", "archive"),
-                require_any_categories=("boundary_repair", "content_recovery", "directory_rebuild"),
+                require_any_categories=(),
                 require_any_flags=("carrier_archive", "sfx", "embedded_archive", "carrier_prefix", "boundary_unreliable", "start_trusted_only"),
                 require_any_fuzzy_hints=("carrier_prefix_likely", "entropy_boundary_shift"),
                 require_any_failure_kinds=("structure_recognition",),
@@ -35,11 +35,14 @@ class ArchiveCarrierCropDeepRecovery:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
-        if diagnosis.format == "rar" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
+        fmt = str(diagnosis.format or job.format or "").lower()
+        if fmt not in {"7z", "seven_zip", "rar", "archive"}:
+            return 0.0
+        if fmt == "rar" and flags & {"carrier_archive", "sfx", "embedded_archive", "carrier_prefix"}:
             return 0.65
         if flags & {"carrier_archive", "sfx", "embedded_archive", "boundary_unreliable", "start_trusted_only"}:
             return 0.9
-        if "boundary_repair" in diagnosis.categories and diagnosis.format in {"7z", "seven_zip", "rar"}:
+        if "boundary_repair" in diagnosis.categories and fmt in {"7z", "seven_zip", "rar"}:
             return 0.74
         return 0.0
 
