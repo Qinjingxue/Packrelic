@@ -27,8 +27,8 @@ from sunpack.repair.candidate import CandidateSelector, candidate_feature_payloa
 
 
 DEFAULT_MANIFEST = Path(".sunpack") / "corpus" / "repair_plan_manifest.jsonl"
-DEFAULT_SUCCESS_OUTPUT = Path(".sunpack") / "datasets" / "repair_plan_ltr_success.jsonl"
-DEFAULT_FAILURE_OUTPUT = Path(".sunpack") / "datasets" / "repair_plan_ltr_failure.jsonl"
+DEFAULT_SUCCESS_OUTPUT = Path("repair_training") / "datasets" / "repair_plan_ltr_success.jsonl"
+DEFAULT_FAILURE_OUTPUT = Path("repair_training") / "datasets" / "repair_plan_ltr_failure.jsonl"
 DEFAULT_MATERIAL_ROOT = Path("repair_training") / "material"
 
 
