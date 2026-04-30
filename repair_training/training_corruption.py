@@ -21,7 +21,52 @@ from sunpack.contracts.archive_input import ArchiveInputDescriptor
 from sunpack.contracts.archive_state import PatchOperation, PatchPlan
 
 
-ArchiveFormat = Literal["zip", "tar", "gzip", "bzip2", "xz", "7z", "rar"]
+ArchiveFormat = Literal["zip", "tar", "gzip", "bzip2", "xz", "zstd", "7z", "rar", "tar.gz", "tar.bz2", "tar.xz", "tar.zst"]
+
+
+MATERIAL_FORMAT_DIRS = (
+    "zip",
+    "7z",
+    "rar",
+    "tar",
+    "gzip",
+    "bzip2",
+    "xz",
+    "zstd",
+    "tar_gz",
+    "tar_bz2",
+    "tar_xz",
+    "tar_zst",
+)
+
+
+MATERIAL_FORMAT_ALIASES = {
+    "zip": "zip",
+    "7z": "7z",
+    "rar": "rar",
+    "tar": "tar",
+    "gzip": "gzip",
+    "gz": "gzip",
+    "bzip2": "bzip2",
+    "bz2": "bzip2",
+    "xz": "xz",
+    "zstd": "zstd",
+    "zst": "zstd",
+    "tar_gz": "tar.gz",
+    "tar.gz": "tar.gz",
+    "tgz": "tar.gz",
+    "tar_bz2": "tar.bz2",
+    "tar.bz2": "tar.bz2",
+    "tbz": "tar.bz2",
+    "tbz2": "tar.bz2",
+    "tar_xz": "tar.xz",
+    "tar.xz": "tar.xz",
+    "txz": "tar.xz",
+    "tar_zst": "tar.zst",
+    "tar.zst": "tar.zst",
+    "tar.zstd": "tar.zst",
+    "tzst": "tar.zst",
+}
 
 
 @dataclass(frozen=True)
@@ -122,13 +167,23 @@ class CorruptionCase:
         source_path: str,
         damage_profile: str,
         variant_index: int,
+        material_format: str = "",
+        material_sample_id: str = "",
+        damage_json_path: str = "",
     ) -> dict[str, Any]:
+        damaged_path = str(self.source_input.get("path") or "")
         return {
             "schema_version": 1,
             "sample_id": self.case_id,
             "query_id": f"{self.case_id}:0",
             "source_archive_id": source_archive_id,
             "source_path": source_path,
+            "source_archive_name": Path(source_path).name,
+            "damaged_path": damaged_path,
+            "damaged_file_name": Path(damaged_path).name if damaged_path else "",
+            "damage_json_path": damage_json_path,
+            "material_format": material_format,
+            "material_sample_id": material_sample_id,
             "format": self.format,
             "seed": self.seed,
             "variant_index": int(variant_index),
@@ -868,17 +923,32 @@ def detect_archive_format(path: Path) -> ArchiveFormat | None:
         return "zip"
     if lower.endswith(".tar"):
         return "tar"
-    if lower.endswith((".tgz", ".tar.gz", ".gz")):
+    if lower.endswith((".tar.gz", ".tgz")):
+        return "tar.gz"
+    if lower.endswith((".tar.bz2", ".tbz2", ".tbz")):
+        return "tar.bz2"
+    if lower.endswith((".tar.xz", ".txz")):
+        return "tar.xz"
+    if lower.endswith((".tar.zst", ".tar.zstd", ".tzst")):
+        return "tar.zst"
+    if lower.endswith(".gz"):
         return "gzip"
-    if lower.endswith((".tbz", ".tbz2", ".tar.bz2", ".bz2")):
+    if lower.endswith(".bz2"):
         return "bzip2"
-    if lower.endswith((".txz", ".tar.xz", ".xz")):
+    if lower.endswith(".xz"):
         return "xz"
+    if lower.endswith((".zst", ".zstd")):
+        return "zstd"
     if lower.endswith(".7z"):
         return "7z"
     if lower.endswith(".rar"):
         return "rar"
     return None
+
+
+def material_dir_to_format(name: str) -> ArchiveFormat | None:
+    value = MATERIAL_FORMAT_ALIASES.get(str(name or "").strip().lower())
+    return value  # type: ignore[return-value]
 
 
 def build_corpus_corruption_case(
@@ -962,17 +1032,18 @@ def _corpus_profile_mutations(
     if not data:
         raise ValueError("source archive is empty")
     profile = str(damage_profile or "multi").lower()
-    if fmt == "zip":
+    base_fmt = _base_archive_format(fmt)
+    if base_fmt == "zip":
         return _zip_corpus_mutations(data, randomizer, profile)
-    if fmt == "tar":
+    if base_fmt == "tar":
         return _tar_corpus_mutations(data, randomizer, profile)
-    if fmt in {"gzip", "bzip2", "xz"}:
-        return _stream_corpus_mutations(data, fmt, randomizer, profile)
-    if fmt == "7z":
+    if base_fmt in {"gzip", "bzip2", "xz", "zstd"}:
+        return _stream_corpus_mutations(data, base_fmt, randomizer, profile)
+    if base_fmt == "7z":
         return _seven_zip_corpus_mutations(data, randomizer, profile)
-    if fmt == "rar":
+    if base_fmt == "rar":
         return _rar_corpus_mutations(data, randomizer, profile)
-    return _raw_corpus_mutations(data, fmt, randomizer, profile)
+    return _raw_corpus_mutations(data, base_fmt, randomizer, profile)
 
 
 def _zip_corpus_mutations(data: bytes, randomizer: random.Random, profile: str) -> tuple[list[BinaryMutation], list[str]]:
@@ -1060,13 +1131,14 @@ def _raw_corpus_mutations(data: bytes, fmt: ArchiveFormat, randomizer: random.Ra
 
 
 def _oracle_from_clean_bytes(data: bytes, fmt: ArchiveFormat) -> dict[str, Any]:
-    if fmt == "zip":
+    base_fmt = _base_archive_format(fmt)
+    if base_fmt == "zip":
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
                 return {"files": {name: archive.read(name) for name in archive.namelist() if not name.endswith("/")}}
         except Exception:
             return {"bytes_exact": True}
-    if fmt == "tar":
+    if base_fmt == "tar":
         try:
             with tarfile.open(fileobj=io.BytesIO(data)) as archive:
                 files = {}
@@ -1079,17 +1151,17 @@ def _oracle_from_clean_bytes(data: bytes, fmt: ArchiveFormat) -> dict[str, Any]:
                 return {"files": files}
         except Exception:
             return {"bytes_exact": True}
-    if fmt == "gzip":
+    if base_fmt == "gzip":
         try:
             return {"payload": gzip.decompress(data)}
         except Exception:
             return {"bytes_exact": True}
-    if fmt == "bzip2":
+    if base_fmt == "bzip2":
         try:
             return {"payload": bz2.decompress(data)}
         except Exception:
             return {"bytes_exact": True}
-    if fmt == "xz":
+    if base_fmt == "xz":
         try:
             return {"payload": lzma.decompress(data)}
         except Exception:
@@ -1167,10 +1239,11 @@ def _verification_against_oracle(case: CorruptionCase, path: Path) -> dict[str, 
 
 
 def _read_archive_files(path: Path, fmt: ArchiveFormat) -> dict[str, bytes]:
-    if fmt == "zip":
+    base_fmt = _base_archive_format(fmt)
+    if base_fmt == "zip":
         with zipfile.ZipFile(path) as archive:
             return {name: archive.read(name) for name in archive.namelist() if not name.endswith("/")}
-    if fmt == "tar":
+    if base_fmt == "tar":
         with tarfile.open(path) as archive:
             output = {}
             for item in archive.getmembers():
@@ -1185,11 +1258,12 @@ def _read_archive_files(path: Path, fmt: ArchiveFormat) -> dict[str, bytes]:
 
 def _decompress_payload(path: Path, fmt: ArchiveFormat) -> bytes:
     raw = path.read_bytes()
-    if fmt == "gzip":
+    base_fmt = _base_archive_format(fmt)
+    if base_fmt == "gzip":
         return gzip.decompress(raw)
-    if fmt == "bzip2":
+    if base_fmt == "bzip2":
         return bz2.decompress(raw)
-    if fmt == "xz":
+    if base_fmt == "xz":
         return lzma.decompress(raw)
     return raw
 
@@ -1581,9 +1655,27 @@ def _extension_for_format(fmt: ArchiveFormat) -> str:
         "gzip": "gz",
         "bzip2": "bz2",
         "xz": "xz",
+        "zstd": "zst",
         "7z": "7z",
         "rar": "rar",
+        "tar.gz": "tar.gz",
+        "tar.bz2": "tar.bz2",
+        "tar.xz": "tar.xz",
+        "tar.zst": "tar.zst",
     }[fmt]
+
+
+def _base_archive_format(fmt: str) -> ArchiveFormat:
+    normalized = MATERIAL_FORMAT_ALIASES.get(str(fmt or "").strip().lower(), str(fmt or "").strip().lower())
+    if normalized == "tar.gz":
+        return "gzip"
+    if normalized == "tar.bz2":
+        return "bzip2"
+    if normalized == "tar.xz":
+        return "xz"
+    if normalized == "tar.zst":
+        return "zstd"
+    return normalized  # type: ignore[return-value]
 
 
 def _semantic_zones(data: bytes, fmt: ArchiveFormat) -> dict[str, tuple[int, int]]:

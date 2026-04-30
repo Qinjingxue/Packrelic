@@ -27,11 +27,12 @@ from sunpack.repair.candidate import CandidateSelector, candidate_feature_payloa
 DEFAULT_MANIFEST = Path(".sunpack") / "corpus" / "repair_plan_manifest.jsonl"
 DEFAULT_SUCCESS_OUTPUT = Path(".sunpack") / "datasets" / "repair_plan_ltr_success.jsonl"
 DEFAULT_FAILURE_OUTPUT = Path(".sunpack") / "datasets" / "repair_plan_ltr_failure.jsonl"
+DEFAULT_MATERIAL_ROOT = Path("repair_training") / "material"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    records = _load_manifest(Path(args.manifest), args.limit)
+    records = _load_records(args)
     success_output = Path(args.success_output)
     failure_output = Path(args.failure_output)
     success_output.parent.mkdir(parents=True, exist_ok=True)
@@ -84,7 +85,10 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Collect state/action LTR rows from a repair-plan corruption corpus.")
-    parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST), help="Repair-plan corpus manifest JSONL.")
+    parser.add_argument("--manifest", default="", help="Repair-plan corpus manifest JSONL. Defaults to scanning --material-root.")
+    parser.add_argument("--material-root", default=str(DEFAULT_MATERIAL_ROOT), help="Root containing material damage manifests.")
+    parser.add_argument("--formats", default="", help="Optional comma-separated material format filter.")
+    parser.add_argument("--sample", action="append", default=[], help="Optional material sample folder name filter. Repeatable.")
     parser.add_argument("--success-output", default=str(DEFAULT_SUCCESS_OUTPUT), help="Rows for samples with useful/complete actions.")
     parser.add_argument("--failure-output", default=str(DEFAULT_FAILURE_OUTPUT), help="Rows for samples without useful actions.")
     parser.add_argument("--append", action="store_true", help="Append instead of overwriting output files.")
@@ -98,6 +102,45 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--case-timeout-seconds", type=float, default=45.0, help="Terminate one sample after this timeout. Use 0 to disable.")
     parser.add_argument("--progress", action="store_true", help="Print sample START/END progress.")
     return parser
+
+
+def _load_records(args: argparse.Namespace) -> list[dict[str, Any]]:
+    if args.manifest:
+        return _load_manifest(Path(args.manifest), args.limit)
+    manifests = _material_manifests(Path(args.material_root), _csv_filter(args.formats), set(args.sample or []))
+    records: list[dict[str, Any]] = []
+    for manifest in manifests:
+        remaining = max(0, int(args.limit or 0) - len(records)) if args.limit else 0
+        records.extend(_load_manifest(manifest, remaining))
+        if args.limit and len(records) >= args.limit:
+            break
+    if not records:
+        fallback = Path(DEFAULT_MANIFEST)
+        if fallback.is_file():
+            return _load_manifest(fallback, args.limit)
+    return records
+
+
+def _material_manifests(material_root: Path, formats: set[str], samples: set[str]) -> list[Path]:
+    if not material_root.is_dir():
+        return []
+    output = []
+    for manifest in sorted(material_root.glob("*/**/damage_manifest.jsonl")):
+        try:
+            rel = manifest.relative_to(material_root)
+        except ValueError:
+            continue
+        parts = rel.parts
+        if len(parts) < 3:
+            continue
+        fmt = parts[0]
+        sample = parts[1]
+        if formats and fmt not in formats:
+            continue
+        if samples and sample not in samples:
+            continue
+        output.append(manifest)
+    return output
 
 
 def _load_manifest(path: Path, limit: int) -> list[dict[str, Any]]:
@@ -114,6 +157,10 @@ def _load_manifest(path: Path, limit: int) -> list[dict[str, Any]]:
             if limit and len(records) >= limit:
                 break
     return records
+
+
+def _csv_filter(raw: str) -> set[str]:
+    return {item.strip().lower() for item in str(raw or "").split(",") if item.strip()}
 
 
 def _collect_sample_with_timeout(record: dict[str, Any], args: argparse.Namespace) -> tuple[str, list[dict[str, Any]]]:
@@ -278,6 +325,12 @@ def _action_row(
         "query_id": f"{record.get('sample_id')}:{round_index}",
         "sample_id": record.get("sample_id"),
         "source_archive_id": record.get("source_archive_id"),
+        "material_format": record.get("material_format"),
+        "material_sample_id": record.get("material_sample_id"),
+        "source_archive_name": record.get("source_archive_name"),
+        "damaged_file_name": record.get("damaged_file_name"),
+        "damaged_path": record.get("damaged_path"),
+        "damage_json_path": record.get("damage_json_path"),
         "round": round_index,
         "candidate_index": candidate_index,
         "current_rank": rank,
@@ -416,6 +469,10 @@ def _round_empty_row(record: dict[str, Any], round_index: int, state_features: d
         "source": "repair_plan_corpus",
         "query_id": f"{record.get('sample_id')}:{round_index}",
         "sample_id": record.get("sample_id"),
+        "material_format": record.get("material_format"),
+        "material_sample_id": record.get("material_sample_id"),
+        "source_archive_name": record.get("source_archive_name"),
+        "damaged_file_name": record.get("damaged_file_name"),
         "round": round_index,
         "candidate_id": None,
         "module": "",
@@ -434,6 +491,10 @@ def _terminal_row(record: dict[str, Any], status: str, message: str) -> dict[str
         "source": "repair_plan_corpus",
         "query_id": f"{record.get('sample_id')}:terminal",
         "sample_id": record.get("sample_id"),
+        "material_format": record.get("material_format"),
+        "material_sample_id": record.get("material_sample_id"),
+        "source_archive_name": record.get("source_archive_name"),
+        "damaged_file_name": record.get("damaged_file_name"),
         "round": None,
         "candidate_id": None,
         "module": "",

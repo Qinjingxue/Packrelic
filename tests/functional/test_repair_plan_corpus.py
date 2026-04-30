@@ -48,26 +48,38 @@ def test_training_corruption_oracle_marks_wrong_content_hard_negative(tmp_path):
 
 
 def test_repair_plan_corpus_scripts_generate_and_collect_state_action_rows(tmp_path):
-    input_dir = tmp_path / "input"
-    input_dir.mkdir()
-    _write_clean_zip(input_dir / "sample.zip")
-    _write_clean_tar(input_dir / "sample.tar")
-    (input_dir / "sample.gz").write_bytes(gzip.compress(b"gzip corpus payload" * 8))
-
-    corpus_dir = tmp_path / "corpus"
-    manifest = corpus_dir / "repair_plan_manifest.jsonl"
+    material_root = tmp_path / "material"
     build = subprocess.run(
         [
             sys.executable,
             "repair_training/build_repair_plan_corpus.py",
-            "--input-dir",
-            str(input_dir),
-            "--output-dir",
-            str(corpus_dir),
-            "--manifest",
-            str(manifest),
-            "--per-source",
-            "1",
+            "--init-material",
+            "--material-root",
+            str(material_root),
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    init_summary = json.loads(build.stdout.strip())
+    assert {"zip", "7z", "rar", "tar", "gzip", "bzip2", "xz", "zstd", "tar_gz", "tar_bz2", "tar_xz", "tar_zst"} <= set(init_summary["format_dirs"])
+    sample_dir = material_root / "zip" / "sample_a"
+    sample_dir.mkdir()
+    source = sample_dir / "sample.zip"
+    _write_clean_zip(source)
+    old_damaged = sample_dir / "damaged"
+    old_damaged.mkdir()
+    (old_damaged / "stale.txt").write_text("stale", encoding="utf-8")
+
+    build = subprocess.run(
+        [
+            sys.executable,
+            "repair_training/build_repair_plan_corpus.py",
+            "--material-root",
+            str(material_root),
+            "--per-sample",
+            "3",
             "--seed",
             "101",
             "--no-pretty",
@@ -79,9 +91,16 @@ def test_repair_plan_corpus_scripts_generate_and_collect_state_action_rows(tmp_p
     )
     build_summary = json.loads(build.stdout.strip())
     assert build_summary["generated"] == 3
+    assert source.exists()
+    assert not (old_damaged / "stale.txt").exists()
+    manifest = sample_dir / "damage_manifest.jsonl"
     manifest_rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
     assert len(manifest_rows) == 3
     assert all(len(row["corruption_plan"]) >= 2 for row in manifest_rows)
+    assert all(row["material_format"] == "zip" for row in manifest_rows)
+    assert all(row["material_sample_id"] == "sample_a" for row in manifest_rows)
+    damage_jsons = sorted((sample_dir / "damaged").rglob("*.damage.json"))
+    assert len(damage_jsons) == 3
 
     success_output = tmp_path / "repair_plan_ltr_success.jsonl"
     failure_output = tmp_path / "repair_plan_ltr_failure.jsonl"
@@ -89,8 +108,8 @@ def test_repair_plan_corpus_scripts_generate_and_collect_state_action_rows(tmp_p
         [
             sys.executable,
             "repair_training/collect_repair_plan_data.py",
-            "--manifest",
-            str(manifest),
+            "--material-root",
+            str(material_root),
             "--success-output",
             str(success_output),
             "--failure-output",
@@ -114,7 +133,29 @@ def test_repair_plan_corpus_scripts_generate_and_collect_state_action_rows(tmp_p
     assert rows
     assert all("stable_features" in row for row in rows)
     assert all("teacher_features" in row for row in rows)
+    assert all(row["material_format"] == "zip" for row in rows)
+    assert all(row["material_sample_id"] == "sample_a" for row in rows)
+    assert all(row["source_archive_name"] == "sample.zip" for row in rows)
     assert {row["source"] for row in rows} == {"repair_plan_corpus"}
+
+
+def test_material_build_seed_controls_reproducibility(tmp_path):
+    material_root = tmp_path / "material"
+    sample_dir = material_root / "zip" / "sample_seed"
+    sample_dir.mkdir(parents=True)
+    _write_clean_zip(sample_dir / "sample.zip")
+
+    _run_material_build(material_root, seed="777")
+    first = (sample_dir / "damage_manifest.jsonl").read_text(encoding="utf-8")
+    _run_material_build(material_root, seed="777")
+    second = (sample_dir / "damage_manifest.jsonl").read_text(encoding="utf-8")
+    assert first == second
+
+    _run_material_build(material_root, seed="random")
+    random_first = (sample_dir / "damage_manifest.jsonl").read_text(encoding="utf-8")
+    _run_material_build(material_root, seed="random")
+    random_second = (sample_dir / "damage_manifest.jsonl").read_text(encoding="utf-8")
+    assert random_first != random_second
 
 
 def _write_clean_zip(path: Path) -> None:
@@ -137,3 +178,23 @@ def _jsonl(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _run_material_build(material_root: Path, *, seed: str) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "repair_training/build_repair_plan_corpus.py",
+            "--material-root",
+            str(material_root),
+            "--per-sample",
+            "2",
+            "--seed",
+            seed,
+            "--no-pretty",
+        ],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
