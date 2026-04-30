@@ -1004,6 +1004,15 @@ def _build_7z_non_solid_partial_salvage(root: Path) -> MatrixFixture:
     return MatrixFixture(source_input={"kind": "file", "path": str(source)}, zip_entries=entries)
 
 
+def _build_7z_non_solid_with_start_crc_bad(root: Path) -> MatrixFixture:
+    fixture = _build_7z_non_solid_partial_salvage(root)
+    path = Path(fixture.source_input["path"])
+    data = bytearray(path.read_bytes())
+    data[8:12] = b"\0\0\0\0"
+    path.write_bytes(bytes(data))
+    return fixture
+
+
 def _build_7z_crc_then_solid_salvage(root: Path) -> MatrixFixture:
     fixture = _build_7z_solid_block_salvage(root)
     path = Path(fixture.source_input["path"])
@@ -1011,6 +1020,10 @@ def _build_7z_crc_then_solid_salvage(root: Path) -> MatrixFixture:
     data[8:12] = b"\0\0\0\0"
     path.write_bytes(bytes(data))
     return fixture
+
+
+def _build_7z_crc_then_non_solid_salvage(root: Path) -> MatrixFixture:
+    return _build_7z_non_solid_with_start_crc_bad(root)
 
 
 def _require_7z_tool() -> Path:
@@ -1468,6 +1481,12 @@ def _build_gzip_truncated_partial(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "gzip-truncated.gz", data[:len(data) * 9 // 10], stream_payload=payload)
 
 
+def _build_gzip_truncated_partial_with_trailing_junk(root: Path) -> MatrixFixture:
+    payload = _pseudo_random_payload(512 * 1024)
+    data = gzip.compress(payload)
+    return _fixture_from_bytes(root, "gzip-truncated-tail.gz", data[:len(data) * 9 // 10] + b"JUNK", stream_payload=payload)
+
+
 def _build_gzip_payload_bad(root: Path) -> MatrixFixture:
     payload = _pseudo_random_payload(512 * 1024)
     data = bytearray(gzip.compress(payload))
@@ -1500,6 +1519,12 @@ def _build_bzip2_truncated_partial(root: Path) -> MatrixFixture:
     return _fixture_from_bytes(root, "bzip2-truncated.bz2", data[:len(data) * 9 // 10], stream_payload=payload)
 
 
+def _build_bzip2_truncated_with_trailing_junk(root: Path) -> MatrixFixture:
+    payload = _pseudo_random_payload(2 * 1024 * 1024)
+    data = bz2.compress(payload)
+    return _fixture_from_bytes(root, "bzip2-truncated-tail.bz2", data[:len(data) * 9 // 10] + b"JUNK", stream_payload=payload)
+
+
 def _build_bzip2_payload_bad(root: Path) -> MatrixFixture:
     payload = _pseudo_random_payload(2 * 1024 * 1024)
     data = bytearray(bz2.compress(payload))
@@ -1530,6 +1555,12 @@ def _build_xz_truncated_partial(root: Path) -> MatrixFixture:
     payload = _pseudo_random_payload(1024 * 1024)
     data = lzma.compress(payload, format=lzma.FORMAT_XZ)
     return _fixture_from_bytes(root, "xz-truncated.xz", data[:len(data) * 9 // 10], stream_payload=payload)
+
+
+def _build_xz_truncated_with_trailing_junk(root: Path) -> MatrixFixture:
+    payload = _pseudo_random_payload(1024 * 1024)
+    data = lzma.compress(payload, format=lzma.FORMAT_XZ)
+    return _fixture_from_bytes(root, "xz-truncated-tail.xz", data[:len(data) * 9 // 10] + b"JUNK", stream_payload=payload)
 
 
 def _build_xz_payload_bad(root: Path) -> MatrixFixture:
@@ -1630,6 +1661,8 @@ MATRIX = [
     MatrixCase("7z_missing_middle_volume_plus_crc_noise", "7z", ("missing_volume", "input_truncated", "start_header_crc_bad", "next_header_crc_bad", "trailing_junk"), _build_7z_missing_middle_volume_plus_crc_noise, UNREPAIRABLE, None),
     MatrixCase("7z_solid_block_partial_salvage", "7z", ("solid_block_damaged", "packed_stream_bad", "damaged"), _build_7z_solid_block_salvage, ("partial",), "seven_zip_solid_block_partial_salvage", _verify_zip, modules=("seven_zip_solid_block_partial_salvage",)),
     MatrixCase("7z_non_solid_partial_salvage", "7z", ("non_solid", "packed_stream_bad", "damaged", "data_error"), _build_7z_non_solid_partial_salvage, ("partial",), "seven_zip_non_solid_partial_salvage", _verify_zip, modules=("seven_zip_non_solid_partial_salvage",)),
+    MatrixCase("7z_non_solid_start_crc_bad_salvage", "7z", ("non_solid", "start_header_crc_bad", "packed_stream_bad", "damaged"), _build_7z_non_solid_with_start_crc_bad, UNREPAIRABLE, None, modules=("seven_zip_non_solid_partial_salvage",)),
+    MatrixCase("7z_non_solid_generic_folder_bad", "7z", ("folder_bad", "packed_stream_bad", "damaged", "data_error"), _build_7z_non_solid_partial_salvage, ("partial",), "seven_zip_non_solid_partial_salvage", _verify_zip, modules=("seven_zip_non_solid_partial_salvage",)),
     MatrixCase("rar4_trailing_junk", "rar", ("trailing_junk",), _build_rar4_trailing_junk, ("repaired",), "rar_trailing_junk_trim", _verify_bytes),
     MatrixCase("rar5_trailing_junk", "rar", ("trailing_junk",), _build_rar5_trailing_junk, ("repaired",), "rar_trailing_junk_trim", _verify_bytes),
     MatrixCase("rar4_missing_end", "rar", ("missing_end_block", "probably_truncated"), _build_rar4_missing_end, ("repaired",), "rar_end_block_repair", _verify_bytes),
@@ -1665,6 +1698,7 @@ MATRIX = [
     MatrixCase("gzip_trailing_padding", "gzip", ("trailing_padding", "boundary_unreliable"), _build_gzip_trailing_padding, ("repaired",), "gzip_trailing_junk_trim", _verify_gzip),
     MatrixCase("gzip_truncated_partial_recovery", "gzip", ("input_truncated", "probably_truncated", "unexpected_end"), _build_gzip_truncated_partial, ("partial",), "gzip_truncated_partial_recovery", _verify_gzip_prefix, modules=("gzip_truncated_partial_recovery",)),
     MatrixCase("gzip_deflate_prefix_salvage_truncated", "gzip", ("input_truncated", "damaged", "data_error"), _build_gzip_truncated_partial, ("partial",), "gzip_deflate_prefix_salvage", _verify_gzip_prefix, modules=("gzip_deflate_prefix_salvage",)),
+    MatrixCase("gzip_deflate_prefix_salvage_rejects_truncated_tail", "gzip", ("input_truncated", "damaged", "data_error", "trailing_junk"), _build_gzip_truncated_partial_with_trailing_junk, UNREPAIRABLE, None, modules=("gzip_deflate_prefix_salvage",)),
     MatrixCase("gzip_deflate_member_resync", "gzip", ("deflate_resync", "damaged", "data_error"), _build_gzip_deflate_member_resync, ("partial",), "gzip_deflate_member_resync", _verify_gzip),
     MatrixCase("gzip_payload_bad", "gzip", ("checksum_error", "damaged", "data_error"), _build_gzip_payload_bad, UNREPAIRABLE, None, modules=("gzip_deflate_prefix_salvage",)),
     MatrixCase("gzip_payload_bad_with_trailing_junk", "gzip", ("checksum_error", "damaged", "data_error", "trailing_junk"), _build_gzip_payload_bad_with_trailing_junk, UNREPAIRABLE, None, modules=("gzip_deflate_prefix_salvage",)),
@@ -1672,12 +1706,14 @@ MATRIX = [
     MatrixCase("bzip2_trailing_padding", "bzip2", ("trailing_padding", "boundary_unreliable"), _build_bzip2_trailing_padding, ("repaired",), "bzip2_trailing_junk_trim", _verify_bzip2),
     MatrixCase("bzip2_truncated_partial_recovery", "bzip2", ("input_truncated", "probably_truncated", "unexpected_end"), _build_bzip2_truncated_partial, ("partial",), "bzip2_truncated_partial_recovery", _verify_bzip2_prefix, modules=("bzip2_truncated_partial_recovery",)),
     MatrixCase("bzip2_block_salvage_truncated", "bzip2", ("input_truncated", "damaged", "data_error"), _build_bzip2_truncated_partial, ("partial",), "bzip2_block_salvage", _verify_bzip2_prefix, modules=("bzip2_block_salvage",)),
+    MatrixCase("bzip2_block_salvage_rejects_truncated_tail", "bzip2", ("input_truncated", "damaged", "data_error", "trailing_junk"), _build_bzip2_truncated_with_trailing_junk, UNREPAIRABLE, None, modules=("bzip2_block_salvage",)),
     MatrixCase("bzip2_payload_bad", "bzip2", ("checksum_error", "damaged", "data_error"), _build_bzip2_payload_bad, UNREPAIRABLE, None, modules=("bzip2_block_salvage",)),
     MatrixCase("bzip2_payload_bad_with_trailing_junk", "bzip2", ("checksum_error", "damaged", "data_error", "trailing_junk"), _build_bzip2_payload_bad_with_trailing_junk, UNREPAIRABLE, None, modules=("bzip2_block_salvage",)),
     MatrixCase("xz_trailing_junk", "xz", ("trailing_junk",), _build_xz_trailing_junk, ("repaired",), "xz_trailing_junk_trim", _verify_xz),
     MatrixCase("xz_trailing_padding", "xz", ("trailing_padding", "boundary_unreliable"), _build_xz_trailing_padding, ("repaired",), "xz_trailing_junk_trim", _verify_xz),
     MatrixCase("xz_truncated_partial_recovery", "xz", ("input_truncated", "probably_truncated", "unexpected_end"), _build_xz_truncated_partial, ("partial",), "xz_truncated_partial_recovery", _verify_xz_prefix, modules=("xz_truncated_partial_recovery",)),
     MatrixCase("xz_block_salvage_truncated", "xz", ("input_truncated", "damaged", "data_error"), _build_xz_truncated_partial, ("partial",), "xz_block_salvage", _verify_xz_prefix, modules=("xz_block_salvage",)),
+    MatrixCase("xz_block_salvage_rejects_truncated_tail", "xz", ("input_truncated", "damaged", "data_error", "trailing_junk"), _build_xz_truncated_with_trailing_junk, UNREPAIRABLE, None, modules=("xz_block_salvage",)),
     MatrixCase("xz_payload_bad", "xz", ("checksum_error", "damaged", "data_error"), _build_xz_payload_bad, UNREPAIRABLE, None, modules=("xz_block_salvage",)),
     MatrixCase("xz_payload_bad_with_trailing_junk", "xz", ("checksum_error", "damaged", "data_error", "trailing_junk"), _build_xz_payload_bad_with_trailing_junk, UNREPAIRABLE, None, modules=("xz_block_salvage",)),
     MatrixCase("zstd_frame_salvage", "zstd", ("frame_damaged", "damaged", "data_error"), _build_zstd_frame_salvage, ("partial",), "zstd_frame_salvage", _verify_zstd),
@@ -1705,6 +1741,16 @@ MULTI_ROUND_MATRIX = [
         (
             RepairRound(("start_header_crc_bad",), ("repaired",), "seven_zip_start_header_crc_fix", modules=("seven_zip_start_header_crc_fix",)),
             RepairRound(("solid_block_damaged", "packed_stream_bad", "damaged"), ("partial",), "seven_zip_solid_block_partial_salvage", modules=("seven_zip_solid_block_partial_salvage",)),
+        ),
+        _verify_zip,
+    ),
+    MultiRoundCase(
+        "seven_zip_crc_then_non_solid_salvage",
+        "7z",
+        _build_7z_crc_then_non_solid_salvage,
+        (
+            RepairRound(("start_header_crc_bad",), ("repaired",), "seven_zip_start_header_crc_fix", modules=("seven_zip_start_header_crc_fix",)),
+            RepairRound(("non_solid", "packed_stream_bad", "damaged"), ("partial",), "seven_zip_non_solid_partial_salvage", modules=("seven_zip_non_solid_partial_salvage",)),
         ),
         _verify_zip,
     ),

@@ -15,6 +15,7 @@ class CompressionStreamBlockSalvage:
     module_name: str = ""
     strategy: str = "block_salvage"
     route_flags: tuple[str, ...] = ("damaged", "checksum_error", "data_error")
+    reject_flags: tuple[str, ...] = ("trailing_junk", "trailing_padding", "boundary_unreliable")
     action_label: str = "compression stream block salvage"
 
     @property
@@ -32,6 +33,7 @@ class CompressionStreamBlockSalvage:
                     require_any_categories=("content_recovery",),
                     require_any_flags=self.route_flags,
                     require_any_failure_kinds=("checksum_error", "corrupted_data", "data_error"),
+                    reject_any_flags=self.reject_flags,
                     base_score=0.84,
                 ),
             ),
@@ -39,6 +41,8 @@ class CompressionStreamBlockSalvage:
 
     def can_handle(self, job: RepairJob, diagnosis: RepairDiagnosis, config: dict) -> float:
         flags = set(job.damage_flags)
+        if flags & set(self.reject_flags):
+            return 0.0
         if flags & set(self.route_flags):
             return 0.9
         if diagnosis.format in self.aliases and "content_recovery" in diagnosis.categories:
