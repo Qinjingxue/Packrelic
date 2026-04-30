@@ -2,7 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch
+from sunpack.repair.candidate import CandidateSelector, CandidateValidation, RepairCandidate, RepairCandidateBatch, candidate_feature_payload
 from sunpack.repair.capability import ModuleCapabilityDecision, RepairCapabilityDecision
 from sunpack.repair.config import enabled_module_configs, repair_config
 from sunpack.repair.context import RepairContext, build_repair_context
@@ -28,6 +28,8 @@ class RepairScheduler:
             return batch.terminal_result
         selector = CandidateSelector(self.config)
         warnings = list(batch.warnings)
+        selection: dict[str, Any] = {}
+        primary_selection: dict[str, Any] = {}
         if batch.candidates:
             selected, selection = selector.select(_with_job_password_candidates(batch.candidates, job))
             if selected is not None:
@@ -37,17 +39,19 @@ class RepairScheduler:
                 return result
             warnings.extend(selection.get("warnings") or [])
             warnings.append("repair candidates were produced but none passed selection")
+            primary_selection = dict(selection)
             if self._auto_deep_should_escalate(job) and not _batch_used_auto_deep(batch):
                 auto_batch = self._generate_auto_deep_candidates(job)
                 warnings.extend(auto_batch.warnings)
+                batch = _merge_candidate_batches(batch, auto_batch)
                 if auto_batch.candidates:
                     selected, selection = selector.select(_with_job_password_candidates(auto_batch.candidates, job))
                     if selected is not None:
-                        result = selected.to_result(selection=selection)
+                        result = selected.to_result(selection=_merge_candidate_selections(primary_selection, selection))
                         return replace(result, warnings=_dedupe([*result.warnings, *warnings]))
                     warnings.extend(selection.get("warnings") or [])
                     warnings.append("auto_deep candidates were produced but none passed selection")
-        diagnosis = batch.diagnosis
+        diagnosis = _diagnosis_with_candidate_selection(batch.diagnosis, selection)
         return RepairResult(
             status="unrepairable",
             confidence=float(diagnosis.get("confidence", 0.0) or 0.0),
@@ -120,7 +124,7 @@ class RepairScheduler:
                 capability = auto_capability
                 auto_deep_attempted = True
         repair_candidates = [
-            replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability))
+            _with_candidate_features(replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability)))
             for candidate in repair_candidates
         ]
         if auto_deep_attempted:
@@ -128,7 +132,12 @@ class RepairScheduler:
         return RepairCandidateBatch(
             candidates=repair_candidates,
             warnings=_dedupe(warnings),
-            diagnosis=_with_capability_diagnosis(diagnosis.as_dict(), capability),
+            diagnosis=_with_generation_diagnosis(
+                _with_capability_diagnosis(diagnosis.as_dict(), capability),
+                repair_candidates,
+                warnings,
+                auto_deep_attempted=auto_deep_attempted,
+            ),
             message="registered repair modules did not produce a candidate",
         )
 
@@ -158,11 +167,16 @@ class RepairScheduler:
         warnings.append("auto_deep: escalated to limited deep repair after primary stages produced no accepted candidates")
         return RepairCandidateBatch(
             candidates=[
-                replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability))
+                _with_candidate_features(replace(candidate, diagnosis=_with_capability_diagnosis(candidate.diagnosis, capability)))
                 for candidate in repair_candidates
             ],
             warnings=_dedupe(warnings),
-            diagnosis=_with_capability_diagnosis(diagnosis.as_dict(), capability),
+            diagnosis=_with_generation_diagnosis(
+                _with_capability_diagnosis(diagnosis.as_dict(), capability),
+                repair_candidates,
+                warnings,
+                auto_deep_attempted=True,
+            ),
             message="registered repair modules did not produce a candidate",
         )
 
@@ -577,6 +591,67 @@ def _with_capability_diagnosis(
     if capability is not None:
         payload["capability_decision"] = capability.as_dict()
     return payload
+
+
+def _with_candidate_features(candidate: RepairCandidate) -> RepairCandidate:
+    diagnosis = dict(candidate.diagnosis)
+    diagnosis["candidate_features"] = candidate_feature_payload(candidate)
+    return replace(candidate, diagnosis=diagnosis)
+
+
+def _with_generation_diagnosis(
+    diagnosis: dict[str, Any],
+    candidates: list[RepairCandidate],
+    warnings: list[str],
+    *,
+    auto_deep_attempted: bool,
+) -> dict[str, Any]:
+    payload = dict(diagnosis or {})
+    payload["candidate_generation"] = {
+        "candidate_count": len(candidates),
+        "auto_deep_attempted": bool(auto_deep_attempted),
+        "warnings": list(warnings),
+        "candidates": [candidate_feature_payload(candidate) for candidate in candidates],
+    }
+    return payload
+
+
+def _diagnosis_with_candidate_selection(diagnosis: dict[str, Any], selection: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(diagnosis or {})
+    if selection:
+        payload["candidate_selection"] = dict(selection)
+    return payload
+
+
+def _merge_candidate_batches(left: RepairCandidateBatch, right: RepairCandidateBatch) -> RepairCandidateBatch:
+    warnings = _dedupe([*left.warnings, *right.warnings])
+    diagnosis = dict(left.diagnosis or {})
+    right_diagnosis = right.diagnosis if isinstance(right.diagnosis, dict) else {}
+    if right_diagnosis:
+        diagnosis["auto_deep_diagnosis"] = dict(right_diagnosis)
+    return RepairCandidateBatch(
+        candidates=[*left.candidates, *right.candidates],
+        warnings=warnings,
+        diagnosis=diagnosis,
+        message=right.message or left.message,
+        terminal_result=left.terminal_result or right.terminal_result,
+    )
+
+
+def _merge_candidate_selections(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]:
+    if not primary:
+        return dict(secondary or {})
+    if not secondary:
+        return dict(primary or {})
+    merged = dict(secondary)
+    primary_candidates = primary.get("candidates") if isinstance(primary.get("candidates"), list) else []
+    secondary_candidates = secondary.get("candidates") if isinstance(secondary.get("candidates"), list) else []
+    merged["candidates"] = [*primary_candidates, *secondary_candidates]
+    merged["candidate_count"] = int(primary.get("candidate_count", 0) or 0) + int(secondary.get("candidate_count", 0) or 0)
+    merged["accepted_count"] = int(primary.get("accepted_count", 0) or 0) + int(secondary.get("accepted_count", 0) or 0)
+    merged["warnings"] = _dedupe([*(primary.get("warnings") or []), *(secondary.get("warnings") or [])])
+    merged["auto_deep_selection"] = dict(secondary)
+    return merged
 
 
 def _batch_used_auto_deep(batch: RepairCandidateBatch) -> bool:

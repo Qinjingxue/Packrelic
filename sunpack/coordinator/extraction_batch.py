@@ -25,7 +25,7 @@ from sunpack.extraction.result import ExtractionResult
 from sunpack.extraction.scheduler import ExtractionScheduler
 from sunpack.extraction.progress import filter_extraction_manifest_payload, filter_extraction_outputs
 from sunpack.rename.scheduler import RenameScheduler
-from sunpack.repair.candidate import RepairCandidate
+from sunpack.repair.candidate import RepairCandidate, candidate_feature_payload
 from sunpack.verification import RecoveryAttempt, VerificationResult, VerificationScheduler, compare_attempts, rank_attempt
 from sunpack.verification.result import DECISION_ACCEPT, DECISION_ACCEPT_PARTIAL, DECISION_REPAIR, DECISION_RETRY_EXTRACT
 from sunpack.support.path_keys import absolute_path_key
@@ -681,6 +681,7 @@ class ExtractionBatchRunner:
         )
         max_rounds = int((self.repair_stage.config.get("beam") or {}).get("max_rounds", 1) or 1)
         run = beam.run([initial], max_rounds=max_rounds)
+        _append_beam_run_candidate_log(task, run, phase="beam_run")
         best = run.best_state
         if best is None:
             terminal_result = _first_terminal_repair_result(run.terminal_results)
@@ -697,6 +698,11 @@ class ExtractionBatchRunner:
             selected = evaluated.get(digest)
         if selected is None:
             self._cleanup_beam_evaluations(evaluated)
+            _append_repair_candidate_log(task, {
+                "phase": "beam_no_selected_evaluation",
+                "best_state": _beam_state_summary(best),
+                "evaluated_count": len(evaluated),
+            })
             return None
         candidate, extracted, assessed, temp_dir = selected
         self._cleanup_beam_evaluations({
@@ -740,6 +746,13 @@ class ExtractionBatchRunner:
         round_index: int,
     ) -> BatchExtractionOutcome | bool:
         beam_outcome = evaluation.outcome
+        _append_repair_candidate_log(task, {
+            "phase": "beam_evaluation",
+            "candidate": candidate_feature_payload(evaluation.candidate),
+            "verification": _verification_summary(evaluation.verification),
+            "extraction": _extraction_summary(evaluation.result),
+            "temp_dir": evaluation.temp_dir,
+        })
         self._annotate_recovery_outcome(
             task,
             beam_outcome,
@@ -749,6 +762,12 @@ class ExtractionBatchRunner:
         )
         selected = self._select_better_recovery_outcome(incumbent_outcome, beam_outcome)
         if selected is not beam_outcome:
+            _append_repair_candidate_log(task, {
+                "phase": "beam_rejected",
+                "reason": "no_repair_improvement",
+                "candidate": candidate_feature_payload(evaluation.candidate),
+                "comparison": dict(beam_outcome.comparison),
+            })
             loop_state.stop("no_repair_improvement", trigger="verification_beam", result=evaluation.repair_result)
             self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
                 evaluation.candidate,
@@ -768,6 +787,12 @@ class ExtractionBatchRunner:
             return False
 
         if _verification_accepts(evaluation.verification):
+            _append_repair_candidate_log(task, {
+                "phase": "beam_selected",
+                "reason": "verification_accepts",
+                "candidate": candidate_feature_payload(evaluation.candidate),
+                "verification": _verification_summary(evaluation.verification),
+            })
             if self._accept_partial_output(evaluation.result, evaluation.verification):
                 self._filter_partial_outputs(evaluation.result)
             final_result = self._promote_beam_output(evaluation.result, evaluation.temp_dir, out_dir)
@@ -778,6 +803,12 @@ class ExtractionBatchRunner:
         self.analysis_stage.analyze_task(task)
 
         if not bool(beam_outcome.comparison.get("should_continue_repair", True)):
+            _append_repair_candidate_log(task, {
+                "phase": "beam_stop",
+                "reason": "comparison_should_not_continue",
+                "candidate": candidate_feature_payload(evaluation.candidate),
+                "comparison": dict(beam_outcome.comparison),
+            })
             loop_state.stop("no_repair_improvement", trigger="verification_beam", result=evaluation.repair_result)
             self._cleanup_beam_evaluations({evaluation.outcome.attempt_id: (
                 evaluation.candidate,
@@ -794,6 +825,11 @@ class ExtractionBatchRunner:
             evaluation.temp_dir,
         )})
         shutil.rmtree(out_dir, ignore_errors=True)
+        _append_repair_candidate_log(task, {
+            "phase": "beam_continue",
+            "candidate": candidate_feature_payload(evaluation.candidate),
+            "verification": _verification_summary(evaluation.verification),
+        })
         return True
 
     def _apply_beam_candidate_to_task(self, task: ArchiveTask, candidate: RepairCandidate) -> None:
@@ -1011,6 +1047,7 @@ class ExtractionBatchRunner:
         path = task.main_path
         res = outcome.result
         out_dir = res.out_dir
+        _write_repair_candidate_jsonl(task, outcome, out_dir)
 
         with self.context.lock:
             if outcome.success:
@@ -1187,6 +1224,228 @@ def _ensure_recovery_rank(outcome: BatchExtractionOutcome) -> None:
     }
 
 
+def _append_beam_run_candidate_log(task: ArchiveTask, run: Any, *, phase: str) -> None:
+    for round_result in getattr(run, "rounds", []) or []:
+        for item in getattr(round_result, "candidates", []) or []:
+            candidate = getattr(item, "candidate", None)
+            if candidate is None:
+                continue
+            _append_repair_candidate_log(task, {
+                "phase": phase,
+                "round": int(getattr(round_result, "round_index", 0) or 0),
+                "candidate": candidate_feature_payload(candidate),
+                "beam_score": float(getattr(item, "score", 0.0) or 0.0),
+                "analyze": dict(getattr(item, "analyze", {}) or {}),
+                "assessment": dict(getattr(item, "assessment", {}) or {}),
+                "state_in": _beam_state_summary(getattr(item, "state", None)),
+            })
+
+
+def _append_repair_candidate_log(task: ArchiveTask, payload: dict[str, Any]) -> None:
+    fact_bag = getattr(task, "fact_bag", None)
+    if fact_bag is None or not hasattr(fact_bag, "get") or not hasattr(fact_bag, "set"):
+        return
+    entries = fact_bag.get("repair.candidate_log")
+    log = list(entries) if isinstance(entries, list) else []
+    log.append(_jsonable_candidate_log_payload(payload))
+    limit = 200
+    fact_bag.set("repair.candidate_log", log[-limit:])
+
+
+def _write_repair_candidate_jsonl(task: ArchiveTask, outcome: BatchExtractionOutcome, out_dir: str) -> str:
+    entries = task.fact_bag.get("repair.candidate_log")
+    if not isinstance(entries, list) or not entries:
+        return ""
+    target_dir = Path(out_dir) / ".sunpack"
+    target = target_dir / "repair_candidates.jsonl"
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8") as handle:
+            for record in _repair_candidate_jsonl_records(task, outcome, entries):
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str))
+                handle.write("\n")
+        task.fact_bag.set("repair.candidate_log_path", str(target))
+        return str(target)
+    except OSError:
+        return ""
+
+
+def _repair_candidate_jsonl_records(
+    task: ArchiveTask,
+    outcome: BatchExtractionOutcome,
+    entries: list[Any],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            continue
+        base = _candidate_record_base(task, outcome, entry, index=index)
+        selection = entry.get("selection") if isinstance(entry.get("selection"), dict) else {}
+        selection_candidates = selection.get("candidates") if isinstance(selection.get("candidates"), list) else []
+        if selection_candidates:
+            selected_module = str(selection.get("selected_module") or "")
+            selected_id = _candidate_id(entry.get("candidate") if isinstance(entry.get("candidate"), dict) else {})
+            for candidate in selection_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_id = _candidate_id(candidate)
+                selected = bool(candidate_id and candidate_id == selected_id) or (
+                    not selected_id and selected_module and str(candidate.get("module") or "") == selected_module
+                )
+                records.append({
+                    **base,
+                    "phase": f"{base['phase']}.candidate",
+                    "candidate": dict(candidate),
+                    "selected": selected,
+                    "rejected": not selected,
+                    "selection": {
+                        key: value
+                        for key, value in selection.items()
+                        if key != "candidates"
+                    },
+                })
+            continue
+        generation = entry.get("generation") if isinstance(entry.get("generation"), dict) else {}
+        generation_candidates = generation.get("candidates") if isinstance(generation.get("candidates"), list) else []
+        if generation_candidates:
+            for candidate in generation_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                records.append({
+                    **base,
+                    "phase": f"{base['phase']}.generated",
+                    "candidate": dict(candidate),
+                    "selected": False,
+                    "rejected": False,
+                    "generation": {
+                        key: value
+                        for key, value in generation.items()
+                        if key != "candidates"
+                    },
+                })
+        capability = entry.get("capability") if isinstance(entry.get("capability"), dict) else {}
+        module_records = capability.get("modules") if isinstance(capability.get("modules"), list) else []
+        for module in module_records:
+            if not isinstance(module, dict):
+                continue
+            records.append({
+                **base,
+                "phase": f"{base['phase']}.module_feedback",
+                "module_feedback": dict(module),
+                "selected": bool(module.get("selected")),
+                "rejected": not bool(module.get("selected")),
+            })
+        if generation_candidates or module_records:
+            continue
+        records.append({
+            **base,
+            "candidate": dict(entry.get("candidate") or {}) if isinstance(entry.get("candidate"), dict) else {},
+            "selected": _candidate_log_selected(entry),
+            "rejected": _candidate_log_rejected(entry),
+        })
+    return records
+
+
+def _candidate_record_base(
+    task: ArchiveTask,
+    outcome: BatchExtractionOutcome,
+    entry: dict[str, Any],
+    *,
+    index: int,
+) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "index": index,
+        "archive": task.main_path,
+        "archive_key": task.key,
+        "logical_name": str(task.logical_name or ""),
+        "attempt_id": str(entry.get("attempt_id") or outcome.attempt_id or ""),
+        "attempt_source": outcome.attempt_source,
+        "round": int(entry.get("round", outcome.round_index or 0) or 0),
+        "phase": str(entry.get("phase") or ""),
+        "repair_module": str(entry.get("repair_module") or outcome.repair_module or ""),
+        "patch_digest": str(entry.get("patch_digest") or outcome.patch_digest or ""),
+        "verification": dict(entry.get("verification") or _verification_summary(outcome.verification)) if outcome.verification is not None else dict(entry.get("verification") or {}),
+        "extraction": dict(entry.get("extraction") or _extraction_summary(outcome.result)),
+        "comparison": dict(entry.get("comparison") or outcome.comparison),
+        "reason": str(entry.get("reason") or ""),
+    }
+
+
+def _candidate_log_selected(entry: dict[str, Any]) -> bool:
+    phase = str(entry.get("phase") or "")
+    return phase in {"beam_selected", "scheduler_repair"} or bool(entry.get("selected"))
+
+
+def _candidate_log_rejected(entry: dict[str, Any]) -> bool:
+    phase = str(entry.get("phase") or "")
+    return phase in {"beam_rejected", "beam_stop"} or bool(entry.get("rejected"))
+
+
+def _candidate_id(candidate: dict[str, Any]) -> str:
+    return str(candidate.get("candidate_id") or "")
+
+
+def _jsonable_candidate_log_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+
+
+def _beam_state_summary(state: Any) -> dict[str, Any]:
+    if state is None:
+        return {}
+    return {
+        "digest": getattr(state, "digest", ""),
+        "format": getattr(state, "format", ""),
+        "round_index": int(getattr(state, "round_index", 0) or 0),
+        "score": float(getattr(state, "score", 0.0) or 0.0),
+        "completeness": float(getattr(state, "completeness", 0.0) or 0.0),
+        "recoverable_upper_bound": float(getattr(state, "recoverable_upper_bound", 1.0) or 1.0),
+        "assessment_status": str(getattr(state, "assessment_status", "") or ""),
+        "source_integrity": str(getattr(state, "source_integrity", "") or ""),
+        "decision_hint": str(getattr(state, "decision_hint", "") or ""),
+        "actions": list(getattr(state, "actions", []) or []),
+    }
+
+
+def _verification_summary(verification: VerificationResult | Any) -> dict[str, Any]:
+    coverage = getattr(verification, "archive_coverage", None)
+    return {
+        "decision_hint": getattr(verification, "decision_hint", ""),
+        "assessment_status": getattr(verification, "assessment_status", ""),
+        "source_integrity": getattr(verification, "source_integrity", ""),
+        "completeness": float(getattr(verification, "completeness", 0.0) or 0.0),
+        "recoverable_upper_bound": float(getattr(verification, "recoverable_upper_bound", 1.0) or 1.0),
+        "complete_files": int(getattr(verification, "complete_files", 0) or 0),
+        "partial_files": int(getattr(verification, "partial_files", 0) or 0),
+        "failed_files": int(getattr(verification, "failed_files", 0) or 0),
+        "missing_files": int(getattr(verification, "missing_files", 0) or 0),
+        "archive_coverage": {
+            "completeness": float(getattr(coverage, "completeness", 0.0) or 0.0) if coverage is not None else 0.0,
+            "expected_files": int(getattr(coverage, "expected_files", 0) or 0) if coverage is not None else 0,
+            "complete_files": int(getattr(coverage, "complete_files", 0) or 0) if coverage is not None else 0,
+            "partial_files": int(getattr(coverage, "partial_files", 0) or 0) if coverage is not None else 0,
+            "failed_files": int(getattr(coverage, "failed_files", 0) or 0) if coverage is not None else 0,
+            "missing_files": int(getattr(coverage, "missing_files", 0) or 0) if coverage is not None else 0,
+        },
+    }
+
+
+def _extraction_summary(result: ExtractionResult) -> dict[str, Any]:
+    diagnostics = result.diagnostics if isinstance(result.diagnostics, dict) else {}
+    worker = diagnostics.get("result") if isinstance(diagnostics.get("result"), dict) else {}
+    return {
+        "success": bool(result.success),
+        "partial_outputs": bool(result.partial_outputs),
+        "error": result.error,
+        "progress_manifest": result.progress_manifest,
+        "failure_stage": worker.get("failure_stage") or diagnostics.get("failure_stage"),
+        "failure_kind": worker.get("failure_kind") or diagnostics.get("failure_kind"),
+        "native_status": worker.get("native_status"),
+        "files_written": worker.get("files_written"),
+        "bytes_written": worker.get("bytes_written"),
+    }
+
+
 
 
 def _rank_payload(rank) -> dict[str, Any]:
@@ -1344,6 +1603,8 @@ def _write_recovery_report(
         "selected_attempt": dict(outcome.recovery_rank),
         "comparison": dict(outcome.comparison),
         "rejected_attempts": list(outcome.rejected_attempts),
+        "repair_candidate_log": list(task.fact_bag.get("repair.candidate_log") or []),
+        "repair_candidate_log_path": str(task.fact_bag.get("repair.candidate_log_path") or ""),
         "files": _file_recovery_items(verification, manifest=manifest),
     }
     target = Path(out_dir) / ".sunpack" / "recovery_report.json"

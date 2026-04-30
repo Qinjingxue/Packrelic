@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,12 @@ class VerificationEvidence:
     fact_bag: Any
     health: dict[str, Any]
     analysis: dict[str, Any]
+    analysis_facts: dict[str, Any] = field(default_factory=dict)
+    archive_state_analysis: dict[str, Any] = field(default_factory=dict)
+    extraction_diagnostics: dict[str, Any] = field(default_factory=dict)
+    worker_result: dict[str, Any] = field(default_factory=dict)
+    worker_native_diagnostics: dict[str, Any] = field(default_factory=dict)
+    repair_hints: dict[str, Any] = field(default_factory=dict)
     selected_codepage: str | None = None
     progress_manifest: dict[str, Any] | None = None
 
@@ -40,6 +46,10 @@ def build_verification_evidence(
         password = fact_bag.get("archive.password")
     archive_state = task.archive_state()
     archive_input = archive_state.to_archive_input_descriptor()
+    analysis_facts = _analysis_facts(fact_bag)
+    extraction_diagnostics = dict(extraction_result.diagnostics or {})
+    worker_result = _worker_result(extraction_diagnostics)
+    worker_native_diagnostics = _worker_native_diagnostics(worker_result)
     return VerificationEvidence(
         task=task,
         extraction_result=extraction_result,
@@ -53,6 +63,12 @@ def build_verification_evidence(
         fact_bag=fact_bag,
         health=dict(fact_bag.get("resource.health") or {}),
         analysis=dict(fact_bag.get("resource.analysis") or {}),
+        analysis_facts=analysis_facts,
+        archive_state_analysis=dict(archive_state.analysis or {}),
+        extraction_diagnostics=extraction_diagnostics,
+        worker_result=worker_result,
+        worker_native_diagnostics=worker_native_diagnostics,
+        repair_hints=_repair_hints(analysis_facts, archive_state, worker_result, worker_native_diagnostics),
         selected_codepage=extraction_result.selected_codepage,
         progress_manifest=_load_progress_manifest(extraction_result),
     )
@@ -74,3 +90,49 @@ def _load_progress_manifest(extraction_result: ExtractionResult) -> dict[str, An
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _analysis_facts(fact_bag: Any) -> dict[str, Any]:
+    if fact_bag is None or not hasattr(fact_bag, "to_dict"):
+        return {}
+    facts = fact_bag.to_dict()
+    if not isinstance(facts, dict):
+        return {}
+    prefix = "analysis."
+    return {
+        key[len(prefix):]: value
+        for key, value in facts.items()
+        if isinstance(key, str) and key.startswith(prefix)
+    }
+
+
+def _worker_result(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    result = diagnostics.get("result") if isinstance(diagnostics, dict) else {}
+    return dict(result) if isinstance(result, dict) else {}
+
+
+def _worker_native_diagnostics(worker_result: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = worker_result.get("diagnostics") if isinstance(worker_result, dict) else {}
+    return dict(diagnostics) if isinstance(diagnostics, dict) else {}
+
+
+def _repair_hints(
+    analysis_facts: dict[str, Any],
+    archive_state: ArchiveState,
+    worker_result: dict[str, Any],
+    worker_native_diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    segment = analysis_facts.get("segment") if isinstance(analysis_facts.get("segment"), dict) else {}
+    state_analysis = archive_state.analysis if isinstance(archive_state.analysis, dict) else {}
+    hints = {
+        "selected_format": analysis_facts.get("selected_format") or state_analysis.get("selected_format") or archive_state.format_hint or archive_state.source.format_hint,
+        "analysis_status": analysis_facts.get("status") or state_analysis.get("status"),
+        "analysis_confidence": state_analysis.get("confidence"),
+        "segment_start": segment.get("start_offset"),
+        "segment_end": segment.get("end_offset"),
+        "damage_flags": list(segment.get("damage_flags") or []),
+        "failure_stage": worker_result.get("failure_stage") or worker_native_diagnostics.get("failure_stage"),
+        "failure_kind": worker_result.get("failure_kind") or worker_native_diagnostics.get("failure_kind"),
+        "native_status": worker_result.get("native_status") or worker_native_diagnostics.get("native_status"),
+    }
+    return {key: value for key, value in hints.items() if value not in (None, "", [])}

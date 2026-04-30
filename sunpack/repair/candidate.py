@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -131,16 +133,25 @@ class CandidateSelector:
                 "accepted_count": 0,
                 "message": "no accepted repair candidates",
                 "warnings": _selection_warnings(validated),
+                "candidates": [candidate_feature_payload(candidate) for candidate in validated],
             }
         scored = [(self.generation_priority(candidate), candidate) for candidate in accepted]
         scored.sort(key=lambda item: item[0], reverse=True)
         priority, selected = scored[0]
+        selected = replace(
+            selected,
+            diagnosis={
+                **selected.diagnosis,
+                "candidate_features": candidate_feature_payload(selected),
+            },
+        )
         return selected, {
             "candidate_count": len(validated),
             "accepted_count": len(accepted),
             "selected_module": selected.module_name,
             "selected_format": selected.format,
             "generation_priority": priority,
+            "candidates": [candidate_feature_payload(candidate) for candidate in validated],
             "validations": [
                 {
                     "name": validation.name,
@@ -327,6 +338,150 @@ class CandidateSelector:
         if _content_damage_candidate(candidate) and not candidate.partial and native_validation is None:
             score = min(score, 0.45)
         return _clamp01(score)
+
+
+def candidate_feature_payload(candidate: RepairCandidate) -> dict[str, Any]:
+    validations = [
+        {
+            "name": validation.name,
+            "accepted": bool(validation.accepted),
+            "score": float(validation.score or 0.0),
+            "warnings": list(validation.warnings),
+            "details": _compact_validation_details(validation.details),
+        }
+        for validation in candidate.validations
+    ]
+    native_validation = _native_validation(candidate.validations)
+    return {
+        "candidate_id": candidate_digest(candidate),
+        "module": candidate.module_name,
+        "format": candidate.format,
+        "status": candidate.status,
+        "stage": candidate.stage,
+        "confidence": float(candidate.confidence or 0.0),
+        "score_hint": float(candidate.score_hint or 0.0),
+        "generation_priority": CandidateSelector.generation_priority(candidate),
+        "partial": bool(candidate.partial),
+        "lazy": bool(candidate.is_lazy),
+        "materialized": bool(candidate.materialized),
+        "requires_native_validation": bool(candidate.requires_native_validation),
+        "actions": list(candidate.actions),
+        "damage_flags": list(candidate.damage_flags),
+        "patch_cost": _patch_plan_cost(candidate),
+        "input_kind": _candidate_input_kind(candidate),
+        "has_archive_state_plan": _has_archive_state_plan(candidate),
+        "validation_count": len(candidate.validations),
+        "native_validation_score": float(native_validation.score or 0.0) if native_validation is not None else None,
+        "validations": validations,
+    }
+
+
+def candidate_digest(candidate: RepairCandidate) -> str:
+    payload = {
+        "module": candidate.module_name,
+        "format": candidate.format,
+        "status": candidate.status,
+        "stage": candidate.stage,
+        "actions": candidate.actions,
+        "damage_flags": candidate.damage_flags,
+        "repaired_input": _source_input_shape(candidate.repaired_input),
+        "plan": _plan_shape(candidate.plan),
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _compact_validation_details(details: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(details, dict):
+        return {}
+    output = {}
+    for key in (
+        "module",
+        "stage",
+        "lazy",
+        "status",
+        "path",
+        "kind",
+        "format_hint",
+        "archive_coverage",
+        "dry_run",
+        "probe",
+        "test",
+    ):
+        if key not in details:
+            continue
+        value = details[key]
+        if isinstance(value, dict):
+            output[key] = {
+                inner_key: inner_value
+                for inner_key, inner_value in value.items()
+                if inner_key in {
+                    "status",
+                    "ok",
+                    "is_archive",
+                    "is_broken",
+                    "is_encrypted",
+                    "checksum_error",
+                    "item_count",
+                    "archive_type",
+                    "failure_stage",
+                    "failure_kind",
+                    "files_written",
+                    "bytes_written",
+                    "expected_files",
+                    "complete_files",
+                    "completeness",
+                }
+            }
+        else:
+            output[key] = value
+    return output
+
+
+def _patch_plan_cost(candidate: RepairCandidate) -> float:
+    return _clamp01(1.0 - _patch_plan_priority(candidate))
+
+
+def _candidate_input_kind(candidate: RepairCandidate) -> str:
+    repaired_input = candidate.repaired_input if isinstance(candidate.repaired_input, dict) else {}
+    return str(repaired_input.get("kind") or repaired_input.get("open_mode") or "")
+
+
+def _has_archive_state_plan(candidate: RepairCandidate) -> bool:
+    plan = candidate.plan if isinstance(candidate.plan, dict) else {}
+    return isinstance(plan.get("archive_state"), dict)
+
+
+def _source_input_shape(raw: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        "kind": raw.get("kind") or raw.get("open_mode") or "",
+        "format_hint": raw.get("format_hint") or raw.get("format") or "",
+        "path_present": bool(raw.get("path") or raw.get("archive_path") or raw.get("entry_path")),
+        "ranges": len(raw.get("ranges") or []),
+        "parts": len(raw.get("parts") or []),
+        "patch_digest": raw.get("patch_digest") or "",
+    }
+
+
+def _plan_shape(plan: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(plan, dict):
+        return {}
+    archive_state = plan.get("archive_state") if isinstance(plan.get("archive_state"), dict) else {}
+    patches = archive_state.get("patches") or archive_state.get("patch_stack") or []
+    operation_count = 0
+    for patch in patches:
+        if isinstance(patch, dict):
+            operation_count += len([item for item in patch.get("operations") or [] if isinstance(item, dict)])
+    return {
+        "module": plan.get("module") or "",
+        "stage": plan.get("stage") or "",
+        "lazy": bool(plan.get("lazy")),
+        "has_archive_state": bool(archive_state),
+        "patch_count": len(patches),
+        "patch_operation_count": operation_count,
+        "patch_digest": archive_state.get("patch_digest") or plan.get("patch_digest") or "",
+    }
 
 
 def _selection_warnings(candidates: list[RepairCandidate]) -> list[str]:

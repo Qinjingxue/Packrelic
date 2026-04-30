@@ -51,6 +51,7 @@ class ArchiveRepairStage:
         task.fact_bag.set("repair.last_trigger", trigger)
         result = self.scheduler.repair(job)
         task.fact_bag.set("repair.last_result", self._result_payload(result))
+        _append_candidate_log_from_result(task, result, phase="scheduler_repair", trigger=trigger)
         if not result.ok:
             return result
         task.fact_bag.set("repair.status", result.status)
@@ -416,3 +417,32 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _append_candidate_log_from_result(task: ArchiveTask, result: RepairResult, *, phase: str, trigger: str) -> None:
+    diagnosis = result.diagnosis if isinstance(result.diagnosis, dict) else {}
+    features = diagnosis.get("candidate_features") if isinstance(diagnosis.get("candidate_features"), dict) else {}
+    selection = diagnosis.get("candidate_selection") if isinstance(diagnosis.get("candidate_selection"), dict) else {}
+    generation = diagnosis.get("candidate_generation") if isinstance(diagnosis.get("candidate_generation"), dict) else {}
+    capability = diagnosis.get("capability_decision") if isinstance(diagnosis.get("capability_decision"), dict) else {}
+    if not features and not selection and not generation and not capability:
+        return
+    entries = task.fact_bag.get("repair.candidate_log")
+    log = list(entries) if isinstance(entries, list) else []
+    log.append({
+        "phase": phase,
+        "trigger": trigger,
+        "candidate": dict(features),
+        "selection": dict(selection),
+        "generation": dict(generation),
+        "capability": dict(capability),
+        "result": {
+            "status": result.status,
+            "ok": result.ok,
+            "module": result.module_name,
+            "format": result.format,
+            "confidence": float(result.confidence or 0.0),
+            "partial": bool(result.partial),
+        },
+    })
+    task.fact_bag.set("repair.candidate_log", log[-200:])

@@ -134,8 +134,9 @@ class ExpectedNamePresenceMethod:
         if not candidates and state_manifest is not None and state_manifest.ok:
             candidates.extend(state_manifest.expected_names)
         if not candidates:
+            analysis = _merged_analysis(evidence)
             for field in NAME_FIELDS:
-                candidates.extend(_iter_name_values(evidence.analysis.get(field)))
+                candidates.extend(_iter_name_values(analysis.get(field)))
         if not candidates:
             candidates.extend(_iter_name_values(_fact_value(evidence.fact_bag, "verification.expected_names")))
 
@@ -209,7 +210,7 @@ def _source_integrity_hint(evidence: VerificationEvidence, state_manifest: Archi
             return SOURCE_INTEGRITY_COMPLETE
         if state_manifest.status == STATUS_DAMAGED or state_manifest.damaged:
             return SOURCE_INTEGRITY_DAMAGED
-    analysis = evidence.analysis or {}
+    analysis = _merged_analysis(evidence)
     status = str(analysis.get("status") or "")
     if status in {"damaged", "weak"}:
         return SOURCE_INTEGRITY_DAMAGED
@@ -226,10 +227,18 @@ def _expected_names_are_strong(
         return True
     if state_manifest is not None and state_manifest.ok and state_manifest.expected_names:
         return True
-    source = str(config.get("expected_names_source") or evidence.analysis.get("expected_names_source") or "")
+    source = str(config.get("expected_names_source") or _merged_analysis(evidence).get("expected_names_source") or "")
     if source in {"user", "central_directory", "manifest"}:
         return True
     return source_integrity == SOURCE_INTEGRITY_COMPLETE
+
+
+def _merged_analysis(evidence: VerificationEvidence) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for payload in (evidence.archive_state_analysis, evidence.analysis_facts, evidence.analysis):
+        if isinstance(payload, dict):
+            merged.update(payload)
+    return merged
 
 
 def _coverage_actual(coverage, state_manifest: ArchiveStateManifest | None, evidence: VerificationEvidence) -> dict[str, Any]:

@@ -154,7 +154,7 @@ def _source_integrity_hint(evidence: VerificationEvidence, state_manifest: Archi
         if state_manifest.status == STATUS_DAMAGED or state_manifest.damaged:
             return SOURCE_INTEGRITY_DAMAGED
     health = evidence.health or {}
-    analysis = evidence.analysis or {}
+    analysis = _merged_analysis(evidence)
     status = str(analysis.get("status") or health.get("status") or "")
     if status in {"extractable", "ok", "complete"}:
         return SOURCE_INTEGRITY_COMPLETE
@@ -165,8 +165,9 @@ def _source_integrity_hint(evidence: VerificationEvidence, state_manifest: Archi
 
 def _expected_names(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest | None = None) -> list[str]:
     names = list(state_manifest.expected_names) if state_manifest is not None and state_manifest.ok else []
+    analysis = _merged_analysis(evidence)
     for field in ("expected_names", "manifest_names", "item_names", "file_names", "paths"):
-        names.extend(_iter_names(evidence.analysis.get(field)))
+        names.extend(_iter_names(analysis.get(field)))
     result = []
     seen = set()
     for name in names:
@@ -180,13 +181,21 @@ def _expected_names(evidence: VerificationEvidence, state_manifest: ArchiveState
 def _expected_file_count(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest) -> int:
     if state_manifest.ok and state_manifest.file_count > 0:
         return state_manifest.file_count
-    return _as_int(evidence.analysis.get("file_count"))
+    return _as_int(_merged_analysis(evidence).get("file_count"))
 
 
 def _expected_total_size(evidence: VerificationEvidence, state_manifest: ArchiveStateManifest) -> int:
     if state_manifest.ok and state_manifest.total_unpacked_size > 0:
         return state_manifest.total_unpacked_size
-    return _as_int(evidence.analysis.get("total_unpacked_size"))
+    return _as_int(_merged_analysis(evidence).get("total_unpacked_size"))
+
+
+def _merged_analysis(evidence: VerificationEvidence) -> dict:
+    merged = {}
+    for payload in (evidence.archive_state_analysis, evidence.analysis_facts, evidence.analysis):
+        if isinstance(payload, dict):
+            merged.update(payload)
+    return merged
 
 
 def _coverage_actual(coverage, state_manifest: ArchiveStateManifest, evidence: VerificationEvidence) -> dict:
