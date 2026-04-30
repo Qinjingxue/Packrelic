@@ -573,6 +573,7 @@ class RepairScheduler:
             with target.open("a", encoding="utf-8") as handle:
                 for record in records:
                     handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+            _write_pretty_telemetry(_telemetry_pretty_target(target), records)
         except OSError:
             return
 
@@ -624,6 +625,28 @@ def _telemetry_records(
 def _telemetry_target(result: RepairResult) -> Path:
     suffix = "success" if result.ok and result.status in {"repaired", "partial"} else "failure"
     return Path(".sunpack") / "datasets" / f"repair_candidates_runtime_{suffix}.jsonl"
+
+
+def _telemetry_pretty_target(path: Path) -> Path:
+    suffix = "".join(path.suffixes)
+    if suffix:
+        return path.with_name(path.name.removesuffix(suffix) + ".pretty.json")
+    return path.with_name(path.name + ".pretty.json")
+
+
+def _write_pretty_telemetry(path: Path, records: list[dict[str, Any]]) -> None:
+    existing: list[Any] = []
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            loaded = []
+        if isinstance(loaded, list):
+            existing = loaded
+    path.write_text(
+        json.dumps([*existing, *records], ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
 
 
 def _telemetry_candidate_features(batch: RepairCandidateBatch, selection: dict[str, Any]) -> list[dict[str, Any]]:

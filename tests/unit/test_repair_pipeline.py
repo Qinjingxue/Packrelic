@@ -421,11 +421,16 @@ def test_repair_scheduler_telemetry_writes_compact_ltr_records(tmp_path, monkeyp
             registry.register(previous)
 
     target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_success.jsonl"
+    pretty_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_success.pretty.json"
     failure_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_failure.jsonl"
+    failure_pretty_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_failure.pretty.json"
     rows = [json.loads(line) for line in target.read_text(encoding="utf-8").splitlines()]
+    pretty_rows = json.loads(pretty_target.read_text(encoding="utf-8"))
     assert result.ok is True
     assert not failure_target.exists()
+    assert not failure_pretty_target.exists()
     assert len(rows) == 2
+    assert pretty_rows == rows
     assert {row["source"] for row in rows} == {"runtime.repair.telemetry"}
     assert {row["query_id"] for row in rows} == {"telemetry:0"}
     assert sum(1 for row in rows if row["candidate_selected"]) == 1
@@ -459,11 +464,16 @@ def test_repair_scheduler_telemetry_splits_failed_repair_records(tmp_path, monke
             registry.register(previous)
 
     success_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_success.jsonl"
+    success_pretty_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_success.pretty.json"
     failure_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_failure.jsonl"
+    failure_pretty_target = tmp_path / ".sunpack" / "datasets" / "repair_candidates_runtime_failure.pretty.json"
     rows = [json.loads(line) for line in failure_target.read_text(encoding="utf-8").splitlines()]
+    pretty_rows = json.loads(failure_pretty_target.read_text(encoding="utf-8"))
     assert result.ok is False
     assert not success_target.exists()
+    assert not success_pretty_target.exists()
     assert len(rows) == 1
+    assert pretty_rows == rows
     assert rows[0]["source"] == "runtime.repair.telemetry"
     assert rows[0]["query_id"] == "telemetry-failed:0"
     assert rows[0]["result_status"] == "unrepairable"

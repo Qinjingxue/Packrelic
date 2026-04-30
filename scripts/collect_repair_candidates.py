@@ -18,52 +18,67 @@ from sunpack.repair.candidate import candidate_feature_payload
 from tests.functional import test_repair_capability_matrix as matrix
 
 
-DEFAULT_LTR_OUTPUT = Path(".sunpack") / "datasets" / "repair_candidates_ltr_from_tests.jsonl"
+DEFAULT_SUCCESS_OUTPUT = Path(".sunpack") / "datasets" / "repair_candidates_ltr_success_from_tests.jsonl"
+DEFAULT_FAILURE_OUTPUT = Path(".sunpack") / "datasets" / "repair_candidates_ltr_failure_from_tests.jsonl"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     cases = _selected_cases(args.case, args.limit)
-    ltr_output = Path(args.output or args.ltr_output)
+    success_output = Path(args.output or args.success_output)
+    failure_output = Path(args.failure_output)
     debug_output = Path(args.debug_output) if args.debug_output else None
-    ltr_output.parent.mkdir(parents=True, exist_ok=True)
+    success_output.parent.mkdir(parents=True, exist_ok=True)
+    failure_output.parent.mkdir(parents=True, exist_ok=True)
     if debug_output is not None:
         debug_output.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if args.append else "w"
 
     summary = {
         "cases": 0,
-        "ltr_records": 0,
+        "success_records": 0,
+        "failure_records": 0,
         "debug_records": 0,
         "verified": 0,
         "failed": 0,
         "skipped": 0,
-        "ltr_output": str(ltr_output),
+        "success_output": str(success_output),
+        "failure_output": str(failure_output),
     }
-    ltr_pretty_records: list[dict[str, Any]] = []
+    success_pretty = _pretty_path(success_output)
+    failure_pretty = _pretty_path(failure_output)
+    success_pretty_records: list[dict[str, Any]] = _load_pretty_records(success_pretty) if args.pretty and args.append else []
+    failure_pretty_records: list[dict[str, Any]] = _load_pretty_records(failure_pretty) if args.pretty and args.append else []
     debug_pretty_records: list[dict[str, Any]] = []
     debug_handle = debug_output.open(mode, encoding="utf-8") if debug_output is not None else None
+    success_handle = None
+    failure_handle = None
     try:
-        ltr_handle = ltr_output.open(mode, encoding="utf-8")
+        success_handle = success_output.open(mode, encoding="utf-8")
+        failure_handle = failure_output.open(mode, encoding="utf-8")
         try:
             _collect_to_outputs(
                 cases,
                 args,
-                ltr_handle,
+                success_handle,
+                failure_handle,
                 debug_handle,
-                ltr_pretty_records,
+                success_pretty_records,
+                failure_pretty_records,
                 debug_pretty_records,
                 summary,
             )
         finally:
-            ltr_handle.close()
+            success_handle.close()
+            failure_handle.close()
     finally:
         if debug_handle is not None:
             debug_handle.close()
     if args.pretty:
-        ltr_pretty = _pretty_path(ltr_output)
-        ltr_pretty.write_text(json.dumps(ltr_pretty_records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-        summary["ltr_pretty_output"] = str(ltr_pretty)
+        success_pretty.write_text(json.dumps(success_pretty_records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        failure_pretty.write_text(json.dumps(failure_pretty_records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        summary["success_pretty_output"] = str(success_pretty)
+        summary["failure_pretty_output"] = str(failure_pretty)
         if debug_output is not None:
             debug_pretty = _pretty_path(debug_output)
             debug_pretty.write_text(json.dumps(debug_pretty_records, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -76,27 +91,37 @@ def main(argv: list[str] | None = None) -> int:
 def _collect_to_outputs(
     cases: list[Any],
     args: argparse.Namespace,
-    ltr_handle,
+    success_handle,
+    failure_handle,
     debug_handle,
-    ltr_pretty_records: list[dict[str, Any]],
+    success_pretty_records: list[dict[str, Any]],
+    failure_pretty_records: list[dict[str, Any]],
     debug_pretty_records: list[dict[str, Any]],
     summary: dict[str, Any],
 ) -> None:
     for case in cases:
         case_summary, debug_records = _collect_case(case)
         ltr_records = [_ltr_record(record) for record in debug_records]
+        is_success_case = _case_has_repair_success(case_summary)
         if args.pretty:
-            ltr_pretty_records.extend(ltr_records)
+            if is_success_case:
+                success_pretty_records.extend(ltr_records)
+            else:
+                failure_pretty_records.extend(ltr_records)
             if debug_handle is not None:
                 debug_pretty_records.extend(debug_records)
         summary["cases"] += 1
-        summary["ltr_records"] += len(ltr_records)
+        if is_success_case:
+            summary["success_records"] += len(ltr_records)
+        else:
+            summary["failure_records"] += len(ltr_records)
         summary["debug_records"] += len(debug_records) if debug_handle is not None else 0
         summary["verified"] += 1 if case_summary["verified_by_test"] else 0
         summary["failed"] += 1 if case_summary["collection_status"] == "failed" else 0
         summary["skipped"] += 1 if case_summary["collection_status"] == "skipped" else 0
+        target_handle = success_handle if is_success_case else failure_handle
         for record in ltr_records:
-            ltr_handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+            target_handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
         if debug_handle is not None:
             for record in debug_records:
                 debug_handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n")
@@ -111,12 +136,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         default=None,
-        help="LTR JSONL target path. Alias for --ltr-output.",
+        help="Success LTR JSONL target path. Alias for --success-output.",
     )
     parser.add_argument(
-        "--ltr-output",
-        default=str(DEFAULT_LTR_OUTPUT),
-        help="Compact LTR JSONL target path.",
+        "--success-output",
+        default=str(DEFAULT_SUCCESS_OUTPUT),
+        help="Compact LTR JSONL target path for repaired/partial test cases.",
+    )
+    parser.add_argument(
+        "--failure-output",
+        default=str(DEFAULT_FAILURE_OUTPUT),
+        help="Compact LTR JSONL target path for unrepairable/failed test cases.",
     )
     parser.add_argument(
         "--debug-output",
@@ -124,7 +154,9 @@ def _parser() -> argparse.ArgumentParser:
         help="Optional debug JSONL target path with candidate explanations. Omitted by default.",
     )
     parser.add_argument("--append", action="store_true", help="Append instead of overwriting the JSONL file.")
-    parser.add_argument("--pretty", action="store_true", help="Also write formatted .pretty.json files for manual inspection.")
+    parser.set_defaults(pretty=True)
+    parser.add_argument("--pretty", action="store_true", help="Also write formatted .pretty.json files for manual inspection. Enabled by default.")
+    parser.add_argument("--no-pretty", action="store_false", dest="pretty", help="Only write compact JSONL files.")
     parser.add_argument("--case", action="append", default=[], help="Collect only a specific matrix case id. Repeatable.")
     parser.add_argument("--limit", type=int, default=0, help="Collect at most N cases after case filtering.")
     parser.add_argument("--verbose", action="store_true", help="Print one summary line per case.")
@@ -149,6 +181,22 @@ def _pretty_path(path: Path) -> Path:
     if suffix:
         return path.with_name(path.name.removesuffix(suffix) + ".pretty.json")
     return path.with_name(path.name + ".pretty.json")
+
+
+def _load_pretty_records(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [item for item in loaded if isinstance(item, dict)]
+
+
+def _case_has_repair_success(case_summary: dict[str, Any]) -> bool:
+    return bool(case_summary.get("repair_success"))
 
 
 def _collect_case(case) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -242,6 +290,7 @@ def _records_from_case(case, job: RepairJob, generated_batch, result, case_summa
             "candidate_is_expected_module": bool(case.expected_module and features.get("module") == case.expected_module),
             "result_status": case_summary["result_status"],
             "repair_success": case_summary["repair_success"],
+            "test_passed": case_summary["test_passed"],
             "verified_by_test": case_summary["verified_by_test"],
             "verification_error": case_summary["verification_error"],
             "expected_statuses": list(case.expected_statuses),
@@ -257,13 +306,16 @@ def _ltr_record(record: dict[str, Any]) -> dict[str, Any]:
     features = record.get("validated_candidate_features") or record.get("candidate_features") or {}
     ltr_features = dict(features.get("ltr_features") or {}) if isinstance(features, dict) else {}
     label = _ltr_label(record)
+    has_candidate = bool(record.get("candidate_id")) and bool(ltr_features)
     return {
         "schema_version": 1,
         "source": record.get("source"),
+        "record_kind": "candidate" if has_candidate else "no_candidate",
         "query_id": record.get("attempt_id"),
         "case_id": record.get("case_id"),
         "candidate_id": record.get("candidate_id"),
         "candidate_index": record.get("candidate_index"),
+        "has_candidate": has_candidate,
         "label": label,
         "candidate_selected": bool(record.get("candidate_selected")),
         "candidate_is_expected_module": bool(record.get("candidate_is_expected_module")),
@@ -271,9 +323,11 @@ def _ltr_record(record: dict[str, Any]) -> dict[str, Any]:
         "actual_selected": record.get("actual_selected"),
         "result_status": record.get("result_status"),
         "repair_success": bool(record.get("repair_success")),
+        "test_passed": bool(record.get("test_passed", record.get("verified_by_test"))),
         "verified_by_test": bool(record.get("verified_by_test")),
         "format": record.get("format"),
         "damage_flags": list(record.get("damage_flags") or []),
+        "query_features": _query_features(record),
         "features": ltr_features,
     }
 
@@ -331,12 +385,15 @@ def _case_summary(
     actual_selected = getattr(result, "module_name", None)
     status_ok = result is not None and result_status in case.expected_statuses
     module_ok = result is not None and (case.expected_module is None or actual_selected == case.expected_module)
+    test_passed = bool(status_ok and module_ok and verified_by_test)
+    repair_success = bool(test_passed and result_status in {"repaired", "partial"})
     return {
         "case_id": case.case_id,
         "expected_module": case.expected_module,
         "actual_selected": actual_selected,
         "result_status": result_status,
-        "repair_success": bool(status_ok and module_ok and verified_by_test),
+        "repair_success": repair_success,
+        "test_passed": test_passed,
         "verified_by_test": bool(verified_by_test),
         "verification_error": verification_error,
         "collection_status": collection_status,
@@ -364,6 +421,7 @@ def _empty_record(case, job, result, case_summary: dict[str, Any]) -> dict[str, 
         "candidate_is_expected_module": False,
         "result_status": case_summary["result_status"],
         "repair_success": case_summary["repair_success"],
+        "test_passed": case_summary["test_passed"],
         "verified_by_test": case_summary["verified_by_test"],
         "verification_error": case_summary["verification_error"],
         "expected_statuses": list(case.expected_statuses),
@@ -371,6 +429,16 @@ def _empty_record(case, job, result, case_summary: dict[str, Any]) -> dict[str, 
         "damage_flags": list(case.flags),
         "selection_summary": _selection_summary(result),
         "generation_summary": {"candidate_count": 0},
+    }
+
+
+def _query_features(record: dict[str, Any]) -> dict[str, Any]:
+    damage_flags = list(record.get("damage_flags") or [])
+    return {
+        "format": record.get("format"),
+        "damage_flag_count": len(damage_flags),
+        "has_expected_module": 1 if record.get("expected_module") else 0,
+        "result_status": record.get("result_status"),
     }
 
 
